@@ -23,6 +23,9 @@ toolchains, and security-sensitive browser automation. `AGENTS.md` is the planni
 - Local profiles and configuration/plugin export/import without browsing secrets. Optional sync
   provider API; no required account. Framework and default browser are open source.
 - Docs cover configuration, plugins, native UI, automation, performance, and custom distributions.
+- Clarification: Chromium owns web-page rendering and browser-engine services; Native owns the
+  surrounding interface. Commands and events cross a trusted host adapter. OS window ownership
+  can follow whichever integration path supports that separation.
 
 ## Current state and context
 
@@ -65,7 +68,7 @@ version for rollback and expose a trusted recovery interface independent of the 
 - [x] 2026-09-05: Product interview complete and implementation authorized.
 - [x] 2026-09-05: Created project directory and root Turborepo/tooling manifests.
 - [x] 2026-09-05: Installed Native 0.10.1; minimal TypeScript/native app check and ReleaseFast build passed (18/18 steps).
-- [ ] Chromium/native composition and extension proof blocked on engine architecture decision.
+- [ ] Prove CEF-owned Chrome-style window with embedded Native surface and bidirectional events.
 - [x] 2026-09-05: Implemented pure public core policies for configuration, tabs, scoped grants,
       bounded declarative plugin proposals and budget state; eight regression tests pass after review.
 - [ ] Implement native default interface, runtime plugins and actual host enforcement.
@@ -97,10 +100,14 @@ version for rollback and expose a trusted recovery interface independent of the 
 - 2026-09-05, agent: request user choice between a downstream engine fork preserving both native UI
   and Chrome extensions, or deferring extension support. Browser host work awaits that choice;
   portable core and site verification continue independently.
+- 2026-09-05, clarification: supersede the previous either/or question. The user wants Native UI
+  surrounding a Chromium renderer with event/command integration, not a particular NSWindow owner.
+  Investigate Native embedding inside a CEF-owned window before selecting engine patches. Both
+  native UI and Chrome-extension requirements remain; no full engine fork has been approved.
 
 ## Outcomes and retrospective
 
-Implementation is incomplete pending the engine choice. A temporary Native toolchain smoke app
+Implementation is incomplete pending host composition verification. A temporary Native toolchain smoke app
 compiled successfully. The website and pure-domain core pass root `pnpm check`: exact dependencies,
 typecheck, oxlint, oxfmt, eight behavioral tests, and production builds. Frozen-lockfile install
 passes. Review fixes were re-reviewed; mobile docs search was corrected and manually rechecked.
@@ -108,8 +115,9 @@ No Hitchhiker browser executable, extension compatibility, resource benchmark, o
 integration has been verified. The live website can be started with
 `pnpm --filter @hitchhiker/site dev --host 127.0.0.1 --port 4173`.
 
-Next action: obtain the pending engine decision, then execute the corresponding first native
-composition proof described in `ENGINE-FEASIBILITY.md`. Do not infer approval from time elapsed.
+Next action: finish the official CEF wrapper build (CMake is missing), then implement the
+CEF-owned-window/Native-surface proof described in `ENGINE-FEASIBILITY.md`. Verify one page,
+native controls, commands and page events before addressing the CEF tab-model limitation.
 
 ## Revision notes
 
@@ -118,3 +126,5 @@ composition proof described in `ENGINE-FEASIBILITY.md`. Do not infer approval fr
   and pending fork choice. Continued only independent core/site work.
 - 2026-09-05: Recorded reviewed portable implementation and website verification; kept all native
   runtime, Chrome-extension and automation milestones explicitly unfinished.
+- 2026-09-05: Corrected premature full-fork conclusion after the user's renderer/UI clarification;
+  recorded the CEF-owned-window route, remaining tab boundary, and official CEF download evidence.

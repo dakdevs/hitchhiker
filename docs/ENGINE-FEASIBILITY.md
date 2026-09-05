@@ -6,8 +6,11 @@ Investigated 2026-09-05 against Native commit
 
 ## Finding
 
-The stock integration cannot satisfy both native-rendered browser controls and existing Chrome
-extensions. This is an engine architecture constraint, not a missing TypeScript wrapper.
+The existing Native CEF host cannot satisfy both native-rendered browser controls and existing
+Chrome extensions. That does **not** establish that a full Chromium fork is required. The user
+clarified the intended separation: Chromium renders page content; Native renders the surrounding
+browser interface; an event/command bridge connects Chromium, the trusted core and plugins.
+OS window ownership is an implementation detail, not a requirement that Native own the NSWindow.
 
 Native's macOS `cef_host.mm` embeds page views using `CefWindowInfo::SetAsChild`.
 The [pinned CEF macOS header](https://raw.githubusercontent.com/chromiumembedded/cef/5f7e671/include/internal/cef_types_mac.h)
@@ -35,14 +38,28 @@ not restore Chrome extensions in Alloy mode.
 - Live plugins require an isolated runtime and bounded public native-component protocol; Native
   TypeScript cores and release markup compile ahead of time.
 
-## Decision requiring user input
+## Alternate host composition to prove
 
-Preserve both native UI and Chrome extensions through a downstream Chromium/CEF fork, or defer
-Chrome-extension compatibility. The recommendation is a fork to preserve the accepted brief.
-The user was asked this question; approval is pending. Do not silently substitute a web-rendered
-shell, WKWebView, an old CEF build, or an unsandboxed browser.
+The previous fork-or-defer-extensions question was premature. First test a Chrome-style CEF-owned
+window with Native rendering in a reserved sidebar/topbar region. Both product requirements remain.
 
-## First fork acceptance, if selected
+CEF exposes [CefWindow::GetWindowHandle](https://raw.githubusercontent.com/chromiumembedded/cef/5f7e671/include/views/cef_window.h),
+whose macOS type is NSView*. Its [own sample](https://raw.githubusercontent.com/chromiumembedded/cef/5f7e671/tests/cefclient/browser/views_window_mac.mm)
+uses that view to access the NSWindow. Chrome-style BrowserView can omit the standard toolbar via
+`CEF_CTT_NONE`. Native's `EmbeddedApp` and `UiAppHost` support a host-owned event loop and render/input
+boundary, providing a candidate integration path that does not use `SetAsChild`.
+
+This is a plausible prototype, not verified production support. A Native NSView lies outside CEF's
+Views layout/focus management; [CEF's Views design discussion](https://github.com/chromiumembedded/cef/issues/1749)
+identifies native-widget integration risks. Keep page and Native regions disjoint for the first test.
+
+The [pinned runtime contract](https://raw.githubusercontent.com/chromiumembedded/cef/5f7e671/include/internal/cef_types_runtime.h)
+also limits a Chrome-style window to one Chrome-style BrowserView. Multiple live tabs therefore
+still need a browser-host/tab-model adapter, potentially a maintained CEF patch. Do not simulate
+tab support by silently destroying inactive pages or discarding their state. Scope any engine
+changes from prototype evidence rather than assuming a whole Chromium fork upfront.
+
+## First host acceptance
 
 1. One window contains a Native-rendered sidebar and Chromium page with correct overlay hit
    testing, text input, accessibility, resizing, fullscreen, and extension popups.
@@ -53,9 +70,9 @@ shell, WKWebView, an old CEF build, or an unsandboxed browser.
 5. A standard CDP client connects through the grant broker; a second profile remains inaccessible.
 6. Repeated create/hide/destroy cycles show no unbounded renderer or surface allocation growth.
 
-Keep an immutable external Chromium checkout and reviewed patch series; the Turborepo owns the
-framework, interface, SDK, automation, docs, and build orchestration. This is substantial engine
-work with ongoing upstream security-update maintenance.
+The Turborepo owns the framework, Native interface, SDK, automation, docs and host build. Pin
+upstream dependencies. If a CEF patch is necessary, maintain a narrow reviewed patch series and
+record its upstream update cost; a full Chromium checkout is not yet selected or approved.
 
 ## Toolchain evidence
 
@@ -66,3 +83,6 @@ work with ongoing upstream security-update maintenance.
 - `native build work/native-probe --yes` completed 18/18 build steps and produced a ReleaseFast
   executable. This proves the local toolchain, not Chromium embedding or a working browser.
 - No existing personal browser profiles were opened or imported during the investigation.
+- Follow-up: Native's prepared CEF 144 archive returned HTTP 404. The official pinned 252 MB CEF
+  distribution downloaded and extracted into ignored `work/cef`; wrapper compilation stopped
+  because CMake is not installed. No Chromium app was launched in this follow-up.
