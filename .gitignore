@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.turbo/
+.native/
+.zig-cache/
+zig-out/
+work/
+.DS_Store
+*.tsbuildinfo

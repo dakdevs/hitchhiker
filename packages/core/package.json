@@ -1,0 +1,21 @@
+{
+  "name": "@hitchhiker/core",
+  "version": "0.1.0",
+  "description": "Pure public browser-domain contracts for Hitchhiker.",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --experimental-strip-types test/*.test.ts"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "hitchhiker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "lint": "oxlint --deny-warnings .",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "check": "pnpm check:dependencies && pnpm typecheck && pnpm lint && pnpm format:check && pnpm test && pnpm build",
+    "check:dependencies": "node scripts/check-dependencies.mjs"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "0.10.1",
+    "oxfmt": "0.66.0",
+    "oxlint": "1.81.0",
+    "turbo": "2.10.12",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=24.19.0"
+  },
+  "packageManager": "pnpm@11.24.0"
+}
