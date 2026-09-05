@@ -51,8 +51,8 @@ const docs: Doc[] = [
     description: "A small, stable host with replaceable surfaces.",
     icon: Boxes,
     body: [
-      "Hitchhiker separates a Chromium host, a browser model, and presentation surfaces. The host owns profile isolation, permission decisions, extension compatibility, lifecycle, and performance policy. The model exposes typed browser state and operations. Surfaces render that model using native components or isolated web panels.",
-      "The default browser is a first-party surface, not a privileged exception. That is the central contract: a replacement interface should receive the same capabilities and constraints as the built-in experience.",
+      "Hitchhiker separates a Chromium host, a neutral browser model, and presentation surfaces. The host owns profile isolation, permission decisions, extension compatibility, lifecycle, and performance policy. The core exposes typed pages and viewports: pages hold browser state, while viewports are independent visible bindings that can show multiple pages concurrently.",
+      "The default interface is a first-party surface, not a privileged exception. It owns tab ordering, pins, sidebar or top layout, and per-instance selection. A plugin can replace that model entirely with workspaces, canvases, splits, or command-driven UI while receiving the same capabilities and constraints.",
       "This architecture is proposed and under active host integration. The initial target is macOS. The primary implementation challenge is a native CEF host; no published Hitchhiker release is available yet.",
     ],
     code: "Host (Chromium + policy)\n        │\nBrowser model ── public capability boundary\n   ┌────┼────┐\nNative UI  Web panels  MCP / CDP",
@@ -76,10 +76,10 @@ const docs: Doc[] = [
     description: "Opinionated defaults that remain easy to change.",
     icon: SlidersHorizontal,
     body: [
-      "The implemented core configuration is local-first and contains only portable settings: tab layout, colour scheme, inactivity sleep timing, and explicit always-awake origins. Its export/import helpers reject exports containing browser secrets such as cookies, history, passwords, tokens, sessions, and credentials.",
-      "The default layout is a sidebar; top tabs are an equally supported configuration. The core’s tab model treats pinning separately from lifecycle. A native host must still observe live protections and apply sleep decisions to Chromium tabs.",
+      "The implemented core configuration is local-first and contains only portable engine settings: colour scheme, inactivity sleep timing, and explicit always-awake origins. Its export/import helpers reject exports containing browser secrets such as cookies, history, passwords, tokens, sessions, and credentials. Page lifecycle and viewport bindings are separate from presentation state.",
+      "The first-party default interface owns sidebar or top-tab placement, ordering, pins, and selection in its own configuration and state. A native host must still observe live protections and apply sleep decisions to Chromium pages. Native UI and Chromium service integration remain in progress.",
     ],
-    code: 'import { defaultConfiguration, exportConfiguration } from "@hitchhiker/core";\n\nconst configuration = {\n  ...defaultConfiguration,\n  tabLayout: "top" as const,\n  alwaysAwakeOrigins: ["https://meet.example"],\n};\n\nconst exported = exportConfiguration(configuration);\nif (exported.ok) {\n  const portableJson = exported.value; // safe JSON string\n}',
+    code: 'import { defaultConfiguration, exportConfiguration } from "@hitchhiker/core";\nimport { defaultInterfaceConfiguration } from "@hitchhiker/default-interface";\n\nconst engineConfiguration = {\n  ...defaultConfiguration,\n  alwaysAwakeOrigins: ["https://meet.example"],\n};\nconst interfaceConfiguration = {\n  ...defaultInterfaceConfiguration,\n  tabPlacement: "top" as const,\n};\n\nconst exported = exportConfiguration(engineConfiguration);\nif (exported.ok) {\n  const portableJson = exported.value; // safe JSON string\n}',
   },
   {
     page: "plugins",
@@ -91,7 +91,7 @@ const docs: Doc[] = [
       "The proposed runtime plugin system would let plugins contribute controls, pages, commands, configuration, and complete replacement interfaces. Runtime installation, disabling, and rollback are host work still in progress. A protected system surface would retain permission review and recovery controls.",
       "The implemented core can parse a bounded, declarative plugin proposal; it does not execute plugins or grant host access. The intended host model gives plugin authors powerful browser building blocks without ambient access to every profile or site.",
     ],
-    code: '// Proposed plugin manifest\nexport default {\n  id: "com.example.focus",\n  capabilities: ["tabs.read", "tabs.write"],\n  contributes: { sidebar: "./src/sidebar.tsx" }\n};',
+    code: '// Proposed plugin manifest\nexport default {\n  id: "com.example.focus",\n  capabilities: ["pages.list", "pages.manage"],\n  contributes: { sidebar: "./src/sidebar.tsx" }\n};',
   },
   {
     page: "native-ui",
@@ -103,7 +103,7 @@ const docs: Doc[] = [
       "The proposed component library is deliberately opinionated about typography, density, focus states, accessibility, and motion. Native browser chrome and isolated web panels both depend on the host integration, which is not released.",
       "A framework surface is intended to replace the whole application shell. Native UI is the preferred path for browser controls; web panels must communicate through an explicit bridge and never become a way around permission or profile isolation.",
     ],
-    code: "// Illustrative component contract\nexport function Sidebar({ tabs }: { tabs: BrowserTab[] }) {\n  return <NavRail>{tabs.map(TabRow)}</NavRail>;\n}",
+    code: "// Illustrative component contract\nexport function Sidebar({ pages }: { pages: BrowserPage[] }) {\n  return <NavRail>{pages.map(PageRow)}</NavRail>;\n}",
   },
   {
     page: "permissions",
@@ -112,7 +112,7 @@ const docs: Doc[] = [
     description: "Useful control without silent escalation.",
     icon: ShieldCheck,
     body: [
-      "Permission grants persist within their declared scope. A person can grant an automation client tab control, selected-site access, browser configuration access, plugin installation, or full browser control. A request that expands scope must be reviewed.",
+      "Permission grants persist within their declared scope. A person can grant an automation client page control, selected-site access, browser configuration access, plugin installation, or full browser control. A request that expands scope must be reviewed.",
       "The host keeps certain paths outside replacement UI: permission prompts, profile recovery, and Chromium security boundaries. Chrome extension compatibility is a goal under investigation, not a compatibility promise. Any integration must preserve Chromium’s extension and site isolation rules.",
     ],
     code: '// Capability prompts are explicit and reviewable\nrequestCapability({\n  capability: "sites.read",\n  scope: ["https://docs.example.com/*"]\n});',
@@ -127,7 +127,7 @@ const docs: Doc[] = [
       "MCP is the intended automation interface. It maps its tools onto the same capability model used by plugins and the default UI, so an agent’s authority is visible and revocable.",
       "CDP is a separate developer-control feature. It is intended to be disabled by default, bound locally by default, and explicitly enabled per profile. Raw CDP can access sensitive browsing data, so it is not a substitute for scoped MCP tools. The MCP and CDP endpoints are proposed; neither is published.",
     ],
-    code: '// Proposed MCP tool shape\nawait browser.tabs.create({\n  url: "https://example.com",\n  profile: "work"\n});',
+    code: '// Proposed MCP tool shape\nawait browser.pages.create({\n  url: "https://example.com",\n  profile: "work"\n});',
   },
   {
     page: "performance",
@@ -324,7 +324,7 @@ function Home({ onNavigate }: { onNavigate: (page: Page) => void }) {
             icon={PanelLeft}
             number="01"
             title="A calm starting point"
-            text="Sidebar tabs and pinned spaces are the default. Top tabs remain one configuration away."
+            text="The default interface provides sidebar or top tabs, ordering, pins, and selection. Plugins can replace it with any workspace model."
           />
           <Feature
             icon={Puzzle}

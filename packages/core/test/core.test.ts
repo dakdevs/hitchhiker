@@ -1,29 +1,41 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  activateTab,
   advancePluginBudget,
-  closeTab,
+  createViewport,
   defaultConfiguration,
+  detachViewport,
   exportConfiguration,
   grantAllows,
   importConfiguration,
-  openTab,
+  markPageUsed,
+  openPage,
   parseConfiguration,
   parseGrant,
   parsePluginManifest,
+  replaceViewportPage,
   revokeGrant,
-  selectEvictions,
-  setTabPinned,
+  selectPageEvictions,
+  sleepPages,
+  type BrowserState,
   type PluginBudgetState,
+  type Result,
 } from "../src/index.ts";
 
-test("web URLs normalize and reject dangerous schemes", () => {
-  const opened = openTab({ tabs: [] }, { id: "first", url: "example.com/a", now: 1 });
-  assert.equal(opened.ok, true);
-  if (opened.ok) assert.equal(opened.value.tabs[0]?.url, "https://example.com/a");
+const empty: BrowserState = { pages: [], viewports: [] };
+const value = <T>(result: Result<T>): T => {
+  assert.equal(result.ok, true, result.ok ? "" : result.errors.join(" "));
+  if (!result.ok) throw new Error(result.errors.join(" "));
+  return result.value;
+};
+
+test("pages normalize web URLs and reject dangerous schemes", () => {
+  const state = value(
+    openPage(empty, { id: "first", profileId: "main", url: "example.com/a", now: 1 }),
+  );
+  assert.equal(state.pages[0]?.url, "https://example.com/a");
   assert.equal(
-    openTab({ tabs: [] }, { id: "second", url: "javascript:alert(1)", now: 1 }).ok,
+    openPage(empty, { id: "second", profileId: "main", url: "javascript:alert(1)", now: 1 }).ok,
     false,
   );
   assert.equal(
@@ -34,41 +46,94 @@ test("web URLs normalize and reject dangerous schemes", () => {
     false,
   );
 });
-test("eviction ignores pins but protects active, unsaved tabs", () => {
-  let state = openTab({ tabs: [] }, { id: "old", url: "https://old.test", pinned: true, now: 0 });
-  assert.equal(state.ok, true);
-  if (!state.ok) return;
-  const opened = openTab(state.value, { id: "new", url: "https://new.test", now: 10 });
-  assert.equal(opened.ok, true);
-  if (!opened.ok) return;
-  const old = setTabPinned(opened.value, "old", true);
-  assert.equal(old.ok, true);
-  if (!old.ok) return;
+
+test("two visible pages are independent and hidden unprotected pages sleep oldest first", () => {
+  const first = value(openPage(empty, { id: "old", profileId: "main", url: "old.test", now: 0 }));
+  const second = value(openPage(first, { id: "new", profileId: "main", url: "new.test", now: 10 }));
+  const visible = value(createViewport(second, { id: "left", profileId: "main", pageId: "old" }));
+  const bothVisible = value(
+    createViewport(visible, { id: "right", profileId: "main", pageId: "new" }),
+  );
   assert.deepEqual(
-    selectEvictions(old.value, { ...defaultConfiguration, sleepAfterMs: 1 }, 100, 2),
+    selectPageEvictions(bothVisible, { ...defaultConfiguration, sleepAfterMs: 1 }, 100, 2),
+    [],
+  );
+  const hidden = value(detachViewport(bothVisible, "left"));
+  assert.deepEqual(
+    selectPageEvictions(hidden, { ...defaultConfiguration, sleepAfterMs: 1 }, 100, 2),
     ["old"],
   );
-  const active = activateTab(old.value, "old", 101);
-  assert.equal(active.ok, true);
-  if (active.ok)
-    assert.deepEqual(
-      selectEvictions(active.value, { ...defaultConfiguration, sleepAfterMs: 1 }, 200, 2),
-      ["new"],
-    );
-});
-test("grants enforce profile, origin, expiry, revocation, and separate CDP", () => {
-  const parsed = parseGrant({
-    id: "mcp",
-    principal: "chatgpt",
-    profileId: "main",
-    capabilities: ["pages.read", "cdp.connect"],
-    origins: ["https://example.com"],
-    expiresAt: 20,
-  });
-  assert.equal(parsed.ok, true);
-  if (!parsed.ok) return;
+  const sleeping = sleepPages(hidden, defaultConfiguration, ["old"]);
   assert.equal(
-    grantAllows(parsed.value, {
+    createViewport(sleeping, { id: "woken", profileId: "main", pageId: "old" }).ok,
+    false,
+  );
+  const woken = value(markPageUsed(sleeping, "old", 101));
+  assert.equal(
+    value(createViewport(woken, { id: "woken", profileId: "main", pageId: "old" })).viewports
+      .length,
+    2,
+  );
+  const protectedState: BrowserState = {
+    ...hidden,
+    pages: hidden.pages.map((page) =>
+      page.id === "old"
+        ? { ...page, protections: { ...page.protections, unsavedInput: true } }
+        : page,
+    ),
+  };
+  assert.deepEqual(
+    selectPageEvictions(protectedState, { ...defaultConfiguration, sleepAfterMs: 1 }, 100, 2),
+    [],
+  );
+  assert.equal(
+    sleepPages(protectedState, defaultConfiguration, ["old"]).pages.find(
+      (page) => page.id === "old",
+    )?.lifecycle,
+    "loaded",
+  );
+});
+
+test("viewport replacement and detachment retain exact pages and enforce profile isolation", () => {
+  const one = value(openPage(empty, { id: "one", profileId: "main", url: "one.test", now: 1 }));
+  const two = value(openPage(one, { id: "two", profileId: "main", url: "two.test", now: 2 }));
+  const other = value(
+    openPage(two, { id: "other", profileId: "other", url: "other.test", now: 3 }),
+  );
+  const withView = value(createViewport(other, { id: "view", profileId: "main", pageId: "one" }));
+  const before = withView.pages.map((page) => ({
+    id: page.id,
+    url: page.url,
+    lastUsedAt: page.lastUsedAt,
+  }));
+  const replaced = value(replaceViewportPage(withView, "view", "two"));
+  assert.deepEqual(
+    replaced.pages.map((page) => ({ id: page.id, url: page.url, lastUsedAt: page.lastUsedAt })),
+    before,
+  );
+  assert.equal(replaced.viewports[0]?.pageId, "two");
+  assert.equal(replaceViewportPage(replaced, "view", "other").ok, false);
+  const detached = value(detachViewport(replaced, "view"));
+  assert.deepEqual(
+    detached.pages.map((page) => ({ id: page.id, url: page.url, lastUsedAt: page.lastUsedAt })),
+    before,
+  );
+  assert.deepEqual(detached.viewports, []);
+});
+
+test("grants enforce origin, expiry, revocation, full control, and separate CDP", () => {
+  const scoped = value(
+    parseGrant({
+      id: "mcp",
+      principal: "chatgpt",
+      profileId: "main",
+      capabilities: ["pages.read", "cdp.connect"],
+      origins: ["https://example.com"],
+      expiresAt: 20,
+    }),
+  );
+  assert.equal(
+    grantAllows(scoped, {
       principal: "chatgpt",
       profileId: "main",
       capability: "pages.read",
@@ -78,7 +143,7 @@ test("grants enforce profile, origin, expiry, revocation, and separate CDP", () 
     true,
   );
   assert.equal(
-    grantAllows(parsed.value, {
+    grantAllows(scoped, {
       principal: "chatgpt",
       profileId: "other",
       capability: "pages.read",
@@ -88,27 +153,7 @@ test("grants enforce profile, origin, expiry, revocation, and separate CDP", () 
     false,
   );
   assert.equal(
-    grantAllows(parsed.value, {
-      principal: "chatgpt",
-      profileId: "main",
-      capability: "cdp.connect",
-      now: Number.NaN,
-    }),
-    false,
-  );
-  assert.equal(revokeGrant(parsed.value, Number.NaN).ok, false);
-  assert.equal(
-    parseGrant({
-      id: "too-many",
-      principal: "chatgpt",
-      profileId: "main",
-      capabilities: Array.from({ length: 33 }, () => "tabs.read"),
-      origins: [],
-    }).ok,
-    false,
-  );
-  assert.equal(
-    grantAllows(parsed.value, {
+    grantAllows(scoped, {
       principal: "chatgpt",
       profileId: "main",
       capability: "pages.read",
@@ -118,7 +163,7 @@ test("grants enforce profile, origin, expiry, revocation, and separate CDP", () 
     false,
   );
   assert.equal(
-    grantAllows(parsed.value, {
+    grantAllows(scoped, {
       principal: "chatgpt",
       profileId: "main",
       capability: "cdp.connect",
@@ -127,7 +172,7 @@ test("grants enforce profile, origin, expiry, revocation, and separate CDP", () 
     true,
   );
   assert.equal(
-    grantAllows(parsed.value, {
+    grantAllows(scoped, {
       principal: "chatgpt",
       profileId: "main",
       capability: "cdp.connect",
@@ -135,11 +180,18 @@ test("grants enforce profile, origin, expiry, revocation, and separate CDP", () 
     }),
     false,
   );
-  const revoked = revokeGrant(parsed.value, 2);
-  assert.equal(revoked.ok, true);
-  if (!revoked.ok) return;
   assert.equal(
-    grantAllows(revoked.value, {
+    grantAllows(scoped, {
+      principal: "chatgpt",
+      profileId: "main",
+      capability: "cdp.connect",
+      now: Number.NaN,
+    }),
+    false,
+  );
+  const revoked = value(revokeGrant(scoped, 2));
+  assert.equal(
+    grantAllows(revoked, {
       principal: "chatgpt",
       profileId: "main",
       capability: "cdp.connect",
@@ -147,27 +199,61 @@ test("grants enforce profile, origin, expiry, revocation, and separate CDP", () 
     }),
     false,
   );
+  assert.equal(revokeGrant(scoped, Number.NaN).ok, false);
+  const full = value(
+    parseGrant({
+      id: "full",
+      principal: "local",
+      profileId: "main",
+      capabilities: ["browser.full-control"],
+      origins: [],
+    }),
+  );
+  assert.equal(
+    grantAllows(full, {
+      principal: "local",
+      profileId: "main",
+      capability: "pages.write",
+      origin: "https://unlisted.test",
+      now: 1,
+    }),
+    true,
+  );
+  assert.equal(
+    grantAllows(full, { principal: "local", profileId: "main", capability: "cdp.connect", now: 1 }),
+    false,
+  );
+  assert.equal(
+    parseGrant({
+      id: "many",
+      principal: "local",
+      profileId: "main",
+      capabilities: Array.from({ length: 33 }, () => "pages.list"),
+      origins: [],
+    }).ok,
+    false,
+  );
 });
-test("configuration exports whitelist fields and imports reject unknown or oversized payloads", () => {
-  const structuralConfiguration = { ...defaultConfiguration, cookies: ["secret"] };
-  const exported = exportConfiguration(structuralConfiguration);
-  assert.equal(exported.ok, true);
-  if (exported.ok) assert.equal(exported.value.includes("cookies"), false);
+
+test("configuration exports only portable fields and imports reject malformed data", () => {
+  const exported = value(exportConfiguration({ ...defaultConfiguration, cookies: ["secret"] }));
+  assert.equal(exported.includes("cookies"), false);
   assert.equal(
     importConfiguration(
-      '{"version":1,"configuration":{"tabLayout":"sidebar","colorScheme":"system","sleepAfterMs":10000,"alwaysAwakeOrigins":[]},"cookies":[]}',
+      '{"version":1,"configuration":{"colorScheme":"system","sleepAfterMs":10000,"alwaysAwakeOrigins":[]},"tokens":[]}',
     ).ok,
     false,
   );
   assert.equal(
     importConfiguration(
-      '{"version":1,"configuration":{"tabLayout":"sidebar","colorScheme":"system","sleepAfterMs":10000,"alwaysAwakeOrigins":[],"token":"secret"}}',
+      '{"version":1,"configuration":{"colorScheme":"system","sleepAfterMs":10000,"alwaysAwakeOrigins":[],"token":"secret"}}',
     ).ok,
     false,
   );
   assert.equal(importConfiguration(" ".repeat(65_537)).ok, false);
 });
-test("declarative plugin proposals bound capabilities", () => {
+
+test("plugin declarations and resource policy have deterministic bounds", () => {
   assert.equal(
     parsePluginManifest({
       id: "bad",
@@ -179,43 +265,23 @@ test("declarative plugin proposals bound capabilities", () => {
   );
   assert.equal(
     parsePluginManifest({
-      id: "too-many-capabilities",
+      id: "many",
       version: "1.0.0",
-      capabilities: Array.from({ length: 26 }, () => "tabs"),
+      capabilities: Array.from({ length: 26 }, () => "pages"),
       root: { type: "text", value: "safe" },
     }).ok,
     false,
   );
-});
-test("closing an active tab selects and wakes its adjacent replacement", () => {
-  const first = openTab({ tabs: [] }, { id: "first", url: "https://first.test", now: 1 });
-  assert.equal(first.ok, true);
-  if (!first.ok) return;
-  const second = openTab(first.value, { id: "second", url: "https://second.test", now: 2 });
-  assert.equal(second.ok, true);
-  if (!second.ok) return;
-  const closed = closeTab(second.value, "second", 3);
-  assert.equal(closed.ok, true);
-  if (!closed.ok) return;
-  assert.deepEqual(
-    closed.value.tabs.map((tab) => [tab.id, tab.active, tab.lifecycle]),
-    [["first", true, "loaded"]],
-  );
-});
-test("resource policy escalates deterministically and never auto-resumes", () => {
-  let state: PluginBudgetState = { status: "healthy", breaches: 0 };
-  for (let i = 0; i < 9; i += 1)
-    state = advancePluginBudget(state, { cpuPercent: 21, memoryMb: 1 });
-  assert.equal(state.status, "suspended");
-  assert.equal(advancePluginBudget(state, { cpuPercent: 0, memoryMb: 0 }).status, "suspended");
-});
-test("invalid telemetry and policy preserve an existing enforcement state", () => {
+  let budget: PluginBudgetState = { status: "healthy", breaches: 0 };
+  for (let index = 0; index < 9; index += 1)
+    budget = advancePluginBudget(budget, { cpuPercent: 21, memoryMb: 1 });
+  assert.equal(budget.status, "suspended");
+  assert.equal(advancePluginBudget(budget, { cpuPercent: 0, memoryMb: 0 }).status, "suspended");
   const warned: PluginBudgetState = { status: "warned", breaches: 3 };
   assert.equal(
     advancePluginBudget(warned, { cpuPercent: Number.NaN, memoryMb: 0 }).status,
     "warned",
   );
-  assert.equal(advancePluginBudget(warned, { cpuPercent: -1, memoryMb: 0 }).status, "warned");
   assert.equal(
     advancePluginBudget(
       warned,

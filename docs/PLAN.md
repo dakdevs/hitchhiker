@@ -26,6 +26,10 @@ toolchains, and security-sensitive browser automation. `AGENTS.md` is the planni
 - Clarification: Chromium owns web-page rendering and browser-engine services; Native owns the
   surrounding interface. Commands and events cross a trusted host adapter. OS window ownership
   can follow whichever integration path supports that separation.
+- Further clarification: the core must not impose tabs as its browsing model. It owns pages,
+  profile identity, lifecycle/protection signals and viewport bindings. Default tab order, pinning,
+  sidebar/top layout and per-interface selection belong to a replaceable first-party interface.
+  Several viewports may show distinct pages concurrently; replacing UI must retain page identity.
 
 ## Current state and context
 
@@ -43,7 +47,7 @@ The host has Apple Silicon, Xcode, Node 22.23.2 and pnpm 11.24.0; no global Nati
    extension loading and CDP. Capture limitations before designing against unsupported APIs.
    Promote the integration only when actual web navigation and control are demonstrated.
 2. **Framework and default browser:** introduce public state/configuration/component contracts,
-   isolated runtime plugin loading, persistent profiles, tab navigation and tab lifecycle. Verify
+   isolated runtime plugin loading, persistent profiles, page navigation and page lifecycle. Verify
    the default interface and an independently loaded alternate interface use the same API.
 3. **Automation and boundaries:** exercise MCP navigation/configuration/plugins and explicit CDP
    profile grants against the real host. Verify denied access, revocation, and plugin recovery.
@@ -71,6 +75,8 @@ version for rollback and expose a trusted recovery interface independent of the 
 - [ ] Prove CEF-owned Chrome-style window with embedded Native surface and bidirectional events.
 - [x] 2026-09-05: Implemented pure public core policies for configuration, tabs, scoped grants,
       bounded declarative plugin proposals and budget state; eight regression tests pass after review.
+- [ ] Refactor core tab assumptions into neutral pages/viewports and a public default-interface
+      package; prove simultaneous visible pages, UI replacement without page loss and profile isolation.
 - [ ] Implement native default interface, runtime plugins and actual host enforcement.
 - [ ] Implement MCP/CDP and security/resource enforcement.
 - [x] 2026-09-05: Implemented website and nine docs routes; checked desktop/mobile navigation,
@@ -104,20 +110,23 @@ version for rollback and expose a trusted recovery interface independent of the 
   surrounding a Chromium renderer with event/command integration, not a particular NSWindow owner.
   Investigate Native embedding inside a CEF-owned window before selecting engine patches. Both
   native UI and Chrome-extension requirements remain; no full engine fork has been approved.
+- 2026-09-05, user: tab behavior must be completely replaceable. Separate the underlying page
+  lifecycle from the default tab presentation; plugins may build alternate organization and layouts.
 
 ## Outcomes and retrospective
 
 Implementation is incomplete pending host composition verification. A temporary Native toolchain smoke app
 compiled successfully. The website and pure-domain core pass root `pnpm check`: exact dependencies,
-typecheck, oxlint, oxfmt, eight behavioral tests, and production builds. Frozen-lockfile install
+typecheck, oxlint, oxfmt, seven behavioral test groups, and portable production builds. Frozen-lockfile install
 passes. Review fixes were re-reviewed; mobile docs search was corrected and manually rechecked.
-No Hitchhiker browser executable, extension compatibility, resource benchmark, or CDP/MCP
-integration has been verified. The live website can be started with
+The separate host experiment compiled and started with a Native mount event, but no production
+Hitchhiker browser, extension compatibility, resource benchmark, or CDP/MCP integration is verified. The live website can be started with
 `pnpm --filter @hitchhiker/site dev --host 127.0.0.1 --port 4173`.
 
-Next action: finish the official CEF wrapper build (CMake is missing), then implement the
-CEF-owned-window/Native-surface proof described in `ENGINE-FEASIBILITY.md`. Verify one page,
-native controls, commands and page events before addressing the CEF tab-model limitation.
+Next action: after the Mac is unlocked, run the interactive checklist in `apps/host-probe/README.md`.
+Verify Native input, local Chromium navigation and the return event; then complete input/rendering
+composition and address the extension-compatible multi-page host. The experiment currently uses
+CPU reference rendering and a fixed timer, so it establishes no production performance claim.
 
 ## Revision notes
 
@@ -128,3 +137,6 @@ native controls, commands and page events before addressing the CEF tab-model li
   runtime, Chrome-extension and automation milestones explicitly unfinished.
 - 2026-09-05: Corrected premature full-fork conclusion after the user's renderer/UI clarification;
   recorded the CEF-owned-window route, remaining tab boundary, and official CEF download evidence.
+
+- 2026-09-05: Made tab presentation optional; recorded seven reviewed behavioral test groups,
+  reconciled closed-page presentation state, and added the compiled macOS host experiment.

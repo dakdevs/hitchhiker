@@ -24,12 +24,21 @@ Dependencies are pinned; `pnpm check:dependencies` enforces the policy.
 ## Repository
 
 - `apps/site`: marketing and developer documentation website.
-- `packages/core`: portable browser state, configuration, permission and resource policies.
+- `apps/host-probe`: explicit macOS Native/Chromium composition experiment.
+- `packages/core`: portable pages, viewport bindings, configuration, permission and resource policies.
+- `packages/default-interface`: optional tab ordering, pinning, placement and per-interface selection.
 - `docs/PLAN.md`: approved requirements, discoveries, progress, and remaining integration work.
 
 The browser UI is intended to be a first-party consumer of the same public APIs as custom
 interfaces. The trusted core retains permission enforcement, recovery and resource scheduling.
 Browser profiles are local; configuration sharing must never include cookies or credentials.
+
+Tabs are one presentation of pages. The core has no global active tab, tab order or pinning model.
+Independent interfaces can bind pages to multiple viewports, replace their layout and detach views
+without destroying the underlying pages. A custom interface can use a canvas, splits, workspaces or
+another organization model. These are portable state contracts; the native host must still implement
+and verify the corresponding rendering and lifecycle behavior.
+See `docs/PAGES-AND-VIEWPORTS.md` for the contract and remaining host requirements.
 
 ## Native SDK
 

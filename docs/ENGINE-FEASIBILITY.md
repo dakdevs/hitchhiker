@@ -84,5 +84,31 @@ record its upstream update cost; a full Chromium checkout is not yet selected or
   executable. This proves the local toolchain, not Chromium embedding or a working browser.
 - No existing personal browser profiles were opened or imported during the investigation.
 - Follow-up: Native's prepared CEF 144 archive returned HTTP 404. The official pinned 252 MB CEF
-  distribution downloaded and extracted into ignored `work/cef`; wrapper compilation stopped
-  because CMake is not installed. No Chromium app was launched in this follow-up.
+  distribution downloaded and extracted into ignored `work/cef`. Installed CMake 4.4.3 into an
+  ignored local Python environment (`work/build-tools`); the official CEF wrapper and macOS
+  `cefsimple.app`, including its helper bundles, compiled successfully with `USE_SANDBOX=ON`,
+  `PROJECT_ARCH=arm64` and `CMAKE_BUILD_TYPE=Release`. This proves build capability, not runtime
+  sandbox operation, Native composition, extensions or multi-page behavior.
+
+## Saved integration experiment
+
+`apps/host-probe` contains the pinned CEF sample adaptation, Native `UiAppHost` surface, and
+repeatable build script. The explicit `build:native` command completed successfully and produced
+`work/host-probe/build/Release/hitchhiker-probe.app`. Startup printed `HITCHHIKER_NATIVE_MOUNT`;
+renderer and GPU helper processes used the dedicated probe profile and seatbelt launch arguments.
+Those arguments do not by themselves establish complete runtime sandbox validation.
+
+The Native button is wired to a local HTML fixture and Chromium's title callback is wired back to
+the Native model. Neither interaction nor visual layout has been verified: computer control reported
+the Mac locked and requested manual unlock. Startup also reported unavailable password encryption;
+no credentials or personal browser profile were used. Do not treat this probe as a usable browser.
+
+The probe uses a 30 Hz timer and Native's CPU reference renderer with mouse input only. GPU
+composition, full input, accessibility, window transitions, Chrome extensions, multiple pages,
+MCP/CDP, plugin enforcement and performance measurements all remain open. The original stock CEF
+multi-page constraint still applies; the page/viewport core is intentionally independent of it.
+
+Build follow-up: parallel Make waited after linking while its stack was blocked in `read`.
+Building the wrapper in parallel and the final macOS resource/bundle target serially completed
+without that wait. The script now uses this split; final native compilation and bundle validation
+passed after the source review fixes.

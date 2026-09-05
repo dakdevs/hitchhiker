@@ -24,6 +24,8 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
+  apps/host-probe: {}
+
   apps/site:
     dependencies:
       '@vitejs/plugin-react':
@@ -53,6 +55,12 @@ importers:
         version: 8.2.2
 
   packages/core: {}
+
+  packages/default-interface:
+    dependencies:
+      '@hitchhiker/core':
+        specifier: workspace:0.1.0
+        version: link:../core
 
 packages:
 
