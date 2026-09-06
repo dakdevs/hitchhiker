@@ -458,3 +458,18 @@ native protection bit. A full Chromium checkout/build has not begun. In parallel
 portable customization packet will export only validated engine settings, default tab placement and
 plugin identity/hash/capability metadata. It must exclude page/session data, executable bytes, grants
 and runtime storage; importing a recipe must not authorize or start a plugin.
+
+The docs-only follow-up `a560870` exposed an existing plugin cancellation failure in GitHub Check
+`34057245706`: cancelling an update left its candidate revision instead of the known-good revision.
+Other runtime test cancellations were downstream of Turbo stopping after this failure. Current repair
+work examines the full stop/persist/start recovery boundary and ensures filesystem operations settle
+before rollback or mutation-lock release. Use deterministic interruption regressions, not a longer
+test sleep or an unexamined CI retry. Native navigation/replacement code is unchanged by this packet.
+The implemented repair and deterministic filesystem/worker barriers are described in
+`PLUGIN-CANCELLATION-PLAN.md`. All nine new regressions fail against the isolated pre-fix source and
+pass with the repair. Root checks and all 170 native-suite tests pass (91 runtime, 79 browser, no
+skips). The rebuilt developer app passes strict verification after relocation outside the checkout
+and all eleven bundle checks, including real plugin lifecycle and safe mode. Evidence is recorded in
+`work/plugin-cancellation-baseline-final.log`, `work/plugin-cancellation-root-final.log`,
+`work/plugin-cancellation-native-final.log` and `work/plugin-cancellation-bundle-{build,verify,native}.log`.
+Independent review accepted the final cancellation, durable recovery and lock boundaries.

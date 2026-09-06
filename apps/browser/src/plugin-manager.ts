@@ -160,6 +160,10 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       readonly stop: () => Effect.Effect<void>;
     }
   >();
+  let mutationPoisoned = false;
+  const poisonMutation = Effect.sync(() => {
+    mutationPoisoned = true;
+  });
   let runtimeFailure: (id: string, generation: number) => Effect.Effect<void, PluginManagerError>;
 
   const ensureDirectory = Effect.tryPromise({
@@ -236,41 +240,46 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     return decoded.value;
   });
   const save = (registry: Registry) =>
-    Effect.tryPromise({
-      try: async () => {
-        const encoded = JSON.stringify(registry);
-        if (Buffer.byteLength(encoded, "utf8") > RegistryLimit)
-          throw new Error("registry too large");
-        const [info, resolved] = await Promise.all([lstat(directory), realpath(directory)]);
-        if (!info.isDirectory() || info.isSymbolicLink() || resolved !== directory)
-          throw new Error("invalid directory");
-        const temporary = `${registryPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-        const fd = await open(
-          temporary,
-          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-          0o600,
-        );
-        try {
-          await fd.writeFile(encoded, "utf8");
-          await fd.sync();
-        } finally {
-          await fd.close();
-        }
-        try {
-          await rename(temporary, registryPath);
-          const root = await open(directory, constants.O_RDONLY | constants.O_NOFOLLOW);
+    Effect.uninterruptible(
+      Effect.tryPromise({
+        try: async () => {
+          const encoded = JSON.stringify(registry);
+          if (Buffer.byteLength(encoded, "utf8") > RegistryLimit)
+            throw new Error("registry too large");
+          const [info, resolved] = await Promise.all([lstat(directory), realpath(directory)]);
+          if (!info.isDirectory() || info.isSymbolicLink() || resolved !== directory)
+            throw new Error("invalid directory");
+          let temporary: string | undefined;
           try {
-            await root.sync();
-          } finally {
-            await root.close();
+            const created = `${registryPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+            const fd = await open(
+              created,
+              constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+              0o600,
+            );
+            temporary = created;
+            try {
+              await fd.writeFile(encoded, "utf8");
+              await fd.sync();
+            } finally {
+              await fd.close();
+            }
+            await rename(created, registryPath);
+            temporary = undefined;
+            const root = await open(directory, constants.O_RDONLY | constants.O_NOFOLLOW);
+            try {
+              await root.sync();
+            } finally {
+              await root.close();
+            }
+          } catch (error) {
+            if (temporary) await rm(temporary, { force: true });
+            throw error;
           }
-        } catch (error) {
-          await rm(temporary, { force: true });
-          throw error;
-        }
-      },
-      catch: () => failure("Could not persist plugin registry"),
-    });
+        },
+        catch: () => failure("Could not persist plugin registry"),
+      }),
+    );
   const put = (registry: Registry, plugin: StoredPlugin) =>
     save({
       version: 1,
@@ -305,7 +314,10 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     lock.withPermit(
       Effect.acquireUseRelease(
         acquireMutationLock(),
-        () => effect,
+        () =>
+          mutationPoisoned
+            ? Effect.fail(failure("Plugin registry recovery failed; restart required"))
+            : effect,
         () =>
           Effect.tryPromise({
             try: () => rm(mutationLockPath, { recursive: true }),
@@ -365,13 +377,15 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     return artifact;
   });
   const stopGeneration = (id: string, generation?: number) =>
-    Effect.gen(function* () {
-      const active = running.get(id);
-      if (!active || (generation !== undefined && active.generation !== generation)) return;
-      active.expectedStop = true;
-      running.delete(id);
-      yield* active.stop().pipe(Effect.catch(() => Effect.void));
-    });
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        const active = running.get(id);
+        if (!active || (generation !== undefined && active.generation !== generation)) return;
+        active.expectedStop = true;
+        running.delete(id);
+        yield* active.stop().pipe(Effect.catch(() => Effect.void));
+      }),
+    );
   const stop = (id: string) => stopGeneration(id);
   const start = Effect.fn("PluginManager.start")(function* (
     plugin: StoredPlugin,
@@ -482,6 +496,23 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
           ),
         );
     });
+  const recoverMutation = <A>(
+    old: StoredPlugin | undefined,
+    candidate: StoredPlugin,
+    reason: string,
+    mutation: Effect.Effect<A, PluginManagerError>,
+  ) =>
+    Effect.uninterruptibleMask((restore) =>
+      restore(mutation).pipe(
+        Effect.onError(() =>
+          Effect.uninterruptible(
+            restoreAfterFailedActivation(old, candidate, reason).pipe(
+              Effect.catch(() => poisonMutation),
+            ),
+          ),
+        ),
+      ),
+    );
   runtimeFailure = (id, failedGeneration) =>
     withMutationLock(
       Effect.gen(function* () {
@@ -521,7 +552,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
           starting: false,
           lastFailure: "Plugin host stopped",
         });
-      }),
+      }).pipe(Effect.tapError(() => poisonMutation)),
     );
   const restore = () =>
     options.safeMode
@@ -566,7 +597,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
                 ),
               );
             }
-          }),
+          }).pipe(Effect.tapError(() => poisonMutation)),
         );
   const list = () =>
     lock.withPermit(
@@ -608,21 +639,25 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
             : { enabled: !options.safeMode }),
           starting: old?.enabled === true,
         };
-        if (old?.enabled) yield* stop(old.id);
-        yield* put(registry, candidate);
-        if (!candidate.enabled) return;
-        yield* activate(
-          {
-            version: 1,
-            plugins: [...registry.plugins.filter((entry) => entry.id !== candidate.id), candidate],
-          },
+        yield* recoverMutation(
+          old,
           candidate,
-        ).pipe(
-          Effect.onError(() =>
-            restoreAfterFailedActivation(old, candidate, "Activation failed").pipe(
-              Effect.catch(() => Effect.void),
-            ),
-          ),
+          "Activation failed",
+          Effect.gen(function* () {
+            if (old?.enabled) yield* stop(old.id);
+            yield* put(registry, candidate);
+            if (!candidate.enabled) return;
+            yield* activate(
+              {
+                version: 1,
+                plugins: [
+                  ...registry.plugins.filter((entry) => entry.id !== candidate.id),
+                  candidate,
+                ],
+              },
+              candidate,
+            );
+          }),
         );
       }),
     );
@@ -634,12 +669,11 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         const plugin = registry.plugins.find((entry) => entry.id === id);
         if (!plugin) return yield* failure("Plugin is not installed");
         const candidate = { ...plugin, enabled: true };
-        yield* activate(registry, candidate).pipe(
-          Effect.onError(() =>
-            restoreAfterFailedActivation(undefined, candidate, "Activation failed").pipe(
-              Effect.catch(() => Effect.void),
-            ),
-          ),
+        yield* recoverMutation(
+          undefined,
+          candidate,
+          "Activation failed",
+          activate(registry, candidate),
         );
       }),
     );
@@ -649,8 +683,12 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         const registry = yield* load();
         const plugin = registry.plugins.find((entry) => entry.id === id);
         if (!plugin) return yield* failure("Plugin is not installed");
-        yield* stop(id);
-        yield* put(registry, { ...plugin, enabled: false, starting: false });
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            yield* stop(id);
+            yield* put(registry, { ...plugin, enabled: false, starting: false });
+          }).pipe(Effect.tapError(() => poisonMutation)),
+        );
       }),
     );
   const rollback = (id: string) =>
@@ -659,23 +697,27 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         const registry = yield* load();
         const plugin = registry.plugins.find((entry) => entry.id === id);
         if (!plugin || !plugin.previous) return yield* failure("Plugin has no previous version");
-        yield* stop(id);
         const next = {
           ...applyRevision(plugin, plugin.previous),
           previous: plugin.revision,
           starting: plugin.enabled,
         };
-        yield* put(registry, next);
-        if (!next.enabled) return;
-        yield* activate(
-          { version: 1, plugins: [...registry.plugins.filter((entry) => entry.id !== id), next] },
+        yield* recoverMutation(
+          plugin,
           next,
-        ).pipe(
-          Effect.onError(() =>
-            restoreAfterFailedActivation(plugin, next, "Rollback failed").pipe(
-              Effect.catch(() => Effect.void),
-            ),
-          ),
+          "Rollback failed",
+          Effect.gen(function* () {
+            yield* stop(id);
+            yield* put(registry, next);
+            if (!next.enabled) return;
+            yield* activate(
+              {
+                version: 1,
+                plugins: [...registry.plugins.filter((entry) => entry.id !== id), next],
+              },
+              next,
+            );
+          }),
         );
       }),
     );

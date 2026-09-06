@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { GrantStoreApi } from "@hitchhiker/runtime";
-import { Effect, Fiber } from "effect";
+import { Deferred, Effect, Fiber } from "effect";
 import { createPluginArtifactStore } from "../src/plugin-artifacts.ts";
 import { createPluginManager } from "../src/plugin-manager.ts";
 
@@ -230,21 +230,21 @@ test("cancelling an update stops its candidate and restores the known-good proce
             manifest: { ...baseManifest, version: "2.0.0" },
             code: "candidate",
           });
+          const candidateStarted = yield* Deferred.make<void>();
           const manager = yield* createPluginManager({
             profileRoot: root,
             grants,
             launch: (artifact, _grant, ready) =>
               artifact.manifest.version === "2.0.0"
-                ? Effect.never
+                ? Deferred.succeed(candidateStarted, undefined).pipe(Effect.andThen(Effect.never))
                 : Effect.sync(() => {
                     stableStarts++;
                   }).pipe(Effect.andThen(ready), Effect.andThen(Effect.never)),
           });
           yield* manager.install(stable.hash, "grant-1");
           const update = yield* manager.install(candidate.hash, "grant-1").pipe(Effect.forkScoped);
-          yield* Effect.sleep(40);
+          yield* Deferred.await(candidateStarted);
           yield* Fiber.interrupt(update);
-          yield* Effect.sleep(300);
           const [plugin] = yield* manager.list();
           assert.equal(plugin.hash, stable.hash);
           assert.equal(plugin.version, "1.0.0");
@@ -255,6 +255,69 @@ test("cancelling an update stops its candidate and restores the known-good proce
     );
   });
 });
+
+test(
+  "cancelling while stopping an update restores the prior revision",
+  { timeout: 10_000 },
+  async () => {
+    await withProfile(async (root) => {
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const artifacts = yield* createPluginArtifactStore(root);
+            const stable = yield* artifacts.stage({ manifest: baseManifest, code: "stable" });
+            const candidate = yield* artifacts.stage({
+              manifest: { ...baseManifest, version: "2.0.0" },
+              code: "candidate",
+            });
+            const stopping = yield* Deferred.make<void>();
+            const releaseStop = yield* Deferred.make<void>();
+            let stableStarts = 0;
+            const manager = yield* createPluginManager({
+              profileRoot: root,
+              grants,
+              launch: (artifact, _grant, ready) =>
+                artifact.manifest.version === "2.0.0"
+                  ? Effect.never
+                  : Effect.gen(function* () {
+                      yield* ready;
+                      stableStarts++;
+                      const first = stableStarts === 1;
+                      yield* Effect.never.pipe(
+                        Effect.ensuring(
+                          first
+                            ? Deferred.succeed(stopping, undefined).pipe(
+                                Effect.andThen(Deferred.await(releaseStop)),
+                              )
+                            : Effect.void,
+                        ),
+                      );
+                    }),
+            });
+            yield* manager.install(stable.hash, "grant-1");
+            try {
+              const update = yield* manager
+                .install(candidate.hash, "grant-1")
+                .pipe(Effect.forkScoped);
+              yield* Deferred.await(stopping).pipe(Effect.timeout(2_000));
+              const interrupted = yield* Fiber.interrupt(update).pipe(
+                Effect.forkScoped({ startImmediately: true }),
+              );
+              yield* Deferred.succeed(releaseStop, undefined);
+              yield* Fiber.join(interrupted).pipe(Effect.timeout(3_000));
+              const [plugin] = yield* manager.list();
+              assert.equal(plugin.hash, stable.hash);
+              assert.equal(plugin.running, true);
+              assert.equal(stableStarts, 2);
+            } finally {
+              yield* Deferred.succeed(releaseStop, undefined);
+            }
+          }),
+        ),
+      );
+    });
+  },
+);
 
 test("a health-window crash is rejected before promotion", async () => {
   await withProfile(async (root) => {
