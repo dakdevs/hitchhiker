@@ -490,3 +490,16 @@ The rebuilt app passes strict signature/import verification after relocation out
 and all eleven developer-bundle checks, including its packaged MCP customization path. Evidence is in
 `work/customization-bundle-{build,verify,native}.log`. This remains an ad hoc signed arm64 developer
 artifact; notarization and interactive macOS verification are still outstanding.
+
+Commit `1958afd` publishes portable customization; GitHub Check `34059298413` passed.
+The next guarded-discard packet now has a source-only draft under `apps/host-probe/cef-patches/`.
+CEF's translator generated the new wrappers and hashes; all 18 existing API versions plus both
+untracked versions pass hash validation. This is not a compiled engine change or automatic-discard
+implementation. The nine-file patch application, native guard implementation, full source build,
+runtime validation and integration gates are distinguished in its README. The build currently needs
+a larger APFS volume (150 GB documented minimum versus about 58 GB locally); a location was requested.
+Pinned source inspection also found that CEF's persistent internal CDP client triggers Chromium's
+debugger protection after freezing or inspection. The source draft now includes an explicit release
+operation for CEF's own client rather than weakening that protection. Native pending-call drainage,
+observer/cache reset, rejection recovery and external-debugger preservation must be verified before
+automatic discard is enabled.

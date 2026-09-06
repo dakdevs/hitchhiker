@@ -1,0 +1,231 @@
+diff --git a/include/cef_browser.h b/include/cef_browser.h
+index fa58de6b..5f5b0b5d 100644
+--- a/include/cef_browser.h
++++ b/include/cef_browser.h
+@@ -376,6 +376,55 @@ class CefBrowserHost : public virtual CefBaseRefCounted {
+   /*--cef()--*/
+   virtual bool TryCloseBrowser() = 0;
+ 
++#if CEF_API_ADDED(CEF_NEXT)
++  ///
++  /// Request a guarded proactive discard in Chrome style. This method must be
++  /// called on the browser process UI thread and never posts the operation.
++  /// Chromium's normal eligibility checks and a ten-minute background minimum
++  /// apply. A hidden native embedder may discard its selected tab only when
++  /// active-tab status is the sole protection reason. Every other protection
++  /// remains effective. Unsupported runtimes, wrong-thread calls and missing
++  /// state return CEF_PAGE_DISCARD_REJECTED.
++  ///
++  /// CEF_PAGE_DISCARD_ACCEPTED means the discard mechanism accepted the
++  /// request; it does not establish renderer termination or memory release.
++  /// Discard may synchronously replace this browser. Retain application-level
++  /// page identity and query the replacement browser before restoring it. The
++  /// embedder must separately guard its own visible viewports, pending
++  /// operations and policy.
++  ///
++  /*--cef(added=next,default_retval=CEF_PAGE_DISCARD_REJECTED)--*/
++  virtual cef_page_discard_result_t TryDiscardPage() = 0;
++
++  ///
++  /// Read the current Chrome tab lifecycle state without activating its
++  /// renderer. Call on the browser process UI thread. Missing or unsupported
++  /// state returns CEF_PAGE_DISCARD_STATE_UNKNOWN. A discarded result describes
++  /// Chrome's state, not proof of completed renderer teardown. Query a
++  /// replacement browser after discard; this browser object may already have
++  /// been retired.
++  ///
++  /*--cef(added=next,default_retval=CEF_PAGE_DISCARD_STATE_UNKNOWN)--*/
++  virtual cef_page_discard_state_t GetPageDiscardState() = 0;
++
++  ///
++  /// Release only CEF's in-process DevTools protocol connection for this
++  /// browser. Call on the browser process UI thread after draining pending
++  /// protocol calls and removing their observers. Outstanding replies and
++  /// enabled domains are lost; discard cached protocol references and register
++  /// fresh observers before the next call. External debugger connections are
++  /// not disconnected.
++  ///
++  /// Returns false on the wrong thread, for a missing browser, or if a callback
++  /// reopens CEF's connection during release. Returns true otherwise, including
++  /// when no CEF connection exists. This does not discard the page or bypass
++  /// Chromium's debugger protection. TryDiscardPage still checks eligibility
++  /// after release and rejects any remaining debugger connection.
++  ///
++  /*--cef(added=next)--*/
++  virtual bool ReleaseDevToolsSession() = 0;
++#endif
++
+   ///
+   /// Returns true if the browser is ready to be closed, meaning that the close
+   /// has already been initiated and that JavaScript unload handlers have
+diff --git a/include/internal/cef_types.h b/include/internal/cef_types.h
+index 6261bcea..c202844b 100644
+--- a/include/internal/cef_types.h
++++ b/include/internal/cef_types.h
+@@ -4135,6 +4135,26 @@ typedef struct _cef_task_info_t {
+   int is_gpu_memory_inflated;
+ } cef_task_info_t;
+ 
++#if CEF_API_ADDED(CEF_NEXT)
++///
++/// Immediate outcome of a guarded Chrome page discard request.
++///
++typedef enum {
++  CEF_PAGE_DISCARD_REJECTED = 0,
++  CEF_PAGE_DISCARD_ACCEPTED = 1,
++} cef_page_discard_result_t;
++
++///
++/// Current Chrome tab discard classification, independent of loading or
++/// freezing.
++///
++typedef enum {
++  CEF_PAGE_DISCARD_STATE_UNKNOWN = 0,
++  CEF_PAGE_DISCARD_STATE_NOT_DISCARDED = 1,
++  CEF_PAGE_DISCARD_STATE_DISCARDED = 2,
++} cef_page_discard_state_t;
++#endif
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/libcef/browser/browser_host_base.cc b/libcef/browser/browser_host_base.cc
+index d8f6b040..1c6409f1 100644
+--- a/libcef/browser/browser_host_base.cc
++++ b/libcef/browser/browser_host_base.cc
+@@ -459,6 +459,25 @@ bool CefBrowserHostBase::HasView() {
+   return is_views_hosted_;
+ }
+ 
++cef_page_discard_result_t CefBrowserHostBase::TryDiscardPage() {
++  return CEF_PAGE_DISCARD_REJECTED;
++}
++
++cef_page_discard_state_t CefBrowserHostBase::GetPageDiscardState() {
++  return CEF_PAGE_DISCARD_STATE_UNKNOWN;
++}
++
++bool CefBrowserHostBase::ReleaseDevToolsSession() {
++  if (!CEF_CURRENTLY_ON_UIT() || !GetWebContents()) {
++    return false;
++  }
++  CefRefPtr<CefBrowserHostBase> keep_alive(this);
++  // Clear ownership before destructor notifications can reenter this browser.
++  auto retiring = std::move(devtools_protocol_manager_);
++  retiring.reset();
++  return !devtools_protocol_manager_;
++}
++
+ bool CefBrowserHostBase::IsReadyToBeClosed() {
+   if (!CEF_CURRENTLY_ON_UIT()) {
+     DCHECK(false) << "called on invalid thread";
+diff --git a/libcef/browser/browser_host_base.h b/libcef/browser/browser_host_base.h
+index 069dbc21..11c2e166 100644
+--- a/libcef/browser/browser_host_base.h
++++ b/libcef/browser/browser_host_base.h
+@@ -220,6 +220,9 @@ class CefBrowserHostBase : public CefBrowserHost,
+   void SetZoomLevel(double zoomLevel) override;
+   bool HasView() override;
+   bool IsReadyToBeClosed() override;
++  cef_page_discard_result_t TryDiscardPage() override;
++  cef_page_discard_state_t GetPageDiscardState() override;
++  bool ReleaseDevToolsSession() override;
+   void SetFocus(bool focus) override;
+   int GetOpenerIdentifier() override;
+   void RunFileDialog(FileDialogMode mode,
+diff --git a/libcef/browser/chrome/chrome_browser_host_impl.cc b/libcef/browser/chrome/chrome_browser_host_impl.cc
+index 22eb68e1..ba347a8c 100644
+--- a/libcef/browser/chrome/chrome_browser_host_impl.cc
++++ b/libcef/browser/chrome/chrome_browser_host_impl.cc
+@@ -13,7 +13,9 @@
+ #include "cef/libcef/browser/thread_util.h"
+ #include "cef/libcef/browser/views/browser_view_impl.h"
+ #include "cef/libcef/common/net/url_util.h"
++#include "chrome/browser/performance_manager/policies/page_discarding_helper.h"
+ #include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/resource_coordinator/tab_lifecycle_unit_external.h"
+ #include "chrome/browser/ui/browser_commands.h"
+ #include "chrome/browser/ui/browser_navigator.h"
+ #include "chrome/browser/ui/browser_tabstrip.h"
+@@ -21,6 +23,9 @@
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
+ #include "chrome/common/pref_names.h"
++#include "components/performance_manager/public/performance_manager.h"
++#include "content/public/browser/visibility.h"
++#include "content/public/browser/web_contents.h"
+ 
+ // static
+ CefRefPtr<ChromeBrowserHostImpl> ChromeBrowserHostImpl::Create(
+@@ -215,6 +220,58 @@ bool ChromeBrowserHostImpl::TryCloseBrowser() {
+   return true;
+ }
+ 
++cef_page_discard_result_t ChromeBrowserHostImpl::TryDiscardPage() {
++  if (!CEF_CURRENTLY_ON_UIT()) {
++    return CEF_PAGE_DISCARD_REJECTED;
++  }
++  auto* contents = GetWebContents();
++  if (is_destroying_browser_ || !browser_ || !contents ||
++      contents->IsBeingDestroyed() || contents->IsLoading() ||
++      contents->GetVisibility() == content::Visibility::VISIBLE) {
++    return CEF_PAGE_DISCARD_REJECTED;
++  }
++  using performance_manager::PerformanceManager;
++  if (!PerformanceManager::IsAvailable()) {
++    return CEF_PAGE_DISCARD_REJECTED;
++  }
++  auto node = PerformanceManager::GetPrimaryPageNodeForWebContents(contents);
++  auto* helper =
++      performance_manager::policies::PageDiscardingHelper::GetFromGraph(
++          PerformanceManager::GetGraph());
++  if (!node || !helper) {
++    return CEF_PAGE_DISCARD_REJECTED;
++  }
++  // Discard can synchronously destroy the old WebContents and retire this host.
++  CefRefPtr<ChromeBrowserHostImpl> keep_alive(this);
++  return helper->TryDiscardPageForNativeEmbedder(node.get())
++             ? CEF_PAGE_DISCARD_ACCEPTED
++             : CEF_PAGE_DISCARD_REJECTED;
++}
++
++cef_page_discard_state_t ChromeBrowserHostImpl::GetPageDiscardState() {
++  if (!CEF_CURRENTLY_ON_UIT()) {
++    return CEF_PAGE_DISCARD_STATE_UNKNOWN;
++  }
++  auto* contents = GetWebContents();
++  if (is_destroying_browser_ || !browser_ || !contents ||
++      contents->IsBeingDestroyed()) {
++    return CEF_PAGE_DISCARD_STATE_UNKNOWN;
++  }
++  auto* lifecycle =
++      resource_coordinator::TabLifecycleUnitExternal::FromWebContents(contents);
++  if (!lifecycle) {
++    return CEF_PAGE_DISCARD_STATE_UNKNOWN;
++  }
++  switch (lifecycle->GetTabState()) {
++    case mojom::LifecycleUnitState::DISCARDED:
++      return CEF_PAGE_DISCARD_STATE_DISCARDED;
++    case mojom::LifecycleUnitState::ACTIVE:
++    case mojom::LifecycleUnitState::FROZEN:
++      return CEF_PAGE_DISCARD_STATE_NOT_DISCARDED;
++  }
++  return CEF_PAGE_DISCARD_STATE_UNKNOWN;
++}
++
+ CefWindowHandle ChromeBrowserHostImpl::GetWindowHandle() {
+   if (CEF_CURRENTLY_ON_UIT()) {
+     // Always return the most up-to-date window handle for a views-hosted
+diff --git a/libcef/browser/chrome/chrome_browser_host_impl.h b/libcef/browser/chrome/chrome_browser_host_impl.h
+index 98e7dde3..9265b821 100644
+--- a/libcef/browser/chrome/chrome_browser_host_impl.h
++++ b/libcef/browser/chrome/chrome_browser_host_impl.h
+@@ -74,6 +74,8 @@ class ChromeBrowserHostImpl : public CefBrowserHostBase {
+   // CefBrowserHost methods:
+   void CloseBrowser(bool force_close) override;
+   bool TryCloseBrowser() override;
++  cef_page_discard_result_t TryDiscardPage() override;
++  cef_page_discard_state_t GetPageDiscardState() override;
+   CefWindowHandle GetWindowHandle() override;
+   CefWindowHandle GetOpenerWindowHandle() override;
+   bool IsWindowRenderingDisabled() override { return false; }

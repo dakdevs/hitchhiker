@@ -1,0 +1,208 @@
+diff --git a/chrome/browser/performance_manager/policies/page_discarding_helper.cc b/chrome/browser/performance_manager/policies/page_discarding_helper.cc
+index c94febf..7efbe85 100644
+--- a/chrome/browser/performance_manager/policies/page_discarding_helper.cc
++++ b/chrome/browser/performance_manager/policies/page_discarding_helper.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "chrome/browser/performance_manager/policies/page_discarding_helper.h"
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <memory>
+ #include <utility>
+@@ -24,6 +25,8 @@
+ #include "components/performance_manager/public/graph/node_data_describer_util.h"
+ #include "components/performance_manager/public/graph/process_node.h"
+ #include "components/performance_manager/public/user_tuning/tab_revisit_tracker.h"
++#include "content/public/browser/visibility.h"
++#include "content/public/browser/web_contents.h"
+ 
+ using performance_manager::mechanism::PageDiscarder;
+ 
+@@ -313,6 +316,39 @@ bool PageDiscardingHelper::ImmediatelyDiscardMultiplePages(
+   return had_successful_discard;
+ }
+ 
++bool PageDiscardingHelper::TryDiscardPageForNativeEmbedder(
++    const PageNode* node) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  if (!node || node->GetGraph() != GetOwningGraph()) {
++    return false;
++  }
++  auto* policy = DiscardEligibilityPolicy::GetFromGraph(GetOwningGraph());
++  auto contents = node->GetWebContents();
++  if (!policy || !contents || contents->IsBeingDestroyed() ||
++      contents->IsLoading() ||
++      contents->GetVisibility() == content::Visibility::VISIBLE) {
++    return false;
++  }
++  constexpr auto reason = DiscardEligibilityPolicy::DiscardReason::PROACTIVE;
++  std::vector<CannotDiscardReason> protections;
++  const auto eligibility =
++      policy->CanDiscard(node, reason, base::Minutes(10), &protections);
++  const bool active_only =
++      eligibility == CanDiscardResult::kProtected && !protections.empty() &&
++      std::ranges::all_of(protections, [](CannotDiscardReason protection) {
++        return protection == CannotDiscardReason::kActiveTab;
++      });
++  if (eligibility != CanDiscardResult::kEligible && !active_only) {
++    return false;
++  }
++  DiscardEligibilityPolicy::AddDiscardAttemptMarker(
++      PageNodeImpl::FromNode(node));
++  // No task hop is allowed between eligibility and mutation. The PageNode and
++  // WebContents may be replaced synchronously; do not read them after this
++  // call.
++  return page_discarder_->DiscardPageNode(node, reason).has_value();
++}
++
+ void PageDiscardingHelper::SetMockDiscarderForTesting(
+     std::unique_ptr<PageDiscarder> discarder) {
+   page_discarder_ = std::move(discarder);
+diff --git a/chrome/browser/performance_manager/policies/page_discarding_helper.h b/chrome/browser/performance_manager/policies/page_discarding_helper.h
+index d1bd9f8..f566359 100644
+--- a/chrome/browser/performance_manager/policies/page_discarding_helper.h
++++ b/chrome/browser/performance_manager/policies/page_discarding_helper.h
+@@ -96,6 +96,12 @@ class PageDiscardingHelper
+   void SetMockDiscarderForTesting(
+       std::unique_ptr<mechanism::PageDiscarder> discarder);
+ 
++  // Synchronous native-embedder path. Retains proactive eligibility and a
++  // ten-minute background minimum, except for an otherwise eligible selected
++  // tab whose WebContents is non-visible. Rejects every other protection.
++  // A true result means the mechanism accepted discard, not memory was freed.
++  bool TryDiscardPageForNativeEmbedder(const PageNode* page_node);
++
+  protected:
+   void OnPassedToGraph(Graph* graph) override;
+   void OnTakenFromGraph(Graph* graph) override;
+diff --git a/chrome/browser/performance_manager/policies/page_discarding_helper_unittest.cc b/chrome/browser/performance_manager/policies/page_discarding_helper_unittest.cc
+index 78aa5c2..d2b448d 100644
+--- a/chrome/browser/performance_manager/policies/page_discarding_helper_unittest.cc
++++ b/chrome/browser/performance_manager/policies/page_discarding_helper_unittest.cc
+@@ -16,6 +16,10 @@
+ #include "build/build_config.h"
+ #include "chrome/browser/performance_manager/policies/policy_features.h"
+ #include "chrome/browser/performance_manager/test_support/page_discarding_utils.h"
++#include "components/performance_manager/public/decorators/page_live_state_decorator.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/test/test_browser_context.h"
++#include "content/public/test/web_contents_tester.h"
+ #include "testing/gmock/include/gmock/gmock.h"
+ #include "testing/gtest/include/gtest/gtest.h"
+ 
+@@ -64,6 +68,114 @@ class PageDiscardingHelperTest
+   std::unique_ptr<base::HistogramTester> histogram_tester_;
+ };
+ 
++class NativeEmbedderDiscardTest : public PageDiscardingHelperTest {
++ public:
++  void SetUp() override {
++    PageDiscardingHelperTest::SetUp();
++    context_ = std::make_unique<content::TestBrowserContext>();
++    contents_ = content::WebContentsTester::CreateTestWebContents(
++        context_.get(), nullptr);
++    contents_->WasHidden();
++    native_page_ =
++        CreateNode<PageNodeImpl>(contents_->GetWeakPtr(), "", GURL(),
++                                 PagePropertyFlags(), base::TimeTicks::Now());
++    native_frame_ = CreateFrameNodeAutoId(process_node(), native_page_.get());
++    testing::MakePageNodeDiscardable(native_page_.get(), task_env());
++  }
++
++  void TearDown() override {
++    native_frame_.reset();
++    native_page_.reset();
++    contents_.reset();
++    context_.reset();
++    PageDiscardingHelperTest::TearDown();
++  }
++
++ protected:
++  bool TryDiscard() {
++    return PageDiscardingHelper::GetFromGraph(graph())
++        ->TryDiscardPageForNativeEmbedder(native_page_.get());
++  }
++  PageLiveStateDecorator::Data* LiveState() {
++    return PageLiveStateDecorator::Data::GetOrCreateForPageNode(
++        native_page_.get());
++  }
++  std::unique_ptr<content::TestBrowserContext> context_;
++  std::unique_ptr<content::WebContents> contents_;
++  TestNodeWrapper<PageNodeImpl> native_page_;
++  TestNodeWrapper<FrameNodeImpl> native_frame_;
++};
++
++TEST_F(NativeEmbedderDiscardTest, EligiblePageAndAttemptMarker) {
++  EXPECT_CALL(*discarder(), DiscardPageNodeImpl(native_page_.get()))
++      .WillOnce(Return(true));
++  EXPECT_TRUE(TryDiscard());
++  EXPECT_FALSE(TryDiscard());
++}
++
++TEST_F(NativeEmbedderDiscardTest, HiddenActiveTabOnly) {
++  LiveState()->SetIsActiveTabForTesting(true);
++  EXPECT_EQ(kProtected,
++            CanDiscard(native_page_.get(), DiscardReason::PROACTIVE));
++  EXPECT_CALL(*discarder(), DiscardPageNodeImpl(native_page_.get()))
++      .WillOnce(Return(true));
++  EXPECT_TRUE(TryDiscard());
++}
++
++TEST_F(NativeEmbedderDiscardTest, ActiveTabKeepsEveryOtherLiveProtection) {
++  LiveState()->SetIsActiveTabForTesting(true);
++  using Data = PageLiveStateDecorator::Data;
++  for (auto protect : {
++           &Data::SetIsCapturingAudioForTesting,
++           &Data::SetIsDiscardedForTesting,
++           &Data::SetIsCapturingVideoForTesting,
++           &Data::SetIsBeingMirroredForTesting,
++           &Data::SetIsCapturingWindowForTesting,
++           &Data::SetIsCapturingDisplayForTesting,
++           &Data::SetIsConnectedToUSBDeviceForTesting,
++           &Data::SetIsConnectedToBluetoothDeviceForTesting,
++           &Data::SetIsPinnedTabForTesting,
++           &Data::SetIsDevToolsOpenForTesting,
++           &Data::SetUpdatedTitleOrFaviconInBackgroundForTesting,
++       }) {
++    (LiveState()->*protect)(true);
++    EXPECT_FALSE(TryDiscard());
++    (LiveState()->*protect)(false);
++  }
++  LiveState()->SetIsAutoDiscardableForTesting(false);
++  EXPECT_FALSE(TryDiscard());
++  LiveState()->SetIsAutoDiscardableForTesting(true);
++  EXPECT_CALL(*discarder(), DiscardPageNodeImpl(native_page_.get()))
++      .WillOnce(Return(true));
++  EXPECT_TRUE(TryDiscard());
++}
++
++TEST_F(NativeEmbedderDiscardTest, VisibleOrRecentlyVisibleActiveTab) {
++  LiveState()->SetIsActiveTabForTesting(true);
++  contents_->WasShown();
++  EXPECT_FALSE(TryDiscard());
++  contents_->WasHidden();
++  native_page_->SetIsVisible(true);
++  EXPECT_FALSE(TryDiscard());
++  native_page_->SetIsVisible(false);
++  EXPECT_FALSE(TryDiscard());
++  task_env().FastForwardBy(base::Minutes(10));
++  EXPECT_CALL(*discarder(), DiscardPageNodeImpl(native_page_.get()))
++      .WillOnce(Return(true));
++  EXPECT_TRUE(TryDiscard());
++}
++
++TEST_F(NativeEmbedderDiscardTest, MissingContentsAndFailedMutation) {
++  EXPECT_FALSE(PageDiscardingHelper::GetFromGraph(graph())
++                   ->TryDiscardPageForNativeEmbedder(page_node()));
++  EXPECT_FALSE(PageDiscardingHelper::GetFromGraph(graph())
++                   ->TryDiscardPageForNativeEmbedder(nullptr));
++  EXPECT_CALL(*discarder(), DiscardPageNodeImpl(native_page_.get()))
++      .WillOnce(Return(false));
++  EXPECT_FALSE(TryDiscard());
++  EXPECT_FALSE(TryDiscard());
++}
++
+ // Tests DiscardMultiplePages.
+ 
+ TEST_F(PageDiscardingHelperTest, DiscardMultiplePagesNoCandidate) {

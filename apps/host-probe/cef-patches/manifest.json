@@ -1,0 +1,61 @@
+{
+  "status": "uncompiled-draft",
+  "cefCommit": "5f7e6711711e0e4bb213e311458f60a6a2e8e3cc",
+  "chromiumCommit": "cd1d73dd77daadf4581dc29ca73482fc241e079d",
+  "files": {
+    "cef/include/cef_browser.h": {
+      "before": "a7452df48fcb85137f72d551d146e130b7433d55eb423a5587b7a727cc7531fb",
+      "after": "41c0eaefc983493974b774467edb9775ba5aeaeaf4776d5b5480b6d5ec31a5c9"
+    },
+    "cef/include/internal/cef_types.h": {
+      "before": "aaf3ba81d1aebc39c4710626c667dc6ec656c2d1e95eb4cd06731d0bef081994",
+      "after": "fd8223ba1934968f3c6436cc79d062564868cd98ca40edd108cbadb62f3c8e74"
+    },
+    "cef/libcef/browser/browser_host_base.h": {
+      "before": "f17c18e9147869d56ba52425e8b393494c38d37aa3bd3f030c2d5bdd055db9cc",
+      "after": "a3899e6265099e02a6c87cdc328e8b12ff188f478d1a3af75eff6565d3ebf265"
+    },
+    "cef/libcef/browser/browser_host_base.cc": {
+      "before": "35ae32729c862d0540b801476353b8070428dfd0452b39dc6741398e26082a16",
+      "after": "8dd9f7631e9739c15ff99d681daeb52910870a63a9b5a9b04bee108909f98599"
+    },
+    "cef/libcef/browser/chrome/chrome_browser_host_impl.h": {
+      "before": "680425d47b1960ae48fac509ee003ec4b8fd90eedf5f6e7e3fda5104eaf0c844",
+      "after": "b8d7ae25727754a1b6fb437f5a6335af69f3fe251418ef4c0e2a48248cf50e33"
+    },
+    "cef/libcef/browser/chrome/chrome_browser_host_impl.cc": {
+      "before": "e176c03781cbbe696024cea2e80eb8cc23146f69436350001b3d2c2eb87ab3a0",
+      "after": "fbc6ff2699afc2a7f82c888dfbdef64a1f4911b74ce8d269e44091650a57d44a"
+    },
+    "chromium/chrome/browser/performance_manager/policies/page_discarding_helper.h": {
+      "before": "3e694c0c80fa06c4781aa3c3ac5aa33c63b9622d3aaea97eac34698a3b8b1231",
+      "after": "e959522800a42f29f8ba42994ced4d4028ac9edf031ef8cf2570ea24374c97d9"
+    },
+    "chromium/chrome/browser/performance_manager/policies/page_discarding_helper.cc": {
+      "before": "6a24a186f6befde09b66c97c513877368c50a80387a8689d3c9791e22bc95555",
+      "after": "5ca7302d3d4fb1ca10ef4ecc4f98685f9c11dd9194308496ba697137adf63f69"
+    },
+    "chromium/chrome/browser/performance_manager/policies/page_discarding_helper_unittest.cc": {
+      "before": "2ff78a5fa45b08a9b57ed87c55e611ba0927dcc4dfad64f4b69e294fb3792c87",
+      "after": "3e53734ab97ea9cde7cae2b40c86b778b79a7d610ebbd898a00a7bd44204b596"
+    }
+  },
+  "patches": {
+    "cef-guarded-discard.patch": "55d60d965d623c5335a47f48ce87311b1704653f5305f5132b70217b1d16b7ee",
+    "chromium-guarded-discard.patch": "cc010b105741eda1a564e212c4f16b1fe5796c5901d033c6fef83c3f21973ac2"
+  },
+  "apiHashes": {
+    "999998": {
+      "comment": "Next version last updated September 06, 2026.",
+      "linux": "ebdf4b66296fe1539b514463f19aa10a4895453b",
+      "mac": "21ad7fb4dbd5d541aad783613926b50f0905105d",
+      "windows": "2e6e87df9348db44947ca7ffada19f1458a13883"
+    },
+    "999999": {
+      "comment": "Experimental version last updated September 06, 2026.",
+      "linux": "5a3f86ebf43e3c9e0cee56f7a7f01e2bbad8c77d",
+      "mac": "6da08896d954ac74e1cf9e1e812a82d076b8b8d5",
+      "windows": "8d7f5df182aa16ede904b86ad5abd71307758551"
+    }
+  }
+}

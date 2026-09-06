@@ -4,6 +4,12 @@ This is the next engine integration plan, not an implemented API. The production
 uses reversible freezing. Evidence and the rejected asynchronous extension route are recorded in
 [DISCARD-PLAN.md](DISCARD-PLAN.md).
 
+A [pinned source draft](../apps/host-probe/cef-patches/README.md) now adds the proposed engine seam.
+Its wrappers and hashes are generated, but the CEF/Chromium changes and drafted tests are uncompiled.
+It is not wired into the running browser. The source verifier establishes only exact-file patch
+application. A build volume with at least the documented 150 GB free remains required; the local
+volume had about 58 GB free at the feasibility check.
+
 ## Decision and scope
 
 Maintain a narrow patch against CEF `5f7e671` / Chromium
@@ -27,6 +33,15 @@ and [`PageDiscarder`](https://chromium.googlesource.com/chromium/src/+/cd1d73dd7
 Add synchronous UI-thread-only `CefBrowserHost::TryDiscardPage` and `GetPageDiscardState` methods.
 Their names and enum representations are proposals pending a source patch and compilation. Wrong
 thread, unsupported runtime, missing browser state and unknown eligibility must fail closed.
+
+Source preparation uncovered a required third method, `ReleaseDevToolsSession`: CEF retains its
+internal protocol client after a command, and Chromium protects attached page debuggers. Observer
+removal alone does not detach it. The draft explicitly releases only CEF's client; other debugger
+clients remain protected because Chromium emits its detached notification only when its last session
+leaves. The native integration must drain outstanding commands and clear registrations/DOM caches
+before release, then run the guarded discard. Teardown loses protocol-domain state even if discard
+rejects; reconcile freezing and reconnect with fresh observers. Do not bypass debugger protection.
+The pinned source links and required release/reentry tests are in the patch README.
 
 Resolve the current WebContents and primary PageNode. Call the proactive eligibility policy with a
 conservative ten-minute minimum background interval. Accept normal eligibility, or a protected result
