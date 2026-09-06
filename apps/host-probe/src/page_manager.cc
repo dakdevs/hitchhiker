@@ -66,6 +66,7 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
       CefRefPtr<CefBrowser> browser) const;
   void NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
                           const CefString& title);
+  void NotifyMainDocumentCommitted(CefRefPtr<CefBrowser> browser);
   void NotifyNavigationChanged(CefRefPtr<CefBrowser> browser);
   void NotifyAudioChanged(CefRefPtr<CefBrowser> browser, bool active);
   void NotifyCallChanged(CefRefPtr<CefBrowser> browser, bool active);
@@ -485,23 +486,24 @@ void PageManagerCore::NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
   Emit(std::move(event));
 }
 
-void PageManagerCore::NotifyNavigationChanged(CefRefPtr<CefBrowser> browser) {
+void PageManagerCore::NotifyMainDocumentCommitted(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
   auto page_id = PageIdForBrowser(browser);
   if (!page_id) return;
   auto page = pages_.find(*page_id);
   if (page == pages_.end()) return;
-  const bool clear_unsaved_input = page->second.unsaved_input;
+  if (!page->second.unsaved_input) return;
   page->second.unsaved_input = false;
+  EmitResources(*page_id, browser, page->second);
+}
+
+void PageManagerCore::NotifyNavigationChanged(CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  const auto page_id = PageIdForBrowser(browser);
+  if (!page_id) return;
   PageEvent event{PageEvent::Type::kNavigationChanged, *page_id};
   event.browser = browser;
   Emit(std::move(event));
-  if (clear_unsaved_input) {
-    // Event callbacks can synchronously start teardown. Re-find the record
-    // before using it after the navigation event is delivered.
-    page = pages_.find(*page_id);
-    if (page != pages_.end()) EmitResources(*page_id, browser, page->second);
-  }
 }
 
 void PageManagerCore::NotifyAudioChanged(CefRefPtr<CefBrowser> browser, bool active) {
@@ -768,6 +770,10 @@ std::optional<std::string> PageManager::PageIdForBrowser(
 void PageManager::NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
                                      const CefString& title) {
   core_->NotifyTitleChanged(browser, title);
+}
+
+void PageManager::NotifyMainDocumentCommitted(CefRefPtr<CefBrowser> browser) {
+  core_->NotifyMainDocumentCommitted(browser);
 }
 
 void PageManager::NotifyNavigationChanged(CefRefPtr<CefBrowser> browser) {

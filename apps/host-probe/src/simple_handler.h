@@ -83,6 +83,9 @@ class SimpleHandler : public CefClient,
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
 
   // CefLoadHandler methods:
+  void OnLoadStart(CefRefPtr<CefBrowser> browser,
+                   CefRefPtr<CefFrame> frame,
+                   TransitionType transition_type) override;
   void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool is_loading,
                             bool can_go_back, bool can_go_forward) override;
   void OnLoadError(CefRefPtr<CefBrowser> browser,

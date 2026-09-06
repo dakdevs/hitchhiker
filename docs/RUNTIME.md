@@ -47,6 +47,16 @@ guarantee. A direct handler that fails or is interrupted after shutdown begins p
 logical exit. Scope teardown closes child resources. Keep this unrestricted service inside the trusted
 broker. See [the shutdown contract and verification plan](ENGINE-DRAIN-PLAN.md).
 
+## Page resource protection
+
+Native resource snapshots report audio, capture, downloads and conservative unsaved-input protection.
+A native editable-key mutation protects the page until a new main document commits. Same-document
+fragment/history changes and subframe loads retain that flag; the main-frame `OnLoadStart` callback
+clears only unsaved input, preserving the other signals. This does not infer application save state.
+The native regression verifies a real Backspace edit, retention through those navigation cases and
+clearance on a replacement main document. Automatic resource policy currently freezes inactive
+pages; actual renderer discard is still being integrated as described in [DISCARD-PLAN.md](DISCARD-PLAN.md).
+
 ## Native composition
 
 `@hitchhiker/ui` provides serializable row, column, stack, scroll, text, button, input, icon, spacer

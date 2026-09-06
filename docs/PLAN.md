@@ -380,3 +380,34 @@ asynchronous-stream handoff limits are recorded in `ENGINE-DRAIN-PLAN.md`. The d
 rebuilt and relocated outside the checkout; strict signature/import checks and all four actual bundle
 integration cases pass. Evidence is in `work/engine-drain-bundle-{build,verify,native}.log`. Release
 signing/notarization and interactive macOS checks remain outstanding.
+
+Commit `a738281` publishes ordered shutdown; GitHub Check `34052824822` passed.
+
+### Preserve native input protection across same-document navigation
+
+Native unsaved-input protection now clears only at a new main document's post-commit `OnLoadStart`.
+Previously ordinary address/loading callbacks cleared it, including fragment/history navigation and
+subframe loads. Stale browsers remain fenced, and audio/call/download flags are preserved. Independent
+review accepted the four native changes.
+
+The regression performs a native macOS Backspace on a populated input, verifies the real text deletion
+and protection signal, then checks fragment/history/subframe retention and replacement-document
+clearance. The old binary fails on hash retention (`work/input-protection-baseline-backspace.log`);
+the patched binary passes (`work/input-protection-patched.log`). Earlier printable-key attempts did
+not reach that assertion: Chromium's native macOS CDP builder maps `char` to a key-up platform event.
+The regression is automated native input coverage, not a substitute for physical keyboard/IME checks.
+Its negative retention assertions use bounded observation after actual navigation conditions.
+Root `pnpm check` and all 154 native tests pass (90 runtime, 64 browser, no skips), recorded in
+`work/input-protection-root-check.log` and `work/input-protection-native-final.log`.
+
+The developer app was rebuilt and relocated outside the checkout to a path with spaces. Strict
+signature/import verification and all eight relocated checks pass, including managed extensions,
+MCP DOM, persistent plugins, corrupt-store safe mode and native resource/input protection. Evidence
+is in `work/input-protection-bundle-{build,verify,native}.log`. This remains an ad hoc signed arm64
+developer artifact; release signing/notarization and interactive macOS checks remain outstanding.
+
+The separate private discard proof verifies repeated replacement callback ordering, worker stop/wake
+through a page CDP session, and an exact logical-page → native CDP target → extension tab-ID join with
+duplicate URLs. CEF browser IDs differ from Chrome extension tab IDs despite the pinned header claim.
+`DISCARD-PLAN.md` records that correction and the broader debugger permission needed by the identity
+fixture. Production discard remains pending; generic replacement correctness is the next packet.

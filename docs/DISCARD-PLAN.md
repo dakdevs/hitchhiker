@@ -104,8 +104,9 @@ DOM references must invalidate on replacement. Test both callback orderings even
 only observes one, and keep failure recovery conservative.
 
 Only after that correctness packet add automatic discard through a trusted bundled worker and typed
-internal commands. Resolve logical page and expected generation to the current CEF identifier (which
-CEF documents as the Chrome extension tab ID). Treat missing/ambiguous workers, identity changes and
+internal commands. Resolve logical page and expected generation to an authoritatively mapped Chrome extension tab ID.
+Do not use the CEF browser identifier as that ID: the native proof below contradicts the header
+documentation for this Chrome runtime. Treat missing/ambiguous workers, identity changes and
 sent requests without a definite outcome as uncertainty; stop new discards until reconciled. Never
 substitute URL-only recreation. Recheck protection signals, current generation, active navigation and
 visible bindings immediately before a request. Keep pinning in the interface model.
@@ -114,3 +115,34 @@ Do not load the internal worker in raw-CDP launches. Those launches continue to 
 resource intervention. Ordinary user Chrome extensions can still replace/discard a page, so the
 replacement correctness path must remain active independently of the internal worker. The worker
 must not introduce any bridge accessible from web-page scripts.
+
+## Private control and callback evidence in progress
+
+An isolated instrumented host completed three discard/reload cycles using a fixed-key worker with
+only the `tabs` permission. It has no content scripts, host permissions, external messaging or
+web-accessible resources. The private CDP pipe selected the exact extension worker URL/type and
+invoked a fixed function. In all three cycles, the replacement browser was created before the old
+browser was destroyed; stale old-browser destruction was ignored. This compact proof does not repeat
+the earlier independent history/cookie checks.
+
+The pinned `cef_browser.h` says `GetIdentifier()` is also the extension API tab ID, but measured Chrome
+runtime values differ: CEF browser identifiers were `1 → 3 → 4 → 5`, while `chrome.tabs` returned large
+integer IDs. The initial fixture joined identities by its unique URL. Production must use an exact
+identity mapping that remains valid with duplicate URLs; adopting the header's claim would target the
+wrong tab. The additional identity proof below supplies that join.
+
+The corrected stop/wake proof attaches a flattened control-page CDP session. `ServiceWorker.enable`
+works there, reports the exact extension worker version, and accepts `stopWorker`/`startWorker`.
+Rediscovery returns a distinct worker target at the same exact URL with the expected fixed function.
+The browser-root endpoint alone returns method-not-found. The initial `Target.closeTarget` attempt
+ran unconditional host cleanup on a probe failure, so it cannot establish that closing the worker
+itself closed the host. Corrected evidence is captured before cleanup.
+
+A separate fixed-key fixture with the broader `debugger` permission successfully joins raw CDP page
+target IDs to `chrome.debugger.getTargets().id` and obtains their Chrome tab IDs. A further native
+proof opens two pages at the same URL and queries
+`Target.getTargetInfo` through each logical page's in-process CEF CDP agent. Each distinct target ID
+matches exactly one raw CDP target and debugger record with a distinct positive Chrome tab ID; this
+join never selects a page by URL. The debugger fixture is test-only; any production permission choice
+must account for its broader authority. Evidence is in ignored
+`work/discard-control-probe/`.

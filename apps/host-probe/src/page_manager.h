@@ -120,12 +120,16 @@ class PageManager : public CefBaseRefCounted {
   // The shared CefDisplayHandler should forward title changes here.
   void NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
                           const CefString& title);
+  // A main-frame OnLoadStart is post-commit and excludes same-document and
+  // pre-commit failed/cancelled navigations. Only it may clear conservative
+  // unsaved-input protection for the replacement document.
+  void NotifyMainDocumentCommitted(CefRefPtr<CefBrowser> browser);
   void NotifyNavigationChanged(CefRefPtr<CefBrowser> browser);
   void NotifyAudioChanged(CefRefPtr<CefBrowser> browser, bool active);
   void NotifyCallChanged(CefRefPtr<CefBrowser> browser, bool active);
   void NotifyDownloadChanged(CefRefPtr<CefBrowser> browser, bool active);
-  // This is deliberately conservative: keyboard edits protect a page until
-  // its main frame navigates. It does not claim to know application save state.
+  // This is deliberately conservative: keyboard edits protect a page until a
+  // new main document commits. It does not claim to know application save state.
   void NotifyContentEdited(CefRefPtr<CefBrowser> browser);
 
   bool empty() const;

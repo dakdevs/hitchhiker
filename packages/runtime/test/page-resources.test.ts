@@ -240,3 +240,220 @@ test(
     }
   },
 );
+
+test(
+  "real host retains native unsaved-input protection until a new main document commits",
+  { skip: !binary, timeout: 30_000 },
+  async () => {
+    if (!binary) return;
+    const directory = await mkdtemp(join(tmpdir(), "hitchhiker-input-protection-"));
+    const server = createServer((request, response) => {
+      if (request.url?.startsWith("/frame")) {
+        setTimeout(() => {
+          response.setHeader("Content-Type", "text/html; charset=utf-8");
+          response.end("<!doctype html><title>child frame</title>");
+        }, 100);
+        return;
+      }
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      if (request.url?.startsWith("/replacement")) {
+        response.end(
+          "<!doctype html><title>replacement</title><script>globalThis.replacementReady=true</script>",
+        );
+        return;
+      }
+      response.end(
+        '<!doctype html><title>input fixture</title><input id="input" value="x"><iframe id="child" src="/frame?initial"></iframe><script>globalThis.fixtureReady=true;globalThis.childLoadCount=0;document.querySelector("#child").addEventListener("load",()=>globalThis.childLoadCount++)</script>',
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const url = `http://127.0.0.1:${address.port}/`;
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const engine = yield* EngineConnection;
+          yield* engine.ready;
+          const evaluate = Effect.fn("test.inputProtectionEvaluate")(function* (
+            expression: string,
+          ) {
+            const raw = yield* engine.request("cdp.send", {
+              pageId: "input-protection",
+              method: "Runtime.evaluate",
+              params: { expression, returnByValue: true },
+            });
+            const result = raw as { readonly result?: { readonly value?: unknown } };
+            return result.result?.value;
+          });
+          const waitFor = Effect.fn("test.inputProtectionWaitFor")(function* (
+            expression: string,
+            message: string,
+          ) {
+            for (let tries = 0; tries < 100; ++tries) {
+              if (yield* evaluate(expression)) return;
+              yield* Effect.sleep(25);
+            }
+            assert.fail(
+              `${message}: ${JSON.stringify(yield* evaluate('({value:document.querySelector("#input")?.value,focused:document.hasFocus(),active:document.activeElement?.id})'))}`,
+            );
+          });
+          const resourceSignal = (unsavedInput: boolean) =>
+            engine.events.pipe(
+              Stream.filter(
+                (event) =>
+                  event.event === "pages.resourcesChanged" &&
+                  event.params.pageId === "input-protection" &&
+                  event.params.unsavedInput === unsavedInput,
+              ),
+              Stream.take(1),
+              Stream.runCollect,
+              Effect.forkScoped,
+            );
+          const assertRetained = Effect.fn("test.assertInputProtectionRetained")(function* (
+            action: Effect.Effect<void, unknown>,
+            observableState: string,
+            message: string,
+          ) {
+            const cleared = yield* resourceSignal(false);
+            yield* Effect.yieldNow;
+            yield* action;
+            yield* waitFor(observableState, message);
+            const result = yield* Effect.race(
+              Fiber.join(cleared).pipe(Effect.as("cleared")),
+              Effect.sleep(250).pipe(Effect.as("retained")),
+            );
+            assert.equal(result, "retained", message);
+          });
+
+          const initial = yield* resourceSignal(false);
+          yield* Effect.yieldNow;
+          yield* engine.request("pages.open", { id: "input-protection", url });
+          yield* Fiber.join(initial).pipe(Effect.timeout(5_000));
+          yield* waitFor(
+            "globalThis.fixtureReady === true && globalThis.childLoadCount > 0",
+            "input fixture and its initial subframe loaded",
+          );
+
+          yield* engine.request("viewports.set", {
+            viewports: [{ pageId: "input-protection", x: 0, y: 0, width: 800, height: 600 }],
+          });
+          const protectedInput = yield* resourceSignal(true);
+          yield* Effect.yieldNow;
+          assert.equal(
+            yield* evaluate(
+              'const input=document.querySelector("#input");input.focus();input.setSelectionRange(1,1);input.value',
+            ),
+            "x",
+            "CDP keyboard input targets the editable fixture",
+          );
+          // A platform Backspace exercises native pre-key handling and a real
+          // renderer edit. Chromium's macOS CDP builder cannot insert a native
+          // `char` event; its platform mapping treats that event as key-up.
+          for (const type of ["rawKeyDown", "keyUp"]) {
+            yield* engine.request("cdp.send", {
+              pageId: "input-protection",
+              method: "Input.dispatchKeyEvent",
+              params: {
+                type,
+                key: "Backspace",
+                code: "Backspace",
+                windowsVirtualKeyCode: 8,
+                nativeVirtualKeyCode: 51,
+              },
+            });
+          }
+          const protectedSignals = yield* Fiber.join(protectedInput).pipe(Effect.timeout(5_000));
+          assert.equal(
+            protectedSignals[0]?.params.unsavedInput,
+            true,
+            "native pre-key handling protected the edited page",
+          );
+          yield* waitFor(
+            'document.querySelector("#input").value === ""',
+            "native key input reached the editable document",
+          );
+
+          yield* assertRetained(
+            engine
+              .request("cdp.send", {
+                pageId: "input-protection",
+                method: "Runtime.evaluate",
+                params: {
+                  expression: 'location.hash="same-document";location.hash',
+                  returnByValue: true,
+                },
+              })
+              .pipe(Effect.asVoid),
+            'location.hash === "#same-document"',
+            "same-document hash navigation retained native unsaved-input protection",
+          );
+          yield* assertRetained(
+            engine
+              .request("cdp.send", {
+                pageId: "input-protection",
+                method: "Runtime.evaluate",
+                params: {
+                  expression: 'history.pushState({}, "", "#history");history.back();true',
+                  returnByValue: true,
+                },
+              })
+              .pipe(Effect.asVoid),
+            'location.hash === "#same-document"',
+            "history same-document navigation retained native unsaved-input protection",
+          );
+          yield* assertRetained(
+            engine
+              .request("cdp.send", {
+                pageId: "input-protection",
+                method: "Runtime.evaluate",
+                params: {
+                  expression:
+                    'document.querySelector("#child").src="/frame?delayed";globalThis.childLoadCount',
+                  returnByValue: true,
+                },
+              })
+              .pipe(Effect.asVoid),
+            "globalThis.childLoadCount > 1",
+            "delayed subframe navigation retained native unsaved-input protection",
+          );
+
+          const cleared = yield* resourceSignal(false);
+          yield* Effect.yieldNow;
+          yield* engine.request("cdp.send", {
+            pageId: "input-protection",
+            method: "Page.navigate",
+            params: { url: `${url}replacement` },
+          });
+          const clearedSignals = yield* Fiber.join(cleared).pipe(Effect.timeout(5_000));
+          assert.equal(
+            clearedSignals[0]?.params.unsavedInput,
+            false,
+            "a committed replacement main document cleared native unsaved-input protection",
+          );
+          yield* waitFor(
+            "globalThis.replacementReady === true",
+            "replacement main document committed after clearing protection",
+          );
+          yield* engine.request("window.close").pipe(Effect.catch(() => Effect.void));
+          assert.equal(yield* engine.exit, 0);
+        }).pipe(
+          Effect.provide(
+            EngineConnection.layer({
+              executable: binary,
+              profileRoot: join(directory, "profile"),
+              extensionManagement: false,
+            }),
+          ),
+          Effect.scoped,
+        ),
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);

@@ -128,6 +128,14 @@ void SimpleHandler::OnMediaAccessChange(CefRefPtr<CefBrowser> browser,
     page_manager_->NotifyCallChanged(browser, has_video_access || has_audio_access);
 }
 
+void SimpleHandler::OnLoadStart(CefRefPtr<CefBrowser> browser,
+                                CefRefPtr<CefFrame> frame,
+                                TransitionType) {
+  CEF_REQUIRE_UI_THREAD();
+  if (page_manager_ && frame->IsMain())
+    page_manager_->NotifyMainDocumentCommitted(browser);
+}
+
 void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool, bool, bool) {
   CEF_REQUIRE_UI_THREAD();
   if (page_manager_) page_manager_->NotifyNavigationChanged(browser);
