@@ -7,6 +7,8 @@
 
 #include "include/cef_app.h"
 
+int HostSmokeTestExitCode();
+
 // Implement application-level callbacks for the browser process.
 class SimpleApp : public CefApp, public CefBrowserProcessHandler {
  public:

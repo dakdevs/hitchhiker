@@ -5,8 +5,8 @@
 #include "src/simple_handler.h"
 
 #include <sstream>
-#include "src/native_sidebar.h"
 #include <string>
+#include <vector>
 
 #include "include/base/cef_callback.h"
 #include "include/cef_app.h"
@@ -15,6 +15,8 @@
 #include "include/views/cef_window.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
+#include "src/before_unload_dialog.h"
+#include "src/page_manager.h"
 
 namespace {
 
@@ -44,10 +46,40 @@ SimpleHandler* SimpleHandler::GetInstance() {
   return g_instance;
 }
 
+bool SimpleHandler::OnBeforePopup(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefFrame> frame,
+    int popup_id,
+    const CefString& target_url,
+    const CefString& target_frame_name,
+    WindowOpenDisposition target_disposition,
+    bool user_gesture,
+    const CefPopupFeatures& popup_features,
+    CefWindowInfo& window_info,
+    CefRefPtr<CefClient>& client,
+    CefBrowserSettings& settings,
+    CefRefPtr<CefDictionaryValue>& extra_info,
+    bool* no_javascript_access) {
+  CEF_REQUIRE_UI_THREAD();
+  if (shell_closing_) {
+    return true;
+  }
+
+  ++pending_popups_by_opener_[browser->GetIdentifier()];
+  ++pending_popup_count_;
+  return false;
+}
+
+void SimpleHandler::OnBeforePopupAborted(CefRefPtr<CefBrowser> browser,
+                                         int popup_id) {
+  CEF_REQUIRE_UI_THREAD();
+  FinishPendingPopup(browser->GetIdentifier());
+}
+
 void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser,
                                   const CefString& title) {
   CEF_REQUIRE_UI_THREAD();
-  if (title == "Hitchhiker fixture") NotifyNativeTitle(browser);
+  if (page_manager_) page_manager_->NotifyTitleChanged(browser, title);
 
   if (auto browser_view = CefBrowserView::GetForBrowser(browser)) {
     // Set the title of the window using the Views framework.
@@ -64,12 +96,34 @@ void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser,
 void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
 
+  if (!shell_closing_) {
+    is_closing_ = false;
+  }
+
   // Sanity-check the configured runtime style.
   CHECK_EQ(is_alloy_style_ ? CEF_RUNTIME_STYLE_ALLOY : CEF_RUNTIME_STYLE_CHROME,
            browser->GetHost()->GetRuntimeStyle());
 
   // Add to the list of existing browsers.
   browser_list_.push_back(browser);
+
+  if (browser->IsPopup()) {
+    FinishPendingPopup(browser->GetHost()->GetOpenerIdentifier());
+  }
+
+  // A popup may finish creation after root shutdown has already begun. Track
+  // it as unmanaged and close it through the normal beforeunload path so the
+  // root cannot outlive a newly-created extension or page popup.
+  if (shell_closing_ && unmanaged_close_requests_
+                            .insert(browser->GetIdentifier())
+                            .second) {
+    CefPostTask(TID_UI,
+                base::BindOnce(
+                    [](CefRefPtr<CefBrowser> retained_browser) {
+                      retained_browser->GetHost()->CloseBrowser(false);
+                    },
+                    browser));
+  }
 }
 
 bool SimpleHandler::DoClose(CefRefPtr<CefBrowser> browser) {
@@ -91,6 +145,19 @@ bool SimpleHandler::DoClose(CefRefPtr<CefBrowser> browser) {
 void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
 
+  // Release any AppKit sheet and retained CEF callback even if Chromium did
+  // not deliver OnResetDialogState before final browser teardown.
+  CancelNativeBeforeUnloadDialog(browser);
+
+  // CEF may destroy an opener before reporting aborts for its pending popup
+  // creations. Those creations cannot subsequently become live browsers.
+  const int browser_id = browser->GetIdentifier();
+  auto pending_it = pending_popups_by_opener_.find(browser_id);
+  if (pending_it != pending_popups_by_opener_.end()) {
+    pending_popup_count_ -= pending_it->second;
+    pending_popups_by_opener_.erase(pending_it);
+  }
+
   // Remove from the list of existing browsers.
   BrowserList::iterator bit = browser_list_.begin();
   for (; bit != browser_list_.end(); ++bit) {
@@ -100,10 +167,44 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     }
   }
 
-  if (browser_list_.empty()) {
-    // All browser windows have closed. Quit the application message loop.
-    CefQuitMessageLoop();
-  }
+  unmanaged_close_requests_.erase(browser_id);
+
+  MaybeFinishShellClose();
+}
+
+bool SimpleHandler::OnBeforeUnloadDialog(
+    CefRefPtr<CefBrowser> browser,
+    const CefString& message_text,
+    bool is_reload,
+    CefRefPtr<CefJSDialogCallback> callback) {
+  CEF_REQUIRE_UI_THREAD();
+  CefRefPtr<SimpleHandler> self(this);
+  return ShowNativeBeforeUnloadDialog(
+      browser, shell_ ? shell_->GetWindowHandle() : nullptr, message_text,
+      callback,
+      [self, browser](bool leave_page) {
+        CEF_REQUIRE_UI_THREAD();
+        if (leave_page) {
+          return;
+        }
+
+        const bool was_shell_closing = self->shell_closing_;
+        if (was_shell_closing) {
+          self->SetShellClosing(false);
+        }
+        const bool managed_page_recovered =
+            self->page_manager_ &&
+            self->page_manager_->AcknowledgeCloseCancelled(browser);
+        if (was_shell_closing && !managed_page_recovered &&
+            self->shell_close_cancelled_callback_) {
+          self->shell_close_cancelled_callback_();
+        }
+      });
+}
+
+void SimpleHandler::OnResetDialogState(CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  CancelNativeBeforeUnloadDialog(browser);
 }
 
 void SimpleHandler::OnLoadError(CefRefPtr<CefBrowser> browser,
@@ -133,6 +234,105 @@ void SimpleHandler::OnLoadError(CefRefPtr<CefBrowser> browser,
   frame->LoadURL(GetDataURI(ss.str(), "text/html"));
 }
 
+void SimpleHandler::SetShell(
+    CefWindow* shell,
+    PageManager* manager,
+    ShellCloseCancelledCallback close_cancelled_callback) {
+  CEF_REQUIRE_UI_THREAD();
+  shell_ = shell;
+  page_manager_ = manager;
+  shell_close_cancelled_callback_ = std::move(close_cancelled_callback);
+  if (!shell_) {
+    shell_closing_ = false;
+    unmanaged_close_requests_.clear();
+  }
+}
+
+void SimpleHandler::OnShellDestroyed() {
+  CEF_REQUIRE_UI_THREAD();
+  shell_ = nullptr;
+  page_manager_ = nullptr;
+  shell_close_cancelled_callback_ = {};
+  shell_closing_ = true;
+
+  std::vector<CefRefPtr<CefBrowser>> browsers(browser_list_.begin(),
+                                              browser_list_.end());
+  for (const auto& browser : browsers) {
+    browser->GetHost()->CloseBrowser(false);
+  }
+  MaybeFinishShellClose();
+}
+
+void SimpleHandler::SetShellClosing(bool closing) {
+  CEF_REQUIRE_UI_THREAD();
+  shell_closing_ = closing;
+  if (!closing) {
+    is_closing_ = false;
+    unmanaged_close_requests_.clear();
+  }
+}
+
+bool SimpleHandler::CanCloseShell() {
+  CEF_REQUIRE_UI_THREAD();
+  shell_closing_ = true;
+
+  std::vector<CefRefPtr<CefBrowser>> unmanaged_browsers;
+  for (const auto& browser : browser_list_) {
+    const int browser_id = browser->GetIdentifier();
+    if (page_manager_ && page_manager_->PageIdForBrowser(browser)) {
+      continue;
+    }
+    if (unmanaged_close_requests_.insert(browser_id).second) {
+      unmanaged_browsers.push_back(browser);
+    }
+  }
+
+  for (const auto& browser : unmanaged_browsers) {
+    browser->GetHost()->CloseBrowser(false);
+  }
+  return browser_list_.empty() && pending_popup_count_ == 0;
+}
+
+void SimpleHandler::FinishPendingPopup(int opener_browser_id) {
+  CEF_REQUIRE_UI_THREAD();
+  auto it = pending_popups_by_opener_.find(opener_browser_id);
+  if (it == pending_popups_by_opener_.end()) {
+    return;
+  }
+  DCHECK_GT(it->second, 0U);
+  DCHECK_GT(pending_popup_count_, 0U);
+  --it->second;
+  --pending_popup_count_;
+  if (it->second == 0) {
+    pending_popups_by_opener_.erase(it);
+  }
+  MaybeFinishShellClose();
+}
+
+void SimpleHandler::MaybeFinishShellClose() {
+  CEF_REQUIRE_UI_THREAD();
+  if (!shell_closing_ || !browser_list_.empty() || pending_popup_count_ != 0) {
+    return;
+  }
+
+  if (!shell_) {
+    CefQuitMessageLoop();
+    return;
+  }
+  if (shell_close_retry_posted_) {
+    return;
+  }
+
+  shell_close_retry_posted_ = true;
+  CefRefPtr<SimpleHandler> self(this);
+  CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<SimpleHandler> retained_self) {
+                retained_self->shell_close_retry_posted_ = false;
+                if (retained_self->shell_ && retained_self->shell_closing_) {
+                  retained_self->shell_->Close();
+                }
+              }, self));
+}
+
 void SimpleHandler::ShowMainWindow() {
   if (!CefCurrentlyOn(TID_UI)) {
     // Execute on the UI thread.
@@ -140,6 +340,7 @@ void SimpleHandler::ShowMainWindow() {
     return;
   }
 
+  if (shell_) { shell_->Show(); shell_->Activate(); return; }
   if (browser_list_.empty()) {
     return;
   }
@@ -164,6 +365,7 @@ void SimpleHandler::CloseAllBrowsers(bool force_close) {
     return;
   }
 
+  if (shell_) { shell_->Close(); return; }
   if (browser_list_.empty()) {
     return;
   }

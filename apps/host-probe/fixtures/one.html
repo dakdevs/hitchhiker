@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hitchhiker fixture one</title>
+    <script defer src="/fixture.js"></script>
+  </head>
+  <body data-fixture-page="one">
+    <main>
+      <h1>Fixture one</h1>
+      <p id="fixture-description">The first local browser-host fixture.</p>
+      <label for="fixture-input">Editable document value</label>
+      <input id="fixture-input" name="fixture-input" autocomplete="off" value="one draft" />
+      <p>Counter: <output id="fixture-counter" for="fixture-increment">0</output></p>
+      <button id="fixture-increment" type="button">Increment fixture one</button>
+      <p>Document instance nonce: <output id="fixture-nonce"></output></p>
+      <p id="fixture-extension-status" aria-live="polite">Extension status: not detected</p>
+    </main>
+  </body>
+</html>

@@ -202,5 +202,5 @@ int main(int argc, char* argv[]) {
     delegate = nil;
   }  // @autoreleasepool
 
-  return 0;
+  return HostSmokeTestExitCode();
 }

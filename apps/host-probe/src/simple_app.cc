@@ -3,194 +3,168 @@
 // can be found in the LICENSE file.
 
 #include "src/simple_app.h"
-
-#include <string>
 #include "src/native_sidebar.h"
-
-#include "include/cef_browser.h"
+#include "src/host_smoke_test.h"
 #include "include/cef_command_line.h"
-#include "include/views/cef_browser_view.h"
-#include "include/views/cef_window.h"
-#include "include/wrapper/cef_helpers.h"
+#include "src/page_manager.h"
 #include "src/simple_handler.h"
+#include "include/cef_app.h"
+#include "include/base/cef_callback.h"
+#include "include/views/cef_window.h"
+#include "include/views/cef_window_delegate.h"
+#include "include/wrapper/cef_helpers.h"
+#include "include/wrapper/cef_closure_task.h"
+#include <algorithm>
+#include <cstdio>
 
 namespace {
-
-// When using the Views framework this object provides the delegate
-// implementation for the CefWindow that hosts the Views-based browser.
-class SimpleWindowDelegate : public CefWindowDelegate {
+int smoke_exit_code = 0;
+class ShellWindowDelegate : public CefWindowDelegate {
  public:
-  SimpleWindowDelegate(CefRefPtr<CefBrowserView> browser_view,
-                       cef_runtime_style_t runtime_style,
-                       cef_show_state_t initial_show_state)
-      : browser_view_(browser_view),
-        runtime_style_(runtime_style),
-        initial_show_state_(initial_show_state) {}
+  explicit ShellWindowDelegate(CefRefPtr<SimpleHandler> handler) : handler_(handler) {}
 
   void OnWindowCreated(CefRefPtr<CefWindow> window) override {
-    // Add the browser view and show the window.
-    window->AddChildView(browser_view_);
-    native_sidebar_ = InstallNativeSidebar(window, browser_view_->GetBrowser());
-    browser_view_->SetBounds(CefRect(260, 0, 540, 600));
+    root_ = window;
+    self_test_ = CefCommandLine::GetGlobalCommandLine()->HasSwitch("self-test");
+    if (self_test_) smoke_exit_code = 1;
+    window->SetTitle("Hitchhiker");
+    manager_ = PageManager::Create(window, handler_, [this](const PageEvent& event) {
+      OnPageEvent(event);
+    });
+    handler_->SetShell(window.get(), manager_.get(), [this] { CancelClosing(); });
+    sidebar_ = InstallNativeSidebar(window, [this](NativeCommand command) {
+      if (closing_) return;
+      presentation_ = command;
+      ApplyLayout();
+    });
+    if (!sidebar_) {
+      fprintf(stderr, "HITCHHIKER_NATIVE_MOUNT_FAILED\n");
+      window->Close();
+      return;
+    }
+    window->Show();
+    if (!manager_->Open("one", "http://127.0.0.1:4319/one") ||
+        !manager_->Open("two", "http://127.0.0.1:4319/two")) {
+      fprintf(stderr, "HITCHHIKER_PAGE_CREATION_FAILED\n");
+      window->Close();
+      return;
+    }
+    ApplyLayout();
+  }
 
-    if (initial_show_state_ != CEF_SHOW_STATE_HIDDEN) {
-      window->Show();
+  void OnPageEvent(const PageEvent& event) {
+    if (event.type == PageEvent::kCreated) {
+      fprintf(stderr, "HITCHHIKER_PAGE_CREATED %s\n", event.page_id.c_str());
+      ApplyLayout();
+    } else if (event.type == PageEvent::kTitleChanged) {
+      if (event.page_id == "one" && event.title == "Hitchhiker fixture one") {
+        one_ready_ = true;
+        NotifyNativeState(sidebar_, "one.ready");
+      }
+      if (event.page_id == "two" && event.title == "Hitchhiker fixture two") {
+        two_ready_ = true;
+        NotifyNativeState(sidebar_, "two.ready");
+      }
+      if (self_test_ && one_ready_ && two_ready_ && !test_started_) {
+        test_started_ = true;
+        CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<PageManager> manager, CefRefPtr<CefWindow> root) {
+          RunHostSmokeTest(manager, root, [root](bool passed, std::string report) {
+            smoke_exit_code = passed ? 0 : 1;
+            fprintf(stderr, "HITCHHIKER_SMOKE_%s %s\n", passed ? "PASS" : "FAIL", report.c_str());
+            if (!root->IsClosed()) root->Close();
+          });
+        }, manager_, root_));
+      }
+      fprintf(stderr, "HITCHHIKER_PAGE_TITLE %s\n", event.page_id.c_str());
+    } else if (event.type == PageEvent::kCloseCancelled) {
+      CancelClosing();
+    } else if (event.type == PageEvent::kClosed) {
+      fprintf(stderr, "HITCHHIKER_PAGE_CLOSED %s remaining=%zu\n", event.page_id.c_str(), event.remaining_pages);
+      if (!closing_) ApplyLayout();
+      if (closing_ && event.remaining_pages == 0 && root_) {
+        CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<CefWindow> root) {
+          if (!root->IsClosed()) root->Close();
+        }, root_));
+      }
     }
   }
 
-  void OnWindowDestroyed(CefRefPtr<CefWindow> window) override {
-    DestroyNativeSidebar(native_sidebar_);
-    native_sidebar_ = nullptr;
-    browser_view_ = nullptr;
+  void CancelClosing() {
+    closing_ = false;
+    if (manager_) manager_->CancelCloseAll();
+    handler_->SetShellClosing(false);
+    ApplyLayout();
   }
 
-  void OnLayoutChanged(CefRefPtr<CefView> view, const CefRect& bounds) override {
-    if (browser_view_) browser_view_->SetBounds(CefRect(260, 0, std::max(1,bounds.width-260), bounds.height));
-    ResizeNativeSidebar(native_sidebar_, bounds.height);
-  }
-
-  bool CanClose(CefRefPtr<CefWindow> window) override {
-    // Allow the window to close if the browser says it's OK.
-    CefRefPtr<CefBrowser> browser = browser_view_->GetBrowser();
-    if (browser) {
-      return browser->GetHost()->TryCloseBrowser();
+  void ApplyLayout() {
+    if (!root_ || !manager_ || closing_) return;
+    const CefRect client = root_->GetClientAreaBoundsInScreen();
+    ResizeNativeSidebar(sidebar_, client.height);
+    const int width = std::max(2, client.width - 260);
+    const int height = std::max(1, client.height);
+    const bool have_one = !!manager_->BrowserForPage("one");
+    const bool have_two = !!manager_->BrowserForPage("two");
+    if (!have_one && have_two) presentation_ = NativeCommand::kShowTwo;
+    if (!have_two && have_one) presentation_ = NativeCommand::kShowOne;
+    std::vector<PageViewport> viewports;
+    if (!have_one && !have_two) {
+      manager_->SetViewports({});
+      return;
     }
-    return true;
+    if (presentation_ == NativeCommand::kSplit) {
+      viewports = {{"one", CefRect(260, 0, width / 2, height)},
+                   {"two", CefRect(260 + width / 2, 0, width - width / 2, height)}};
+    } else {
+      viewports = {{presentation_ == NativeCommand::kShowOne ? "one" : "two", CefRect(260, 0, width, height)}};
+    }
+    if (manager_->SetViewports(viewports)) {
+      const char* state = presentation_ == NativeCommand::kSplit ? "layout.split" :
+                          presentation_ == NativeCommand::kShowOne ? "layout.one" : "layout.two";
+      NotifyNativeState(sidebar_, state);
+      fprintf(stderr, "HITCHHIKER_VIEWPORTS %s\n", state);
+    }
   }
 
-  CefSize GetPreferredSize(CefRefPtr<CefView> view) override {
-    return CefSize(800, 600);
+  void OnWindowBoundsChanged(CefRefPtr<CefWindow>, const CefRect&) override { ApplyLayout(); }
+  void OnWindowFullscreenTransition(CefRefPtr<CefWindow>, bool complete) override {
+    if (complete) ApplyLayout();
   }
-
-  cef_show_state_t GetInitialShowState(CefRefPtr<CefWindow> window) override {
-    return initial_show_state_;
+  bool CanClose(CefRefPtr<CefWindow>) override {
+    closing_ = true;
+    const bool clients_drained = handler_->CanCloseShell();
+    const bool pages_drained = !manager_ || manager_->CloseAll() == 0;
+    return clients_drained && pages_drained;
   }
-
-  cef_runtime_style_t GetWindowRuntimeStyle() override {
-    return runtime_style_;
+  void OnWindowDestroyed(CefRefPtr<CefWindow>) override {
+    DestroyNativeSidebar(sidebar_);
+    sidebar_ = nullptr;
+    handler_->OnShellDestroyed();
+    manager_ = nullptr;
+    root_ = nullptr;
+    fprintf(stderr, "HITCHHIKER_SHELL_CLOSED\n");
   }
-
+  CefSize GetPreferredSize(CefRefPtr<CefView>) override { return CefSize(1100, 720); }
+  CefSize GetMinimumSize(CefRefPtr<CefView>) override { return CefSize(760, 480); }
+  cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
  private:
-  void* native_sidebar_ = nullptr;
-  CefRefPtr<CefBrowserView> browser_view_;
-  const cef_runtime_style_t runtime_style_;
-  const cef_show_state_t initial_show_state_;
-
-  IMPLEMENT_REFCOUNTING(SimpleWindowDelegate);
-  DISALLOW_COPY_AND_ASSIGN(SimpleWindowDelegate);
+  CefRefPtr<SimpleHandler> handler_;
+  CefRefPtr<CefWindow> root_;
+  CefRefPtr<PageManager> manager_;
+  void* sidebar_ = nullptr;
+  NativeCommand presentation_ = NativeCommand::kShowOne;
+  bool closing_ = false;
+  bool self_test_ = false;
+  bool one_ready_ = false;
+  bool two_ready_ = false;
+  bool test_started_ = false;
+  IMPLEMENT_REFCOUNTING(ShellWindowDelegate);
 };
-
-class SimpleBrowserViewDelegate : public CefBrowserViewDelegate {
- public:
-  explicit SimpleBrowserViewDelegate(cef_runtime_style_t runtime_style)
-      : runtime_style_(runtime_style) {}
-
-  bool OnPopupBrowserViewCreated(CefRefPtr<CefBrowserView> browser_view,
-                                 CefRefPtr<CefBrowserView> popup_browser_view,
-                                 bool is_devtools) override {
-    // Create a new top-level Window for the popup. It will show itself after
-    // creation.
-    CefWindow::CreateTopLevelWindow(new SimpleWindowDelegate(
-        popup_browser_view, runtime_style_, CEF_SHOW_STATE_NORMAL));
-
-    // We created the Window.
-    return true;
-  }
-
-  cef_runtime_style_t GetBrowserRuntimeStyle() override {
-    return runtime_style_;
-  }
-
- private:
-  const cef_runtime_style_t runtime_style_;
-
-  IMPLEMENT_REFCOUNTING(SimpleBrowserViewDelegate);
-  DISALLOW_COPY_AND_ASSIGN(SimpleBrowserViewDelegate);
-};
-
-}  // namespace
-
+}
+int HostSmokeTestExitCode() { return smoke_exit_code; }
 SimpleApp::SimpleApp() = default;
-
 void SimpleApp::OnContextInitialized() {
   CEF_REQUIRE_UI_THREAD();
-
-  CefRefPtr<CefCommandLine> command_line =
-      CefCommandLine::GetGlobalCommandLine();
-
-  // Check if Alloy style will be used.
-  cef_runtime_style_t runtime_style = CEF_RUNTIME_STYLE_DEFAULT;
-  bool use_alloy_style = command_line->HasSwitch("use-alloy-style");
-  if (use_alloy_style) {
-    runtime_style = CEF_RUNTIME_STYLE_ALLOY;
-  }
-
-  // SimpleHandler implements browser-level callbacks.
-  CefRefPtr<SimpleHandler> handler(new SimpleHandler(use_alloy_style));
-
-  // Specify CEF browser settings here.
-  CefBrowserSettings browser_settings;
-
-  std::string url;
-
-  // Check if a "--url=" value was provided via the command-line. If so, use
-  // that instead of the default URL.
-  url = command_line->GetSwitchValue("url");
-  if (url.empty()) {
-    url = "about:blank";
-  }
-
-  // Views is enabled by default (add `--use-native` to disable).
-  const bool use_views = !command_line->HasSwitch("use-native");
-
-  // If using Views create the browser using the Views framework, otherwise
-  // create the browser using the native platform framework.
-  if (use_views) {
-    // Create the BrowserView.
-    CefRefPtr<CefBrowserView> browser_view = CefBrowserView::CreateBrowserView(
-        handler, url, browser_settings, nullptr, nullptr,
-        new SimpleBrowserViewDelegate(runtime_style));
-
-    // Optionally configure the initial show state.
-    cef_show_state_t initial_show_state = CEF_SHOW_STATE_NORMAL;
-    const std::string& show_state_value =
-        command_line->GetSwitchValue("initial-show-state");
-    if (show_state_value == "minimized") {
-      initial_show_state = CEF_SHOW_STATE_MINIMIZED;
-    } else if (show_state_value == "maximized") {
-      initial_show_state = CEF_SHOW_STATE_MAXIMIZED;
-    }
-#if defined(OS_MAC)
-    // Hidden show state is only supported on MacOS.
-    else if (show_state_value == "hidden") {
-      initial_show_state = CEF_SHOW_STATE_HIDDEN;
-    }
-#endif
-
-    // Create the Window. It will show itself after creation.
-    CefWindow::CreateTopLevelWindow(new SimpleWindowDelegate(
-        browser_view, runtime_style, initial_show_state));
-  } else {
-    // Information used when creating the native window.
-    CefWindowInfo window_info;
-
-#if defined(OS_WIN)
-    // On Windows we need to specify certain flags that will be passed to
-    // CreateWindowEx().
-    window_info.SetAsPopup(nullptr, "cefsimple");
-#endif
-
-    // Alloy style will create a basic native window. Chrome style will create a
-    // fully styled Chrome UI window.
-    window_info.runtime_style = runtime_style;
-
-    // Create the first browser window.
-    CefBrowserHost::CreateBrowser(window_info, handler, url, browser_settings,
-                                  nullptr, nullptr);
-  }
+  CefRefPtr<SimpleHandler> handler(new SimpleHandler(false));
+  CefWindow::CreateTopLevelWindow(new ShellWindowDelegate(handler));
 }
-
-CefRefPtr<CefClient> SimpleApp::GetDefaultClient() {
-  // Called when a new browser window is created via Chrome style UI.
-  return SimpleHandler::GetInstance();
-}
+CefRefPtr<CefClient> SimpleApp::GetDefaultClient() { return SimpleHandler::GetInstance(); }

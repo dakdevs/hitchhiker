@@ -98,15 +98,37 @@ repeatable build script. The explicit `build:native` command completed successfu
 renderer and GPU helper processes used the dedicated probe profile and seatbelt launch arguments.
 Those arguments do not by themselves establish complete runtime sandbox validation.
 
-The Native button is wired to a local HTML fixture and Chromium's title callback is wired back to
-the Native model. Neither interaction nor visual layout has been verified: computer control reported
-the Mac locked and requested manual unlock. Startup also reported unavailable password encryption;
-no credentials or personal browser profile were used. Do not treat this probe as a usable browser.
+The initial single-page experiment passed desktop verification: Native button input navigated
+Chromium to a local fixture, the title event updated Native, typed text survived window zoom and
+restore, and closing the window exited cleanly. The check found and corrected bitmap inversion and
+Native mouse-event routing through the CEF-owned window.
 
-The probe uses a 30 Hz timer and Native's CPU reference renderer with mouse input only. GPU
-composition, full input, accessibility, window transitions, Chrome extensions, multiple pages,
-MCP/CDP, plugin enforcement and performance measurements all remain open. The original stock CEF
-multi-page constraint still applies; the page/viewport core is intentionally independent of it.
+### Multiple live pages
+
+The current adapter reserves the root for Native UI and creates one frameless CEF-owned child window
+per page, using `CefWindowDelegate::GetParentWindow`. Each child owns one Chrome BrowserView and shares
+the dedicated probe request context. The host maps stable page IDs to validated, nonoverlapping
+rectangles; omitted pages are hidden without destroying their documents. Sidebar selection and a
+split are presentations over the same page identities.
+
+The [pinned CEF window implementation](https://raw.githubusercontent.com/chromiumembedded/cef/5f7e671/libcef/browser/views/window_view.cc)
+and [Chromium macOS window bridge](https://chromium.googlesource.com/chromium/src/+/refs/tags/144.0.7559.59/components/remote_cocoa/app_shim/native_widget_ns_window_bridge.mm)
+provide this public parent-child window path. It avoids Native's Alloy-only `SetAsChild` integration.
+It does not remove CEF's one-BrowserView-per-Chrome-window limit: extensions see a distinct Chrome
+window for each Hitchhiker page. Full same-window Chrome tab/group semantics remain unresolved.
+
+The in-process DevTools test passed 100 alternating single/split viewport changes. Both pages retained
+distinct document nonces, input text and counters, including after 12 temporary-page create/close
+cycles that waited for both browser and window teardown. A dedicated unpacked MV3 extension on both local
+fixtures exchanged messages with its service worker and accessed extension storage. Shutdown drained
+both pages, a requested local popup and the shell, returning exit code zero. This proves those tested extension APIs only;
+action popups, declarative network rules, restart persistence and third-party compatibility remain open.
+
+Multi-page visual layout, first-click focus and fullscreen behavior still require desktop verification;
+the Mac locked again before those checks. The probe uses a 30 Hz CPU reference renderer with mouse
+input only. GPU composition, complete input/accessibility, production sandbox validation, multiple
+profiles, authenticated MCP/CDP, plugin enforcement and performance measurements remain open.
+Startup reported unavailable password encryption; no credentials or personal profile were used.
 
 Build follow-up: parallel Make waited after linking while its stack was blocked in `read`.
 Building the wrapper in parallel and the final macOS resource/bundle target serially completed

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build:native": "node scripts/build.mjs",
-    "dev": "node scripts/run.mjs"
+    "dev": "node scripts/run.mjs",
+    "test:native": "node scripts/run.mjs --self-test"
   }
 }

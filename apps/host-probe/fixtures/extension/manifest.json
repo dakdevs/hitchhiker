@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Hitchhiker Host Probe Test Extension",
+  "version": "0.1.0",
+  "description": "Test-only extension for the localhost:4319 browser host fixtures.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["http://127.0.0.1:4319/one", "http://127.0.0.1:4319/two"],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1:4319/one", "http://127.0.0.1:4319/two"],
+      "js": ["content-script.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

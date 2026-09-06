@@ -72,11 +72,17 @@ version for rollback and expose a trusted recovery interface independent of the 
 - [x] 2026-09-05: Product interview complete and implementation authorized.
 - [x] 2026-09-05: Created project directory and root Turborepo/tooling manifests.
 - [x] 2026-09-05: Installed Native 0.10.1; minimal TypeScript/native app check and ReleaseFast build passed (18/18 steps).
-- [ ] Prove CEF-owned Chrome-style window with embedded Native surface and bidirectional events.
+- [x] Proved CEF-owned window with embedded Native surface, Native click to Chromium navigation,
+      return title event, typed input across zoom/restore, and clean close.
 - [x] 2026-09-05: Implemented pure public core policies for configuration, tabs, scoped grants,
       bounded declarative plugin proposals and budget state; eight regression tests pass after review.
-- [ ] Refactor core tab assumptions into neutral pages/viewports and a public default-interface
-      package; prove simultaneous visible pages, UI replacement without page loss and profile isolation.
+- [x] Refactored core into neutral pages/viewports and the public default-interface package;
+      seven behavioral test groups and independent review verify the portable contracts.
+- [x] Implemented stable native page IDs and arbitrary nonoverlapping viewports using CEF-owned
+      child windows. In-process DevTools test passed 100 layout changes with document/state
+      preservation and MV3 content-script/worker/storage responses from both pages; 12 temporary-page
+      lifecycle cycles completed without losing either original document.
+- [ ] Complete multi-page visual/focus/fullscreen checks after the Mac is unlocked.
 - [ ] Implement native default interface, runtime plugins and actual host enforcement.
 - [ ] Implement MCP/CDP and security/resource enforcement.
 - [x] 2026-09-05: Implemented website and nine docs routes; checked desktop/mobile navigation,
@@ -115,18 +121,19 @@ version for rollback and expose a trusted recovery interface independent of the 
 
 ## Outcomes and retrospective
 
-Implementation is incomplete pending host composition verification. A temporary Native toolchain smoke app
+Implementation is incomplete; basic host composition and multi-page engine behavior are verified. A temporary Native toolchain smoke app
 compiled successfully. The website and pure-domain core pass root `pnpm check`: exact dependencies,
 typecheck, oxlint, oxfmt, seven behavioral test groups, and portable production builds. Frozen-lockfile install
 passes. Review fixes were re-reviewed; mobile docs search was corrected and manually rechecked.
-The separate host experiment compiled and started with a Native mount event, but no production
-Hitchhiker browser, extension compatibility, resource benchmark, or CDP/MCP integration is verified. The live website can be started with
-`pnpm --filter @hitchhiker/site dev --host 127.0.0.1 --port 4173`.
+The separate host experiment now verifies Native/Chromium bidirectional events and document state
+across 100 single/split viewport changes, with a local MV3 extension. It is not a production browser.
+The CPU-rendered sidebar, incomplete input/accessibility integration, Chrome per-page window semantics,
+live plugin runtime, authenticated automation, performance measurement and packaging remain open.
+The live website can be started with `pnpm --filter @hitchhiker/site dev --host 127.0.0.1 --port 4173`.
 
-Next action: after the Mac is unlocked, run the interactive checklist in `apps/host-probe/README.md`.
-Verify Native input, local Chromium navigation and the return event; then complete input/rendering
-composition and address the extension-compatible multi-page host. The experiment currently uses
-CPU reference rendering and a fixed timer, so it establishes no production performance claim.
+Next action: complete the multi-page desktop checklist when
+unlocked. Connect the verified adapter to public framework commands/events before claiming runtime
+plugins or MCP control. Keep raw CDP disabled until its separate grant boundary is implemented.
 
 ## Revision notes
 
@@ -140,3 +147,6 @@ CPU reference rendering and a fixed timer, so it establishes no production perfo
 
 - 2026-09-05: Made tab presentation optional; recorded seven reviewed behavioral test groups,
   reconciled closed-page presentation state, and added the compiled macOS host experiment.
+
+- 2026-09-05: Verified Native input/navigation/events and multi-page persistence with a local MV3
+  extension. Added reviewed close cancellation and popup draining; desktop checks remain pending.
