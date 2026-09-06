@@ -103,6 +103,7 @@ type PageBrowserState = {
   readonly generation: number;
   readonly available: boolean;
   readonly committed: boolean;
+  readonly loading: boolean;
 };
 type Screen = "browser" | "settings" | "plugins" | "extensions";
 
@@ -1067,7 +1068,7 @@ export const makeBrowserController = (
           Effect.flatMap((lifecycle) =>
             change(
               () =>
-                Effect.sync(() => {
+                Effect.gen(function* () {
                   const { params } = lifecycle;
                   const id = params.pageId;
                   const browser = pageBrowsers.get(id);
@@ -1096,6 +1097,7 @@ export const makeBrowserController = (
                       generation: params.generation,
                       available: true,
                       committed: false,
+                      loading: true,
                     });
                     const opened = openPage(state.browser, {
                       id,
@@ -1154,11 +1156,16 @@ export const makeBrowserController = (
                       generation: params.generation,
                       available: true,
                       committed: false,
+                      loading: true,
                     });
                     clearCurrentBrowserState();
                   } else if (lifecycle.event === "pages.documentCommitted") {
                     if (!browser.available) return;
-                    pageBrowsers = new Map(pageBrowsers).set(id, { ...browser, committed: true });
+                    pageBrowsers = new Map(pageBrowsers).set(id, {
+                      ...browser,
+                      committed: true,
+                      loading: true,
+                    });
                   } else if (lifecycle.event === "pages.closed") {
                     if (!page) return;
                     if (closingPersistence && lifecycle.params.reason === "page-close") {
@@ -1234,19 +1241,30 @@ export const makeBrowserController = (
                       ...state,
                       browser: replacePage(state.browser, id, { title: lifecycle.params.title }),
                     };
-                  else if (
-                    lifecycle.event === "pages.navigationChanged" &&
-                    browser.available &&
-                    browser.committed &&
-                    normalizeWebUrl(lifecycle.params.url).ok
-                  )
-                    state = {
-                      ...state,
-                      browser: replacePage(state.browser, id, { url: lifecycle.params.url }),
-                      ...(state.interfaceState.selectedPageId === id && !state.inputDirty
-                        ? { input: { ...InitialInput, text: lifecycle.params.url } }
-                        : {}),
-                    };
+                  else if (lifecycle.event === "pages.navigationChanged" && browser.available) {
+                    pageBrowsers = new Map(pageBrowsers).set(id, {
+                      ...browser,
+                      loading: lifecycle.params.loading,
+                    });
+                    if (lifecycle.params.loading && page?.lifecycle === "sleeping") {
+                      yield* activatePage(engine, id);
+                      state = {
+                        ...state,
+                        browser: replacePage(state.browser, id, {
+                          lifecycle: "loaded",
+                          lastUsedAt: now(),
+                        }),
+                      };
+                    }
+                    if (browser.committed && normalizeWebUrl(lifecycle.params.url).ok)
+                      state = {
+                        ...state,
+                        browser: replacePage(state.browser, id, { url: lifecycle.params.url }),
+                        ...(state.interfaceState.selectedPageId === id && !state.inputDirty
+                          ? { input: { ...InitialInput, text: lifecycle.params.url } }
+                          : {}),
+                      };
+                  }
                 }),
               true,
               () => !restoring,
@@ -1352,12 +1370,17 @@ export const makeBrowserController = (
                   2,
                   resourceSignalsAvailable,
                   new Map(
-                    [...knownResources].map(([id, resources]) => [
-                      id,
-                      pendingDomWrites.has(id)
-                        ? Object.freeze({ ...resources, unsavedInput: true })
-                        : resources,
-                    ]),
+                    [...knownResources]
+                      .filter(([id]) => {
+                        const browser = pageBrowsers.get(id);
+                        return browser?.available && browser.committed && !browser.loading;
+                      })
+                      .map(([id, resources]) => [
+                        id,
+                        pendingDomWrites.has(id)
+                          ? Object.freeze({ ...resources, unsavedInput: true })
+                          : resources,
+                      ]),
                   ),
                 );
           for (const id of ids) {

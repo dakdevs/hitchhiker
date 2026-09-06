@@ -68,7 +68,10 @@ fragment/history changes and subframe loads retain that flag; the main-frame `On
 clears only unsaved input, preserving the other signals. This does not infer application save state.
 The native regression verifies a real Backspace edit, retention through those navigation cases and
 clearance on a replacement main document. Automatic resource policy currently freezes inactive
-pages; actual renderer discard is still being integrated as described in [DISCARD-PLAN.md](DISCARD-PLAN.md).
+pages. The controller excludes unknown/loading browser generations and activates a frozen page when
+its current generation reports navigation. These event-based protections do not make a cross-process
+mutation atomic. Targeted extension discard bypasses Chromium eligibility and remains experimental;
+see [DISCARD-PLAN.md](DISCARD-PLAN.md) for the required native guard and inspection evidence.
 
 ## Native composition
 

@@ -425,3 +425,27 @@ Root checks, all 160 native-suite tests and ten relocated developer-bundle check
 review found no blocking issue. Root's final closed/unknown-page CDP error correction passes an expanded
 native fixture, including individual closure after replacement. Details and the explicit manual-restoration
 limit are in `REPLACEMENT-PLAN.md`.
+
+Commit `c81c131` publishes generic browser replacement; GitHub Check `34055724492` passed.
+The next bounded proof checks whether querying the current discarded page's native `Target.getTargetInfo`
+and joining it to `chrome.debugger.getTargets`/`tabs.get` preserves both discarded state and renderer
+release. Record renderer PIDs at each step before any explicit reload; do not assume read-only CDP
+attachment is free of renderer activation. The probe owns only ignored `work/restore-classification-probe/`.
+No automatic restoration or discard scheduler is enabled yet.
+
+Pinned Chromium source review establishes that explicitly targeted `tabs.discard` bypasses the
+normal discard eligibility policy. A controller preflight cannot atomically protect a page across
+the asynchronous extension call. Keep this route experimental; automatic discard needs a native
+mutation-time guard. The current reversible-freeze scheduler also lacks navigation knowledge.
+The controller now tracks loading per browser generation, excludes loading/unknown pages from
+freezing, and wakes a frozen page when its current browser reports navigation. Portable tests cover
+unknown state, loading, completion, stale generations and wakeup. A real native fixture first sleeps
+a hidden page, starts trusted navigation, holds the server response for longer than the inactivity
+threshold and verifies the page stays awake until completion. Independent review found no blocker.
+Root checks and all 161 native-suite tests pass (91 runtime, 70 browser, no skips), recorded in
+`work/navigation-freeze-root-final.log` and `work/navigation-freeze-native-final.log`. This does not
+claim cross-process atomic protection or enable destructive discard. The developer app was rebuilt
+and relocated outside the checkout. Strict signature/import verification and all eleven relocated
+checks pass, including held navigation, replacement, input protection, managed extensions, MCP DOM,
+plugin lifecycle and safe mode. Evidence is in `work/navigation-freeze-bundle-{build,verify,native}.log`.
+The artifact remains ad hoc signed arm64; release signing and interactive macOS checks are outstanding.

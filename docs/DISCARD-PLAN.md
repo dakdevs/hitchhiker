@@ -83,9 +83,9 @@ and stale DOM reference rejection. Explicit Reload restores Chromium's retained 
 Replacement does not itself prove discard, so selection does not automatically reload a replacement.
 
 Next, positively classify a discarded page against its current generation before adding automatic
-restoration or the resource scheduler. The trusted scheduler must recheck visible bindings, active
-navigation and all existing protections before any discard, and fail safely on uncertain identity or
-resource signals. Never expose a privileged page-message bridge or reconstruct history from URLs.
+restoration. Automatic discard additionally requires protection checks at the native mutation point:
+a controller preflight alone is insufficient, as the pinned-source review below establishes.
+Never expose a privileged page-message bridge or reconstruct history from URLs.
 
 ## Accepted packet order
 
@@ -106,13 +106,14 @@ viewport binding remains pending a positive discarded-state classification; expl
 DOM references must invalidate on replacement. Test both callback orderings even if the native proof
 only observes one, and keep failure recovery conservative.
 
-Only after that correctness packet add automatic discard through a trusted bundled worker and typed
-internal commands. Resolve logical page and expected generation to an authoritatively mapped Chrome extension tab ID.
+The original proposal to add automatic discard directly through a trusted bundled worker is superseded
+by the eligibility findings below. Any future internal command must resolve logical page and expected
+generation to an authoritatively mapped Chrome extension tab ID.
 Do not use the CEF browser identifier as that ID: the native proof below contradicts the header
 documentation for this Chrome runtime. Treat missing/ambiguous workers, identity changes and
 sent requests without a definite outcome as uncertainty; stop new discards until reconciled. Never
-substitute URL-only recreation. Recheck protection signals, current generation, active navigation and
-visible bindings immediately before a request. Keep pinning in the interface model.
+substitute URL-only recreation. A last-moment recheck cannot make an asynchronous extension mutation
+atomic with protection signals, generation changes or visible bindings. Keep pinning in the interface model.
 
 Do not load the internal worker in raw-CDP launches. Those launches continue to disable automatic
 resource intervention. Ordinary user Chrome extensions can still replace/discard a page, so the
@@ -149,3 +150,40 @@ matches exactly one raw CDP target and debugger record with a distinct positive 
 join never selects a page by URL. The debugger fixture is test-only; any production permission choice
 must account for its broader authority. Evidence is in ignored
 `work/discard-control-probe/`.
+
+## Discarded-state inspection evidence
+
+A corrected disposable run against the `c81c131` native implementation observed the replacement at
+generation 2, no committed main document, and `tabs.get` reporting `discarded: true` / `unloaded`
+before inspecting it. Renderer PIDs fell from four to three on discard. Native per-page
+`Target.getTargetInfo` followed by the exact debugger/tab join left the same three PIDs and the same
+discarded state. Explicit Reload retained generation 2 and the replacement tab ID, changed discarded
+state to false/complete and added one renderer PID. The fixture used two pages at the same URL.
+
+This one run supports inspecting a discarded replacement without observing another renderer PID;
+it does not rule out reuse of an existing renderer process or establish a production race-free
+restoration protocol. An earlier probe incorrectly labeled any pre-discard/post-query PID inequality
+as recreation; the corrected evidence compares added and removed PID sets against a separate
+post-discard, pre-query baseline. Source, binary hash and phase observations are retained in ignored
+`work/restore-classification-probe/`.
+
+## Targeted extension discard bypasses eligibility
+
+Pinned Chromium revision `cd1d73dd77daadf4581dc29ca73482fc241e079d` resolves a specified tab and rejects
+DevTools in [`TabsDiscardFunction::Run`](https://chromium.googlesource.com/chromium/src/+/cd1d73dd77daadf4581dc29ca73482fc241e079d/chrome/browser/extensions/api/tabs/tabs_api_non_android.cc#1260).
+[`TabManager::DiscardTabByExtension`](https://chromium.googlesource.com/chromium/src/+/cd1d73dd77daadf4581dc29ca73482fc241e079d/chrome/browser/resource_coordinator/tab_manager.cc#104)
+then invokes the explicit target's `DiscardTab(EXTERNAL)` directly. This path does not run normal
+candidate eligibility. [`TabLifecycleUnit::Discard`](https://chromium.googlesource.com/chromium/src/+/cd1d73dd77daadf4581dc29ca73482fc241e079d/chrome/browser/resource_coordinator/tab_lifecycle_unit.cc#306)
+rejects missing tab-strip membership or an already-discarded tab.
+
+The separate [`DiscardEligibilityPolicy::CanDiscard`](https://chromium.googlesource.com/chromium/src/+/cd1d73dd77daadf4581dc29ca73482fc241e079d/chrome/browser/performance_manager/policies/discard_eligibility_policy.cc#128)
+also returns eligible for `EXTERNAL` before its visibility, audio, capture, active-tab and form-edit
+protections. Those protections do not make targeted `tabs.discard` safe for automatic scheduling.
+Downloads and Hitchhiker's unknown-resource/raw-CDP gates are not supplied by this policy either.
+
+Keep targeted extension discard outside the automatic scheduler. A trusted controller snapshot is
+advisory: a page can become visible, navigate or gain protected state before the asynchronous worker
+call mutates it. A production automatic backend must validate the current generation and complete
+Hitchhiker protections at the native/Chromium mutation point. Public CEF currently exposes no such
+entrypoint. An uncertain sent request must stop further attempts until reconciled. Positive
+classification and restoration remain useful independently for discards initiated by user extensions.

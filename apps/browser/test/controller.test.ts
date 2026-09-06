@@ -434,7 +434,7 @@ test("keeps a logical page and its persistence through replacement while rejecti
   }
 });
 
-test("a pending scoped DOM write activates and protects only its stable page", async () => {
+test("freezing requires idle navigation and protects pending scoped DOM writes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hitchhiker-browser-dom-protection-"));
   const originalNow = Date.now;
   let testNow = 0;
@@ -447,6 +447,7 @@ test("a pending scoped DOM write activates and protects only its stable page", a
           const surfaceEvents = yield* PubSub.unbounded<SurfaceEvent>();
           const opened: string[] = [];
           const lifecycle: Array<{ readonly pageId: string; readonly state: string }> = [];
+          let rendered: Deferred.Deferred<void> | undefined;
           const engine = EngineConnection.of({
             pid: 1,
             ready: Effect.succeed({
@@ -478,7 +479,10 @@ test("a pending scoped DOM write activates and protects only its stable page", a
             claimRawCdp: Effect.die("unused raw CDP claim"),
           });
           const surface = NativeSurface.of({
-            commit: () => Effect.succeed(1),
+            commit: () =>
+              rendered
+                ? Deferred.succeed(rendered, undefined).pipe(Effect.as(1))
+                : Effect.succeed(1),
             events: Stream.fromPubSub(surfaceEvents),
           });
           const controller = yield* makeBrowserController(directory).pipe(
@@ -490,17 +494,20 @@ test("a pending scoped DOM write activates and protects only its stable page", a
             ),
           );
           yield* controller.start;
+          const emitRendered = Effect.fn("test.emitRendered")(function* (
+            event: string,
+            params: EngineEvent["params"],
+          ) {
+            rendered = yield* Deferred.make<void>();
+            yield* PubSub.publish(engineEvents, { event, params });
+            yield* Deferred.await(rendered);
+            rendered = undefined;
+          });
           for (const url of ["https://one.test", "https://two.test", "https://three.test"])
             yield* controller.openPage(url);
           for (const id of opened) {
-            yield* PubSub.publish(engineEvents, {
-              event: "pages.created",
-              params: { pageId: id, generation: 1 },
-            });
-            yield* PubSub.publish(engineEvents, {
-              event: "pages.documentCommitted",
-              params: { pageId: id, generation: 1 },
-            });
+            yield* emitRendered("pages.created", { pageId: id, generation: 1 });
+            yield* emitRendered("pages.documentCommitted", { pageId: id, generation: 1 });
             yield* PubSub.publish(engineEvents, {
               event: "pages.resourcesChanged",
               params: {
@@ -524,31 +531,111 @@ test("a pending scoped DOM write activates and protects only its stable page", a
           yield* controller.protectDomWrite(opened[1]!);
           yield* TestClock.adjust(1_000);
           yield* Effect.yieldNow;
+          assert.equal(lifecycle.length, 0, "unknown loading state must prevent freezing");
+          const navigation = (generation: number, loading: boolean, url = "https://three.test/") =>
+            emitRendered("pages.navigationChanged", {
+              pageId: opened[2]!,
+              generation,
+              loading,
+              url,
+              canGoBack: false,
+              canGoForward: false,
+            });
+          yield* navigation(1, true, "");
+          yield* TestClock.adjust(1_000);
+          yield* Effect.yieldNow;
+          assert.equal(lifecycle.length, 0, "loading must prevent freezing even with an empty URL");
+          // Establish navigation knowledge for the DOM-protected page too, so
+          // its absence below proves DOM protection rather than unknown loading.
+          yield* emitRendered("pages.navigationChanged", {
+            pageId: opened[1]!,
+            generation: 1,
+            loading: false,
+            url: "https://two.test/",
+            canGoBack: false,
+            canGoForward: false,
+          });
+          yield* navigation(1, false);
+          yield* TestClock.adjust(1_000);
+          yield* Effect.yieldNow;
           assert.deepEqual(lifecycle, [{ pageId: opened[2]!, state: "frozen" }]);
           assert.equal(
             (yield* controller.snapshot).pages.find((page) => page.id === opened[1])?.lifecycle,
             "loaded",
           );
-          yield* PubSub.publish(engineEvents, {
-            event: "pages.replaced",
-            params: {
-              pageId: opened[2]!,
-              generation: 2,
-              previousGeneration: 1,
-            },
+          yield* navigation(1, true, "");
+          yield* TestClock.adjust(1_000);
+          yield* Effect.yieldNow;
+          assert.deepEqual(
+            lifecycle.map((entry) => entry.state),
+            ["frozen", "active"],
+          );
+          assert.equal(
+            (yield* controller.snapshot).pages.find((page) => page.id === opened[2])?.lifecycle,
+            "loaded",
+          );
+          testNow = 40_000;
+          yield* TestClock.adjust(1_000);
+          yield* Effect.yieldNow;
+          assert.equal(
+            lifecycle.length,
+            2,
+            "loading remains protected after the inactivity threshold",
+          );
+          yield* navigation(1, false);
+          yield* TestClock.adjust(1_000);
+          yield* Effect.yieldNow;
+          assert.deepEqual(
+            lifecycle.map((entry) => entry.state),
+            ["frozen", "active", "frozen"],
+          );
+          yield* emitRendered("pages.replaced", {
+            pageId: opened[2]!,
+            generation: 2,
+            previousGeneration: 1,
           });
           yield* Effect.yieldNow;
+          yield* navigation(1, false);
           yield* TestClock.adjust(1_000);
           yield* Effect.yieldNow;
           assert.deepEqual(
             lifecycle,
-            [{ pageId: opened[2]!, state: "frozen" }],
+            ["frozen", "active", "frozen"].map((state) => ({ pageId: opened[2]!, state })),
             "a replacement without current resources must stay ineligible for freezing",
           );
           assert.equal(
             (yield* controller.snapshot).pages.find((page) => page.id === opened[2])?.lifecycle,
             "loaded",
           );
+          yield* emitRendered("pages.documentCommitted", { pageId: opened[2]!, generation: 2 });
+          yield* PubSub.publish(engineEvents, {
+            event: "pages.resourcesChanged",
+            params: {
+              pageId: opened[2]!,
+              generation: 2,
+              known: true,
+              audio: false,
+              call: false,
+              download: false,
+              unsavedInput: false,
+            },
+          });
+          yield* navigation(1, false);
+          yield* TestClock.adjust(1_000);
+          yield* Effect.yieldNow;
+          assert.equal(
+            lifecycle.length,
+            3,
+            "retired navigation must not clear current loading protection",
+          );
+          yield* navigation(2, false);
+          yield* TestClock.adjust(1_000);
+          yield* Effect.yieldNow;
+          assert.deepEqual(
+            lifecycle.map((entry) => entry.state),
+            ["frozen", "active", "frozen", "frozen"],
+          );
+          assert.equal(yield* controller.lastError, undefined);
         }),
       ).pipe(Effect.provide(TestClock.layer())),
     );
