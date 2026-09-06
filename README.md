@@ -4,9 +4,10 @@ A macOS-first Chromium browser framework with a considered default interface, pu
 components, runtime plugins, and explicit automation permissions.
 
 **Status: implementation and native-host integration in progress. No browser release is available.**
-Native's existing CEF backend does not yet support the native-rendered composition this project
-requires. Chrome-extension support, runtime native plugins, sandboxed browsing and MCP/CDP control
-must be proven in the host before they can be advertised as available.
+The native host experiment verifies multiple live Chromium pages, Native controls and a local MV3
+extension across layout and lifecycle changes. Runtime native plugins, authenticated MCP/CDP,
+production rendering, complete extension compatibility and packaging remain in development.
+See `docs/ENGINE-FEASIBILITY.md` for measured evidence and current limits.
 
 ## Development
 
