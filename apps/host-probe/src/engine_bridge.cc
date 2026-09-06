@@ -110,6 +110,11 @@ bool GetInt(CefRefPtr<CefDictionaryValue> value, const char* key, int* out) {
   return true;
 }
 
+void SetGeneration(CefRefPtr<CefDictionaryValue> value, uint32_t generation) {
+  // CEF's integer value is signed. A double represents every uint32 exactly.
+  value->SetDouble("generation", static_cast<double>(generation));
+}
+
 class BridgeTask : public CefTask {
  public:
   explicit BridgeTask(std::function<void()> work) : work_(std::move(work)) {}
@@ -137,6 +142,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     ready->SetInt("version", 1);
     // Runtime schedulers must treat a missing/false capability as protected.
     ready->SetBool("pageResourceSignals", true);
+    ready->SetBool("pageBrowserGeneration", true);
     if (root_) {
       const CefRect bounds = root_->GetClientAreaBoundsInScreen();
       CefRefPtr<CefDictionaryValue> client = CefDictionaryValue::Create();
@@ -165,6 +171,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     if (CefCurrentlyOn(TID_UI)) {
       registrations_.clear();
       observers_.clear();
+      observer_generations_.clear();
       pending_cdp_.clear();
       manager_ = nullptr;
       root_ = nullptr;
@@ -178,11 +185,27 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
     if (!event.page_id.empty()) {
       params->SetString("pageId", event.page_id);
+      SetGeneration(params, event.generation);
     }
     switch (event.type) {
       case PageEvent::kCreated:
         page_ids_.insert(event.page_id);
         SendEvent("pages.created", params);
+        break;
+      case PageEvent::kBrowserUnavailable:
+        RetireGeneration(event.page_id, event.generation,
+                         "browser unavailable before DevTools response");
+        SendEvent("pages.browserUnavailable", params);
+        break;
+      case PageEvent::kReplaced:
+        RetireGeneration(event.page_id, event.previous_generation,
+                         "browser replaced before DevTools response");
+        params->SetDouble("previousGeneration",
+                          static_cast<double>(event.previous_generation));
+        SendEvent("pages.replaced", params);
+        break;
+      case PageEvent::kDocumentCommitted:
+        SendEvent("pages.documentCommitted", params);
         break;
       case PageEvent::kClosed:
         page_ids_.erase(event.page_id);
@@ -196,6 +219,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
         }
         registrations_.erase(event.page_id);
         observers_.erase(event.page_id);
+        observer_generations_.erase(event.page_id);
         params->SetInt("remainingPages", static_cast<int>(event.remaining_pages));
         params->SetString(
             "reason",
@@ -218,15 +242,16 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
         SendEvent("pages.titleChanged", params);
         break;
       case PageEvent::kNavigationChanged:
-        if (event.browser) {
-          params->SetString("url", event.browser->GetMainFrame()->GetURL());
-          params->SetBool("loading", event.browser->IsLoading());
-          params->SetBool("canGoBack", event.browser->CanGoBack());
-          params->SetBool("canGoForward", event.browser->CanGoForward());
+        if (const auto snapshot = manager_->SnapshotForPage(event.page_id)) {
+          params->SetString("url", snapshot->url);
+          params->SetBool("loading", snapshot->loading);
+          params->SetBool("canGoBack", snapshot->can_go_back);
+          params->SetBool("canGoForward", snapshot->can_go_forward);
           SendEvent("pages.navigationChanged", params);
         }
         break;
       case PageEvent::kResourcesChanged:
+        params->SetBool("known", event.resources_known);
         params->SetBool("audio", event.audio);
         params->SetBool("call", event.call);
         params->SetBool("download", event.download);
@@ -290,6 +315,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
   }
 
   void OnDevToolsResult(const std::string& page_id,
+                        uint32_t generation,
                         CefRefPtr<CefBrowser> browser,
                         int cdp_id,
                         bool success,
@@ -298,7 +324,8 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     CEF_REQUIRE_UI_THREAD();
     auto it = pending_cdp_.find(cdp_id);
     if (stopped_ || it == pending_cdp_.end() || it->second.page_id != page_id ||
-        !IsCurrentPageBrowser(page_id, browser)) return;
+        it->second.generation != generation ||
+        !IsCurrentPageBrowser(page_id, generation, browser)) return;
     const int request_id = it->second.request_id;
     pending_cdp_.erase(it);
     if (result_size > 4 * 1024 * 1024) {
@@ -322,15 +349,17 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
   }
 
   void OnDevToolsEvent(const std::string& page_id,
+                       uint32_t generation,
                        CefRefPtr<CefBrowser> browser,
                        const CefString& method,
                        const void* params,
                        size_t params_size) {
     CEF_REQUIRE_UI_THREAD();
-    if (stopped_ || !IsCurrentPageBrowser(page_id, browser)) return;
+    if (stopped_ || !IsCurrentPageBrowser(page_id, generation, browser)) return;
     if (params_size > 4 * 1024 * 1024) return;
     CefRefPtr<CefDictionaryValue> event = CefDictionaryValue::Create();
     event->SetString("pageId", page_id);
+    SetGeneration(event, generation);
     event->SetString("method", method);
     CefRefPtr<CefValue> parsed = CefParseJSON(params, params_size, JSON_PARSER_RFC);
     if (parsed) event->SetValue("params", parsed);
@@ -341,23 +370,24 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
  private:
   class Observer : public CefDevToolsMessageObserver {
    public:
-    Observer(std::weak_ptr<Core> core, std::string page_id)
-        : core_(std::move(core)), page_id_(std::move(page_id)) {}
+    Observer(std::weak_ptr<Core> core, std::string page_id, uint32_t generation)
+        : core_(std::move(core)), page_id_(std::move(page_id)), generation_(generation) {}
     void OnDevToolsMethodResult(CefRefPtr<CefBrowser> browser, int id, bool success,
                                 const void* result, size_t size) override {
-      if (auto core = core_.lock()) core->OnDevToolsResult(page_id_, browser, id, success, result, size);
+      if (auto core = core_.lock()) core->OnDevToolsResult(page_id_, generation_, browser, id, success, result, size);
     }
     void OnDevToolsEvent(CefRefPtr<CefBrowser> browser, const CefString& method,
                          const void* params, size_t size) override {
-      if (auto core = core_.lock()) core->OnDevToolsEvent(page_id_, browser, method, params, size);
+      if (auto core = core_.lock()) core->OnDevToolsEvent(page_id_, generation_, browser, method, params, size);
     }
    private:
     std::weak_ptr<Core> core_;
     std::string page_id_;
+    uint32_t generation_;
     IMPLEMENT_REFCOUNTING(Observer);
   };
 
-  struct PendingCdp { int request_id; std::string page_id; };
+  struct PendingCdp { int request_id; std::string page_id; uint32_t generation; };
 
   static std::atomic<int> next_cdp_id_;
 
@@ -522,18 +552,40 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     if (!GetString(params, "id", page_id) || !IsPageId(*page_id)) {
       ReplyError(request_id, -32602, "invalid page id"); return false;
     }
-    *browser = manager_ ? manager_->BrowserForPage(*page_id) : nullptr;
-    if (!*browser || page_ids_.find(*page_id) == page_ids_.end()) {
+    if (page_ids_.find(*page_id) == page_ids_.end()) {
       ReplyError(request_id, -32001, "page is closed or unknown"); return false;
+    }
+    *browser = manager_ ? manager_->BrowserForPage(*page_id) : nullptr;
+    if (!*browser) {
+      ReplyError(request_id, -32005, "page browser temporarily unavailable"); return false;
     }
     return true;
   }
 
   bool IsCurrentPageBrowser(const std::string& page_id,
+                            uint32_t generation,
                             CefRefPtr<CefBrowser> browser) const {
     if (!manager_ || !browser || page_ids_.find(page_id) == page_ids_.end()) return false;
+    const auto snapshot = manager_->SnapshotForPage(page_id);
+    if (!snapshot || !snapshot->browser_available ||
+        snapshot->generation != generation) return false;
     const std::optional<std::string> actual = manager_->PageIdForBrowser(browser);
     return actual && *actual == page_id;
+  }
+
+  void RetireGeneration(const std::string& page_id, uint32_t generation,
+                        const char* message) {
+    for (auto it = pending_cdp_.begin(); it != pending_cdp_.end();) {
+      if (it->second.page_id == page_id && it->second.generation == generation) {
+        ReplyError(it->second.request_id, -32005, message);
+        it = pending_cdp_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    registrations_.erase(page_id);
+    observers_.erase(page_id);
+    observer_generations_.erase(page_id);
   }
 
   void HandleRequest(int request_id, const std::string& method,
@@ -544,12 +596,17 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
       for (const auto& id : page_ids_) {
         CefRefPtr<CefDictionaryValue> item = CefDictionaryValue::Create();
         item->SetString("id", id);
-        auto browser = manager_->BrowserForPage(id);
-        if (browser) {
-          item->SetString("url", browser->GetMainFrame()->GetURL());
-          item->SetBool("loading", browser->IsLoading());
-          item->SetBool("canGoBack", browser->CanGoBack());
-          item->SetBool("canGoForward", browser->CanGoForward());
+        const auto snapshot = manager_->SnapshotForPage(id);
+        if (snapshot) {
+          SetGeneration(item, snapshot->generation);
+          item->SetBool("browserAvailable", snapshot->browser_available);
+          item->SetBool("mainDocumentCommitted", snapshot->main_document_committed);
+          item->SetBool("resourcesKnown", snapshot->resources_known);
+          item->SetString("url", snapshot->url);
+          item->SetString("title", snapshot->title);
+          item->SetBool("loading", snapshot->loading);
+          item->SetBool("canGoBack", snapshot->can_go_back);
+          item->SetBool("canGoForward", snapshot->can_go_forward);
         }
         pages->SetDictionary(index++, item);
       }
@@ -652,13 +709,24 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
       ReplyError(request_id, -32602, "invalid CDP request"); return;
     }
     browser = manager_ ? manager_->BrowserForPage(page_id) : nullptr;
-    if (!browser || page_ids_.find(page_id) == page_ids_.end()) { ReplyError(request_id, -32001, "page is closed or unknown"); return; }
-    if (observers_.find(page_id) == observers_.end()) {
-      CefRefPtr<Observer> observer = new Observer(weak_from_this(), page_id);
+    const auto snapshot = manager_ ? manager_->SnapshotForPage(page_id) : std::nullopt;
+    if (!snapshot || page_ids_.find(page_id) == page_ids_.end()) {
+      ReplyError(request_id, -32001, "page is closed or unknown"); return;
+    }
+    if (!browser || !snapshot->browser_available) {
+      ReplyError(request_id, -32005, "page browser temporarily unavailable"); return;
+    }
+    const uint32_t generation = snapshot->generation;
+    if (observers_.find(page_id) == observers_.end() ||
+        observer_generations_[page_id] != generation) {
+      RetireGeneration(page_id, observer_generations_[page_id],
+                       "browser replaced before DevTools response");
+      CefRefPtr<Observer> observer = new Observer(weak_from_this(), page_id, generation);
       CefRefPtr<CefRegistration> registration = browser->GetHost()->AddDevToolsMessageObserver(observer);
       if (!registration) { ReplyError(request_id, -32000, "could not attach DevTools observer"); return; }
       observers_[page_id] = observer;
       registrations_[page_id] = registration;
+      observer_generations_[page_id] = generation;
     }
     if (pending_cdp_.size() >= kMaxPendingCdp) {
       ReplyError(request_id, -32003, "too many outstanding DevTools requests");
@@ -672,7 +740,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
       ReplyError(request_id, -32003, "DevTools request ID space exhausted");
       return;
     }
-    pending_cdp_.emplace(cdp_id, PendingCdp{request_id, page_id});
+    pending_cdp_.emplace(cdp_id, PendingCdp{request_id, page_id, generation});
     auto self = shared_from_this();
     if (!CefPostDelayedTask(TID_UI, new BridgeTask([self, cdp_id] {
           self->ExpireCdp(cdp_id);
@@ -701,6 +769,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
   std::set<std::string> page_ids_;
   std::map<std::string, CefRefPtr<Observer>> observers_;
   std::map<std::string, CefRefPtr<CefRegistration>> registrations_;
+  std::map<std::string, uint32_t> observer_generations_;
   std::map<int, PendingCdp> pending_cdp_;
   EngineBridge::UiCommitHandler ui_commit_handler_;
   EngineBridge::CloseRequestHandler close_request_handler_;

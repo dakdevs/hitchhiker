@@ -7,7 +7,7 @@ import {
   type JsonObject,
   type ScopedDomDriver,
 } from "@hitchhiker/runtime";
-import { Deferred, Effect, Fiber, Layer, PubSub, Stream } from "effect";
+import { Deferred, Effect, Fiber, Layer, PubSub, Stream, type Scope } from "effect";
 import { makeBrowserDomDriver } from "../src/dom.ts";
 
 interface FakeOptions {
@@ -26,7 +26,8 @@ const withDriver = <A>(
     readonly driver: ScopedDomDriver;
     readonly calls: string[];
     readonly setLoader: (loader: string) => void;
-  }) => Effect.Effect<A, unknown>,
+    readonly emit: (event: EngineEvent) => Effect.Effect<boolean>;
+  }) => Effect.Effect<A, unknown, Scope.Scope>,
 ) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -143,7 +144,12 @@ const withDriver = <A>(
       const driver = yield* makeBrowserDomDriver({
         protectWrite: () => Effect.sync(() => calls.push("protectWrite")),
       }).pipe(Effect.provide(Layer.succeed(EngineConnection, engine)));
-      return yield* use({ driver, calls, setLoader: (loader) => (loaderId = loader) });
+      return yield* use({
+        driver,
+        calls,
+        setLoader: (loader) => (loaderId = loader),
+        emit: (event) => PubSub.publish(events, event),
+      });
     }),
   );
 
@@ -310,3 +316,51 @@ test("disables accessibility when enable fails after dispatch", async () => {
     ),
   );
 });
+
+for (const event of ["pages.browserUnavailable", "pages.replaced"]) {
+  test(`${event} retires cached documents without context-destruction events`, async () => {
+    await Effect.runPromise(
+      withDriver({}, ({ driver, calls, emit }) =>
+        Effect.gen(function* () {
+          const capture = yield* driver.capture({
+            pageId: "page",
+            maxDepth: 8,
+            interactiveOnly: false,
+            authorize: () => Effect.void,
+          });
+          const invalidated = yield* driver.invalidations.pipe(
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.forkScoped,
+          );
+          yield* Effect.yieldNow;
+          yield* emit({
+            event,
+            params: {
+              pageId: "page",
+              generation: event === "pages.replaced" ? 2 : 1,
+              previousGeneration: 1,
+            },
+          });
+          assert.deepEqual(yield* Fiber.join(invalidated), ["page"]);
+          yield* Effect.yieldNow;
+          // The fixture deliberately retains every Chromium document/context/marker ID.
+          // The native replacement event alone must invalidate the old handle.
+          const before = calls.length;
+          const stale = yield* driver
+            .click(capture.document, capture.nodes[1]!, () => Effect.void)
+            .pipe(Effect.flip);
+          assert.equal(stale.code, "stale_ref");
+          assert.equal(calls.slice(before).includes("Runtime.callFunctionOn"), false);
+          yield* driver.capture({
+            pageId: "page",
+            maxDepth: 8,
+            interactiveOnly: false,
+            authorize: () => Effect.void,
+          });
+          assert.equal(calls.filter((call) => call === "Page.createIsolatedWorld").length, 2);
+        }),
+      ),
+    );
+  });
+}

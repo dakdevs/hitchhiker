@@ -258,6 +258,7 @@ export const makeBrowserDomDriver = Effect.fn("makeBrowserDomDriver")(function* 
   const validateDocument = Effect.fn("BrowserDom.validateDocument")(function* (
     document: DomDocumentHandle,
   ) {
+    if (documents.get(document.pageId) !== document) return yield* staleError();
     const top = yield* frame(document.pageId);
     if (top.frameId !== document.frameId || top.loaderId !== document.loaderId)
       return yield* staleError();
@@ -268,7 +269,12 @@ export const makeBrowserDomDriver = Effect.fn("makeBrowserDomDriver")(function* 
       value,
     );
     const origin = canonicalOrigin(decoded.origin);
-    if (decoded.marker !== document.markerValue || origin === undefined || origin !== top.origin)
+    if (
+      documents.get(document.pageId) !== document ||
+      decoded.marker !== document.markerValue ||
+      origin === undefined ||
+      origin !== top.origin
+    )
       return yield* staleError();
     return origin;
   });
@@ -557,11 +563,16 @@ export const makeBrowserDomDriver = Effect.fn("makeBrowserDomDriver")(function* 
       Effect.flatMap((lock) => lock.withPermit(operation)),
       Effect.ensuring(releaseLock(pageId)),
     );
+  // Native lifecycle events are emitted on the CEF UI thread in FIFO order and
+  // fence stale browsers before emission. These invalidations are conservative
+  // hints; document use still checks the current cache, unique context and marker.
   const invalidations = engine.events.pipe(
     Stream.filter(
       (event) =>
         typeof event.params.pageId === "string" &&
         (event.event === "pages.closed" ||
+          event.event === "pages.browserUnavailable" ||
+          event.event === "pages.replaced" ||
           event.event === "pages.navigationChanged" ||
           (event.event === "cdp.event" &&
             typeof event.params.method === "string" &&
@@ -582,7 +593,11 @@ export const makeBrowserDomDriver = Effect.fn("makeBrowserDomDriver")(function* 
           if (pageId === undefined) return;
           const document = documents.get(pageId);
           if (document === undefined) return;
-          if (event.event === "pages.closed") {
+          if (
+            event.event === "pages.closed" ||
+            event.event === "pages.browserUnavailable" ||
+            event.event === "pages.replaced"
+          ) {
             documents.delete(pageId);
             return;
           }

@@ -50,3 +50,10 @@ export { LivePluginManifest, PluginCallError, createPluginDispatcher } from "./p
 export type { PluginDispatchOptions } from "./plugin-dispatch.ts";
 export { runLivePlugin } from "./plugin-session.ts";
 export type { LivePluginOptions } from "./plugin-session.ts";
+
+export {
+  NativePageGeneration,
+  AttachedPageGeneration,
+  PageLifecycleEvent,
+  decodePageLifecycleEvent,
+} from "./page-lifecycle.ts";

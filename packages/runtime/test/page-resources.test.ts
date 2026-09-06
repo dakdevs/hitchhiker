@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   activatePage,
+  decodePageResourceEvent,
   freezePage,
   rememberPageResources,
   selectPageFreezes,
@@ -134,6 +135,8 @@ test(
           const snapshots = yield* Fiber.join(snapshot).pipe(Effect.timeout(5_000));
           assert.deepEqual(snapshots[0]?.params, {
             pageId: "resource",
+            generation: 1,
+            known: true,
             audio: false,
             call: false,
             download: false,
@@ -457,3 +460,30 @@ test(
     }
   },
 );
+
+test("generationless or partial resource events never establish native protection knowledge", async () => {
+  for (const extra of [
+    {},
+    { generation: 1 },
+    { generation: 1, known: false },
+    { generation: 0, known: true },
+    { generation: 1.5, known: true },
+    { generation: 0x1_0000_0000, known: true },
+  ]) {
+    await assert.rejects(
+      Effect.runPromise(
+        decodePageResourceEvent({
+          event: "pages.resourcesChanged",
+          params: { pageId: "page", ...idle, ...extra },
+        }),
+      ),
+    );
+  }
+  const decoded = await Effect.runPromise(
+    decodePageResourceEvent({
+      event: "pages.resourcesChanged",
+      params: { pageId: "page", ...idle, generation: 2, known: true },
+    }),
+  );
+  assert.equal(decoded.params.generation, 2);
+});

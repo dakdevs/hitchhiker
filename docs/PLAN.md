@@ -411,3 +411,17 @@ through a page CDP session, and an exact logical-page → native CDP target → 
 duplicate URLs. CEF browser IDs differ from Chrome extension tab IDs despite the pinned header claim.
 `DISCARD-PLAN.md` records that correction and the broader debugger permission needed by the identity
 fixture. Production discard remains pending; generic replacement correctness is the next packet.
+
+Commit `92ff0ab` publishes input-protection retention; GitHub Check `34054398940` passed. The next
+implementation follows `REPLACEMENT-PLAN.md`: generic Chromium browser-generation replacement,
+cached metadata, CDP/DOM fencing, conservative resource knowledge and close ordering. Automatic
+reload remains a separate positively classified discard operation; no replacement callback alone
+is evidence that a reload is safe.
+
+Generic replacement is integrated with browser generations, cached native metadata, conservative
+resource knowledge, retired CDP requests/observers and stale DOM-handle rejection. The actual native
+fixture passes three discard/explicit-reload cycles with preserved history and stable logical pages.
+Root checks, all 160 native-suite tests and ten relocated developer-bundle checks pass. Independent
+review found no blocking issue. Root's final closed/unknown-page CDP error correction passes an expanded
+native fixture, including individual closure after replacement. Details and the explicit manual-restoration
+limit are in `REPLACEMENT-PLAN.md`.

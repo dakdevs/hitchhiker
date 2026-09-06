@@ -3,6 +3,7 @@
 // can be found in the LICENSE file.
 
 #include "src/page_manager.h"
+#include "src/browser_generation.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -40,6 +41,15 @@ bool RectsOverlap(const CefRect& lhs, const CefRect& rhs) {
          static_cast<int64_t>(rhs.y) < lhs_bottom;
 }
 
+BrowserGenerationTracker::Identity BrowserIdentity(CefRefPtr<CefBrowser> browser) {
+  if (!browser || browser->GetIdentifier() <= 0) return 0;
+  // CEF documents this as a globally unique browser identifier. In the Chrome
+  // runtime it is host-local identity only: never pass it to extension APIs
+  // or treat it as a Chrome tabId (the discard probe measured different IDs).
+  return static_cast<BrowserGenerationTracker::Identity>(
+      browser->GetIdentifier());
+}
+
 }  // namespace
 
 class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
@@ -62,6 +72,7 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
   bool SetViewports(const std::vector<PageViewport>& viewports);
   void Layout();
   CefRefPtr<CefBrowser> BrowserForPage(const std::string& page_id) const;
+  std::optional<PageSnapshot> SnapshotForPage(const std::string& page_id) const;
   std::optional<std::string> PageIdForBrowser(
       CefRefPtr<CefBrowser> browser) const;
   void NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
@@ -84,6 +95,7 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
   void OnWindowReady(const std::string& page_id);
   void OnWindowDestroyed(const std::string& page_id);
   void OnBrowserCreated(const std::string& page_id,
+                        CefRefPtr<CefBrowserView> browser_view,
                         CefRefPtr<CefBrowser> browser);
   void OnBrowserDestroyed(const std::string& page_id,
                           CefRefPtr<CefBrowser> browser);
@@ -95,14 +107,19 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
     CefRefPtr<CefBrowserView> browser_view;
     CefRefPtr<CefWindow> window;
     CefRefPtr<CefBrowser> browser;
-    bool browser_created = false;
-    bool browser_destroyed = false;
-    bool window_destroyed = false;
+    BrowserGenerationTracker generation;
     bool close_requested = false;
     bool audio = false;
     bool call = false;
     bool download = false;
     bool unsaved_input = false;
+    bool main_document_committed = false;
+    bool resources_known = false;
+    std::string url;
+    std::string title;
+    bool loading = false;
+    bool can_go_back = false;
+    bool can_go_forward = false;
     // Default to the ordinary page-close semantic for a page window that CEF
     // closes outside an explicit manager request.
     PageEvent::CloseReason close_reason = PageEvent::CloseReason::kPageClose;
@@ -207,8 +224,8 @@ class PageWindowDelegate : public CefWindowDelegate {
 
   bool CanClose(CefRefPtr<CefWindow> window) override {
     CEF_REQUIRE_UI_THREAD();
-    if (browser_view_) {
-      if (auto browser = browser_view_->GetBrowser()) {
+    if (auto manager = manager_.lock()) {
+      if (auto browser = manager->BrowserForPage(page_id_)) {
         return browser->GetHost()->TryCloseBrowser();
       }
     }
@@ -234,7 +251,7 @@ class PageBrowserViewDelegate : public CefBrowserViewDelegate {
                         CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     if (auto manager = manager_.lock()) {
-      manager->OnBrowserCreated(page_id_, browser);
+      manager->OnBrowserCreated(page_id_, browser_view, browser);
     }
   }
 
@@ -296,6 +313,7 @@ bool PageManagerCore::Open(const std::string& page_id, const CefString& url) {
 
   PageRecord page;
   page.browser_view = browser_view;
+  page.url = url.ToString();
   pages_.emplace(page_id, std::move(page));
 
   CefWindow::CreateTopLevelWindow(
@@ -398,6 +416,7 @@ bool PageManagerCore::AcknowledgeCloseCancelled(
 
   PageEvent event{PageEvent::kCloseCancelled, *page_id};
   event.browser = it->second.browser;
+  event.generation = it->second.generation.generation();
   event.remaining_pages = pages_.size();
   Emit(std::move(event));
   return true;
@@ -459,6 +478,26 @@ CefRefPtr<CefBrowser> PageManagerCore::BrowserForPage(
   return it == pages_.end() ? nullptr : it->second.browser;
 }
 
+std::optional<PageSnapshot> PageManagerCore::SnapshotForPage(
+    const std::string& page_id) const {
+  CEF_REQUIRE_UI_THREAD();
+  const auto it = pages_.find(page_id);
+  if (it == pages_.end()) return std::nullopt;
+  const PageRecord& page = it->second;
+  PageSnapshot snapshot;
+  snapshot.id = page_id;
+  snapshot.generation = page.generation.generation();
+  snapshot.browser_available = page.generation.available() && page.browser;
+  snapshot.main_document_committed = page.main_document_committed;
+  snapshot.resources_known = page.resources_known;
+  snapshot.url = page.url;
+  snapshot.title = page.title;
+  snapshot.loading = page.loading;
+  snapshot.can_go_back = page.can_go_back;
+  snapshot.can_go_forward = page.can_go_forward;
+  return snapshot;
+}
+
 std::optional<std::string> PageManagerCore::PageIdForBrowser(
     CefRefPtr<CefBrowser> browser) const {
   CEF_REQUIRE_UI_THREAD();
@@ -480,9 +519,17 @@ void PageManagerCore::NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
   if (!page_id) {
     return;
   }
+  const auto page = pages_.find(*page_id);
+  if (page == pages_.end()) return;
+  // Discard replacement can report an empty title before it has a document.
+  // Keep the user-visible cache until a real document commits; an empty title
+  // after that commit is an intentional current-document value.
+  if (title.empty() && !page->second.main_document_committed) return;
+  page->second.title = title.ToString();
   PageEvent event{PageEvent::Type::kTitleChanged, *page_id};
   event.browser = browser;
   event.title = title;
+  event.generation = page->second.generation.generation();
   Emit(std::move(event));
 }
 
@@ -492,8 +539,18 @@ void PageManagerCore::NotifyMainDocumentCommitted(CefRefPtr<CefBrowser> browser)
   if (!page_id) return;
   auto page = pages_.find(*page_id);
   if (page == pages_.end()) return;
-  if (!page->second.unsaved_input) return;
-  page->second.unsaved_input = false;
+  PageRecord& record = page->second;
+  record.main_document_committed = true;
+  record.resources_known = true;
+  record.unsaved_input = false;
+  PageEvent committed{PageEvent::Type::kDocumentCommitted, *page_id};
+  committed.browser = browser;
+  committed.generation = record.generation.generation();
+  Emit(std::move(committed));
+  // Emit may close the page. Re-find rather than retaining a map reference.
+  page = pages_.find(*page_id);
+  if (page == pages_.end() || !page->second.browser ||
+      !page->second.browser->IsSame(browser)) return;
   EmitResources(*page_id, browser, page->second);
 }
 
@@ -503,6 +560,19 @@ void PageManagerCore::NotifyNavigationChanged(CefRefPtr<CefBrowser> browser) {
   if (!page_id) return;
   PageEvent event{PageEvent::Type::kNavigationChanged, *page_id};
   event.browser = browser;
+  auto it = pages_.find(*page_id);
+  if (it == pages_.end()) return;
+  PageRecord& page = it->second;
+  const std::string url = browser->GetMainFrame()->GetURL();
+  // Replacement callbacks can precede a document and expose an empty
+  // navigation controller. Do not erase retained metadata with that state.
+  page.loading = browser->IsLoading();
+  if (!url.empty() || page.main_document_committed) {
+    page.url = url;
+    page.can_go_back = browser->CanGoBack();
+    page.can_go_forward = browser->CanGoForward();
+  }
+  event.generation = page.generation.generation();
   Emit(std::move(event));
 }
 
@@ -551,6 +621,9 @@ void PageManagerCore::EmitResources(const std::string& page_id,
                                     const PageRecord& page) {
   PageEvent event{PageEvent::Type::kResourcesChanged, page_id};
   event.browser = browser;
+  if (!page.resources_known) return;
+  event.generation = page.generation.generation();
+  event.resources_known = true;
   event.audio = page.audio;
   event.call = page.call;
   event.download = page.download;
@@ -598,15 +671,12 @@ void PageManagerCore::OnWindowDestroyed(const std::string& page_id) {
     return;
   }
   it->second.window = nullptr;
-  it->second.window_destroyed = true;
-  if (!it->second.browser_created) {
-    it->second.browser_destroyed = true;
-    it->second.browser_view = nullptr;
-  }
+  it->second.generation.MarkWindowDestroyed();
   TryFinalize(page_id);
 }
 
 void PageManagerCore::OnBrowserCreated(const std::string& page_id,
+                                       CefRefPtr<CefBrowserView> browser_view,
                                        CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
   auto it = pages_.find(page_id);
@@ -616,17 +686,41 @@ void PageManagerCore::OnBrowserCreated(const std::string& page_id,
   }
 
   PageRecord& page = it->second;
+  if (page.generation.finalized() || page.generation.CanFinalize()) {
+    browser->GetHost()->CloseBrowser(false);
+    return;
+  }
+  const uint32_t previous_generation = page.generation.generation();
+  const BrowserGenerationTracker::AttachResult attachment =
+      page.generation.Attach(BrowserIdentity(browser));
+  if (attachment == BrowserGenerationTracker::AttachResult::kDuplicate) return;
+  if (attachment == BrowserGenerationTracker::AttachResult::kExhausted ||
+      attachment == BrowserGenerationTracker::AttachResult::kFinalized ||
+      attachment == BrowserGenerationTracker::AttachResult::kWindowDestroyed) {
+    browser->GetHost()->CloseBrowser(false);
+    return;
+  }
+  page.browser_view = browser_view;
   page.browser = browser;
-  page.browser_created = true;
+  page.main_document_committed = false;
+  page.resources_known = false;
+  page.audio = false;
+  page.call = false;
+  page.download = false;
+  page.unsaved_input = false;
 
-  PageEvent event{PageEvent::Type::kCreated, page_id};
+  PageEvent event{attachment == BrowserGenerationTracker::AttachResult::kInitial
+                      ? PageEvent::Type::kCreated
+                      : PageEvent::Type::kReplaced,
+                  page_id};
   event.browser = browser;
+  event.generation = page.generation.generation();
+  event.previous_generation = previous_generation;
   Emit(std::move(event));
-  // A complete initial snapshot lets the trusted runtime distinguish an idle
-  // page from a page whose protection state is simply unknown.
-  EmitResources(page_id, browser, page);
-
-  if (page.close_requested) {
+  it = pages_.find(page_id);
+  if (it == pages_.end() || !it->second.browser ||
+      !it->second.browser->IsSame(browser)) return;
+  if (it->second.close_requested) {
     browser->GetHost()->CloseBrowser(false);
   }
 }
@@ -638,12 +732,21 @@ void PageManagerCore::OnBrowserDestroyed(const std::string& page_id,
   if (it == pages_.end()) {
     return;
   }
-  if (it->second.browser && !it->second.browser->IsSame(browser)) {
+  const BrowserGenerationTracker::DetachResult detached =
+      it->second.generation.Detach(BrowserIdentity(browser));
+  if (detached != BrowserGenerationTracker::DetachResult::kCurrent) return;
+  const uint32_t generation = it->second.generation.generation();
+  it->second.browser = nullptr;
+  it->second.main_document_committed = false;
+  it->second.resources_known = false;
+  if (it->second.close_requested || it->second.generation.CanFinalize()) {
+    it->second.browser_view = nullptr;
+    TryFinalize(page_id);
     return;
   }
-  it->second.browser = nullptr;
-  it->second.browser_view = nullptr;
-  it->second.browser_destroyed = true;
+  PageEvent event{PageEvent::Type::kBrowserUnavailable, page_id};
+  event.generation = generation;
+  Emit(std::move(event));
   TryFinalize(page_id);
 }
 
@@ -682,16 +785,18 @@ void PageManagerCore::ApplyPageLayout(const std::string& page_id,
 
 void PageManagerCore::TryFinalize(const std::string& page_id) {
   auto it = pages_.find(page_id);
-  if (it == pages_.end() || !it->second.browser_destroyed ||
-      !it->second.window_destroyed) {
+  if (it == pages_.end() || !it->second.generation.CanFinalize()) {
     return;
   }
 
   const PageEvent::CloseReason close_reason = it->second.close_reason;
+  const uint32_t generation = it->second.generation.generation();
+  it->second.generation.Finalize();
   pages_.erase(it);
   viewports_.erase(page_id);
 
   PageEvent event{PageEvent::Type::kClosed, page_id};
+  event.generation = generation;
   event.close_reason = close_reason;
   event.remaining_pages = pages_.size();
   Emit(std::move(event));
@@ -760,6 +865,11 @@ void PageManager::Layout() {
 CefRefPtr<CefBrowser> PageManager::BrowserForPage(
     const std::string& page_id) const {
   return core_->BrowserForPage(page_id);
+}
+
+std::optional<PageSnapshot> PageManager::SnapshotForPage(
+    const std::string& page_id) const {
+  return core_->SnapshotForPage(page_id);
 }
 
 std::optional<std::string> PageManager::PageIdForBrowser(

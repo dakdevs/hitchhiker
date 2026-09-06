@@ -32,7 +32,7 @@ test("native extension review binds the staged digest, shows every permission an
           };
           const engine = EngineConnection.of({
             pid: 1,
-            ready: Effect.succeed({ event: "host.ready", params: {} }),
+            ready: Effect.succeed({ event: "host.ready", params: { pageBrowserGeneration: true } }),
             exit: Effect.never,
             events: Stream.empty,
             request: () => Effect.succeed({}),

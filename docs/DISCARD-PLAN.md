@@ -77,12 +77,15 @@ resource protections remain unverified by this experiment.
 
 ## Integration work
 
-Detect replacement without treating it as a new logical page. Preserve displayed URL/title and
-navigation metadata while discarded; replace stale CEF/CDP identities and invalidate document-scoped
-automation references. Restore the existing Chromium navigation controller on selection before
-claiming the page is loaded. The trusted scheduler must enforce all existing protections before any
-discard request and fail safely if identity or resource signals are uncertain. Select the authority
-channel after mapping the host lifecycle; do not expose a privileged page-message bridge.
+Generic browser replacement is now implemented in [REPLACEMENT-PLAN.md](REPLACEMENT-PLAN.md): stable
+logical pages, cached display metadata, generation-fenced CEF/CDP work, conservative resource state
+and stale DOM reference rejection. Explicit Reload restores Chromium's retained navigation controller.
+Replacement does not itself prove discard, so selection does not automatically reload a replacement.
+
+Next, positively classify a discarded page against its current generation before adding automatic
+restoration or the resource scheduler. The trusted scheduler must recheck visible bindings, active
+navigation and all existing protections before any discard, and fail safely on uncertain identity or
+resource signals. Never expose a privileged page-message bridge or reconstruct history from URLs.
 
 ## Accepted packet order
 
@@ -94,12 +97,12 @@ private browser CDP pipe to the exact extension worker URL and invoke a fixed fu
 integer tab identifier. Verify target identity checks and reattachment after worker suspension. This
 proof must precede adopting the worker as a production resource-management channel.
 
-Then fix externally initiated browser replacement independently of automatic discard. The native page
+The generic externally initiated replacement packet is now implemented independently of automatic discard. The native page
 record needs a browser generation; replacing its browser must preserve the logical page, owning view
 and window, rather than emit a second creation or a logical close. Fence old page CDP requests and
 observers before emitting a replacement event. Subsequent CDP calls attach to the current browser.
-The controller retains URL/title/interface state, clears stale resource knowledge, and restores the
-Chromium navigation controller before binding a discarded page to any default or plugin viewport.
+The controller retains URL/title/interface state and clears stale resource knowledge. Restoration on
+viewport binding remains pending a positive discarded-state classification; explicit Reload works.
 DOM references must invalidate on replacement. Test both callback orderings even if the native proof
 only observes one, and keep failure recovery conservative.
 

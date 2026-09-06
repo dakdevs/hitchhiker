@@ -6,6 +6,7 @@ import {
 } from "@hitchhiker/core";
 import { Effect, Schema } from "effect";
 import type { JsonObject } from "./engine.ts";
+import { AttachedPageGeneration } from "./page-lifecycle.ts";
 
 /** A complete native protection snapshot for one stable page ID. */
 export const PageResourceSignal = Schema.Struct({
@@ -20,7 +21,11 @@ export type PageResourceSignal = typeof PageResourceSignal.Type;
 /** The private host event carrying a complete PageResourceSignal snapshot. */
 export const PageResourceEvent = Schema.Struct({
   event: Schema.Literal("pages.resourcesChanged"),
-  params: PageResourceSignal,
+  params: Schema.Struct({
+    ...PageResourceSignal.fields,
+    generation: AttachedPageGeneration,
+    known: Schema.Literal(true),
+  }),
 });
 export const decodePageResourceEvent = Schema.decodeUnknownEffect(PageResourceEvent);
 

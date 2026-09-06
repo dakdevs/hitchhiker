@@ -47,6 +47,19 @@ guarantee. A direct handler that fails or is interrupted after shutdown begins p
 logical exit. Scope teardown closes child resources. Keep this unrestricted service inside the trusted
 broker. See [the shutdown contract and verification plan](ENGINE-DRAIN-PLAN.md).
 
+## Browser replacement
+
+A logical page survives Chromium replacing its browser object. The private host assigns each browser
+attachment a generation, preserves display metadata and viewport ownership, and retires old CDP
+requests/observers before reporting replacement. A temporary gap is unavailable, not a logical close.
+The controller requires the `pageBrowserGeneration` host capability and ignores stale generations.
+Resource state is unknown until the new main document commits; incomplete or generationless signals
+cannot make a page eligible to freeze. Scoped automation drops old document handles on replacement.
+
+Replacement alone does not establish that a page was discarded. This path preserves identity and
+supports explicit Reload; automatic restoration waits for a positive discarded-state check. See
+[the replacement contract](REPLACEMENT-PLAN.md) for callback ordering and verification work.
+
 ## Page resource protection
 
 Native resource snapshots report audio, capture, downloads and conservative unsaved-input protection.

@@ -15,6 +15,7 @@ import {
 } from "@hitchhiker/default-interface";
 import {
   activatePage,
+  decodePageLifecycleEvent,
   decodePageResourceEvent,
   EngineConnection,
   EngineError,
@@ -98,7 +99,19 @@ const decodePress = Schema.decodeUnknownOption(Press, { onExcessProperty: "error
 const decodeInput = Schema.decodeUnknownOption(Input, { onExcessProperty: "error" });
 
 type PageMetadata = { readonly id: string; readonly url: string; readonly title: string };
+type PageBrowserState = {
+  readonly generation: number;
+  readonly available: boolean;
+  readonly committed: boolean;
+};
 type Screen = "browser" | "settings" | "plugins" | "extensions";
+
+const UnknownProtections = Object.freeze({
+  audio: true,
+  call: true,
+  download: true,
+  unsavedInput: true,
+});
 
 interface ControllerState {
   browser: BrowserState;
@@ -371,6 +384,8 @@ export const makeBrowserController = (
     let knownResources: PageResourceKnowledge = new Map();
     const pendingDomWrites = new Set<string>();
     let resourceSignalsAvailable = false;
+    let pageBrowserGenerationAvailable = false;
+    let pageBrowsers = new Map<string, PageBrowserState>();
     const pluginEvents = yield* PubSub.bounded<{
       readonly owner: string;
       readonly event: string;
@@ -507,6 +522,11 @@ export const makeBrowserController = (
       id = pageId(),
       title = url,
     ) {
+      if (!pageBrowserGenerationAvailable)
+        return yield* new EngineError({
+          code: "capability",
+          message: "The native host does not support page browser generations",
+        });
       state = {
         ...state,
         opening: new Map(state.opening).set(id, { id, url, title }),
@@ -986,10 +1006,18 @@ export const makeBrowserController = (
             Effect.flatMap(({ params }) =>
               lock.withPermit(
                 Effect.gen(function* () {
+                  const browser = pageBrowsers.get(params.pageId);
                   const page = state.browser.pages.find(
                     (entry) => entry.id === params.pageId && entry.lifecycle !== "closed",
                   );
-                  if (!page && !state.opening.has(params.pageId)) return;
+                  if (
+                    page === undefined ||
+                    browser === undefined ||
+                    !browser.available ||
+                    !browser.committed ||
+                    browser.generation !== params.generation
+                  )
+                    return;
                   knownResources = rememberPageResources(knownResources, params);
                   const protections = {
                     audio: params.audio,
@@ -1026,138 +1054,211 @@ export const makeBrowserController = (
         if (
           ![
             "pages.created",
+            "pages.browserUnavailable",
+            "pages.replaced",
+            "pages.documentCommitted",
             "pages.closed",
             "pages.titleChanged",
             "pages.navigationChanged",
           ].includes(event.event)
         )
           return Effect.void;
-        const id = typeof event.params.pageId === "string" ? event.params.pageId : undefined;
-        if (!id) return Effect.void;
-        if (event.event === "pages.created" && !state.opening.has(id)) return Effect.void;
-        if (
-          event.event !== "pages.created" &&
-          !state.browser.pages.some((page) => page.id === id) &&
-          !state.opening.has(id)
-        )
-          return Effect.void;
-        return change(
-          () =>
-            Effect.sync(() => {
-              if (event.event === "pages.created") {
-                const metadata = state.opening.get(id);
-                if (!metadata) return;
-                const opened = openPage(state.browser, {
-                  id,
-                  profileId: ProfileId,
-                  url: metadata.url,
-                  title: metadata.title,
-                  now: now(),
-                });
-                if (!opened.ok) return;
-                const opening = new Map(state.opening);
-                opening.delete(id);
-                if (restoring && opening.size === 0) restoring = false;
-                state = {
-                  ...state,
-                  browser: opened.value,
-                  opening,
-                  interfaceState: {
-                    ...state.interfaceState,
-                    selectedPageId: state.interfaceState.selectedPageId ?? id,
-                    pageOrder: Object.freeze(
-                      state.interfaceState.pageOrder.includes(id)
-                        ? state.interfaceState.pageOrder
-                        : [...state.interfaceState.pageOrder, id],
-                    ),
-                  },
-                  input: { ...InitialInput, text: metadata.url },
-                  inputDirty: false,
-                };
-              } else if (event.event === "pages.closed") {
-                if (closingPersistence && event.params.reason === "page-close") {
-                  const pages = closingPersistence.pages.filter((page) => page.id !== id);
-                  const previous = closingPersistence.interfaceState;
-                  closingPersistence = {
-                    ...closingPersistence,
-                    pages,
-                    interfaceState: {
-                      ...previous,
-                      pageOrder: previous.pageOrder.filter((pageId) => pageId !== id),
-                      pinnedPageIds: previous.pinnedPageIds.filter((pageId) => pageId !== id),
-                      selectedPageId:
-                        previous.selectedPageId === id ? pages[0]?.id : previous.selectedPageId,
-                    },
+        return decodePageLifecycleEvent(event).pipe(
+          Effect.flatMap((lifecycle) =>
+            change(
+              () =>
+                Effect.sync(() => {
+                  const { params } = lifecycle;
+                  const id = params.pageId;
+                  const browser = pageBrowsers.get(id);
+                  const page = state.browser.pages.find(
+                    (entry) => entry.id === id && entry.lifecycle !== "closed",
+                  );
+                  const clearCurrentBrowserState = () => {
+                    pendingDomWrites.delete(id);
+                    const remainingResources = new Map(knownResources);
+                    remainingResources.delete(id);
+                    knownResources = remainingResources;
+                    if (page)
+                      state = {
+                        ...state,
+                        browser: replacePage(state.browser, id, {
+                          lifecycle: "loaded",
+                          protections: UnknownProtections,
+                        }),
+                      };
                   };
-                }
-                pendingDomWrites.delete(id);
-                const remainingResources = new Map(knownResources);
-                remainingResources.delete(id);
-                knownResources = remainingResources;
-                const closed = replacePage(state.browser, id, { lifecycle: "closed" });
-                const retainedClosed = new Set(
-                  closed.pages
-                    .filter((page) => page.lifecycle === "closed")
-                    .slice(-32)
-                    .map((page) => page.id),
-                );
-                const browser: BrowserState = {
-                  ...closed,
-                  pages: closed.pages.filter(
-                    (page) => page.lifecycle !== "closed" || retainedClosed.has(page.id),
-                  ),
-                };
-                const interfaceState = reconcileInterface(browser, {
-                  ...state.interfaceState,
-                  ...(state.interfaceState.selectedPageId === id
-                    ? { selectedPageId: undefined }
-                    : {}),
-                  pageOrder: Object.freeze(
-                    state.interfaceState.pageOrder.filter((entry) => entry !== id),
-                  ),
-                  pinnedPageIds: Object.freeze(
-                    state.interfaceState.pinnedPageIds.filter((entry) => entry !== id),
-                  ),
-                });
-                state = {
-                  ...state,
-                  browser,
-                  interfaceState,
-                  ...(state.interfaceState.selectedPageId === id
-                    ? {
-                        input: {
-                          ...InitialInput,
-                          text:
-                            browser.pages.find((page) => page.id === interfaceState.selectedPageId)
-                              ?.url ?? "",
+                  if (lifecycle.event === "pages.created") {
+                    if (browser !== undefined || params.generation !== 1) return;
+                    const metadata = state.opening.get(id);
+                    if (!metadata) return;
+                    pageBrowsers = new Map(pageBrowsers).set(id, {
+                      generation: params.generation,
+                      available: true,
+                      committed: false,
+                    });
+                    const opened = openPage(state.browser, {
+                      id,
+                      profileId: ProfileId,
+                      url: metadata.url,
+                      title: metadata.title,
+                      now: now(),
+                    });
+                    if (!opened.ok) return;
+                    const opening = new Map(state.opening);
+                    opening.delete(id);
+                    if (restoring && opening.size === 0) restoring = false;
+                    state = {
+                      ...state,
+                      browser: replacePage(opened.value, id, { protections: UnknownProtections }),
+                      opening,
+                      interfaceState: {
+                        ...state.interfaceState,
+                        selectedPageId: state.interfaceState.selectedPageId ?? id,
+                        pageOrder: Object.freeze(
+                          state.interfaceState.pageOrder.includes(id)
+                            ? state.interfaceState.pageOrder
+                            : [...state.interfaceState.pageOrder, id],
+                        ),
+                      },
+                      input: { ...InitialInput, text: metadata.url },
+                      inputDirty: false,
+                    };
+                  } else if (
+                    lifecycle.event === "pages.closed" &&
+                    params.generation === 0 &&
+                    browser === undefined &&
+                    state.opening.has(id)
+                  ) {
+                    const opening = new Map(state.opening);
+                    opening.delete(id);
+                    if (restoring && opening.size === 0) restoring = false;
+                    state = { ...state, opening };
+                  } else if (
+                    browser === undefined ||
+                    (lifecycle.event !== "pages.replaced" &&
+                      browser.generation !== params.generation)
+                  )
+                    return;
+                  else if (lifecycle.event === "pages.browserUnavailable") {
+                    if (!browser.available) return;
+                    pageBrowsers = new Map(pageBrowsers).set(id, { ...browser, available: false });
+                    clearCurrentBrowserState();
+                  } else if (lifecycle.event === "pages.replaced") {
+                    if (
+                      lifecycle.params.previousGeneration !== browser.generation ||
+                      params.generation !== browser.generation + 1
+                    )
+                      return;
+                    pageBrowsers = new Map(pageBrowsers).set(id, {
+                      generation: params.generation,
+                      available: true,
+                      committed: false,
+                    });
+                    clearCurrentBrowserState();
+                  } else if (lifecycle.event === "pages.documentCommitted") {
+                    if (!browser.available) return;
+                    pageBrowsers = new Map(pageBrowsers).set(id, { ...browser, committed: true });
+                  } else if (lifecycle.event === "pages.closed") {
+                    if (!page) return;
+                    if (closingPersistence && lifecycle.params.reason === "page-close") {
+                      const pages = closingPersistence.pages.filter((page) => page.id !== id);
+                      const previous = closingPersistence.interfaceState;
+                      closingPersistence = {
+                        ...closingPersistence,
+                        pages,
+                        interfaceState: {
+                          ...previous,
+                          pageOrder: previous.pageOrder.filter((pageId) => pageId !== id),
+                          pinnedPageIds: previous.pinnedPageIds.filter((pageId) => pageId !== id),
+                          selectedPageId:
+                            previous.selectedPageId === id ? pages[0]?.id : previous.selectedPageId,
                         },
-                        inputDirty: false,
-                      }
-                    : {}),
-                };
-              } else if (
-                event.event === "pages.titleChanged" &&
-                typeof event.params.title === "string"
-              )
-                state = {
-                  ...state,
-                  browser: replacePage(state.browser, id, { title: event.params.title }),
-                };
-              else if (
-                event.event === "pages.navigationChanged" &&
-                typeof event.params.url === "string" &&
-                normalizeWebUrl(event.params.url).ok
-              )
-                state = {
-                  ...state,
-                  browser: replacePage(state.browser, id, { url: event.params.url }),
-                  ...(state.interfaceState.selectedPageId === id && !state.inputDirty
-                    ? { input: { ...InitialInput, text: event.params.url } }
-                    : {}),
-                };
-            }),
-          true,
-          () => !restoring,
+                      };
+                    }
+                    pendingDomWrites.delete(id);
+                    const remainingResources = new Map(knownResources);
+                    remainingResources.delete(id);
+                    knownResources = remainingResources;
+                    const remainingBrowsers = new Map(pageBrowsers);
+                    remainingBrowsers.delete(id);
+                    pageBrowsers = remainingBrowsers;
+                    const closed = replacePage(state.browser, id, { lifecycle: "closed" });
+                    const retainedClosed = new Set(
+                      closed.pages
+                        .filter((page) => page.lifecycle === "closed")
+                        .slice(-32)
+                        .map((page) => page.id),
+                    );
+                    const browser: BrowserState = {
+                      ...closed,
+                      pages: closed.pages.filter(
+                        (page) => page.lifecycle !== "closed" || retainedClosed.has(page.id),
+                      ),
+                    };
+                    const interfaceState = reconcileInterface(browser, {
+                      ...state.interfaceState,
+                      ...(state.interfaceState.selectedPageId === id
+                        ? { selectedPageId: undefined }
+                        : {}),
+                      pageOrder: Object.freeze(
+                        state.interfaceState.pageOrder.filter((entry) => entry !== id),
+                      ),
+                      pinnedPageIds: Object.freeze(
+                        state.interfaceState.pinnedPageIds.filter((entry) => entry !== id),
+                      ),
+                    });
+                    state = {
+                      ...state,
+                      browser,
+                      interfaceState,
+                      ...(state.interfaceState.selectedPageId === id
+                        ? {
+                            input: {
+                              ...InitialInput,
+                              text:
+                                browser.pages.find(
+                                  (page) => page.id === interfaceState.selectedPageId,
+                                )?.url ?? "",
+                            },
+                            inputDirty: false,
+                          }
+                        : {}),
+                    };
+                  } else if (
+                    lifecycle.event === "pages.titleChanged" &&
+                    browser.available &&
+                    browser.committed
+                  )
+                    state = {
+                      ...state,
+                      browser: replacePage(state.browser, id, { title: lifecycle.params.title }),
+                    };
+                  else if (
+                    lifecycle.event === "pages.navigationChanged" &&
+                    browser.available &&
+                    browser.committed &&
+                    normalizeWebUrl(lifecycle.params.url).ok
+                  )
+                    state = {
+                      ...state,
+                      browser: replacePage(state.browser, id, { url: lifecycle.params.url }),
+                      ...(state.interfaceState.selectedPageId === id && !state.inputDirty
+                        ? { input: { ...InitialInput, text: lifecycle.params.url } }
+                        : {}),
+                    };
+                }),
+              true,
+              () => !restoring,
+            ),
+          ),
+          Effect.mapError(
+            () =>
+              new EngineError({
+                code: "lifecycle",
+                message: "Could not apply native page lifecycle event",
+              }),
+          ),
         );
       });
 
@@ -1209,6 +1310,12 @@ export const makeBrowserController = (
 
     const start = Effect.gen(function* () {
       const ready = yield* engine.ready;
+      pageBrowserGenerationAvailable = ready.params.pageBrowserGeneration === true;
+      if (!pageBrowserGenerationAvailable)
+        return yield* new EngineError({
+          code: "capability",
+          message: "The native host does not support page browser generations",
+        });
       resourceSignalsAvailable = ready.params.pageResourceSignals === true;
       const persisted = yield* loadBrowserPersistence(profileRoot, ProfileId).pipe(
         Effect.mapError(

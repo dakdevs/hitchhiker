@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -16,6 +17,19 @@
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
 #include "include/views/cef_window.h"
+
+struct PageSnapshot {
+  std::string id;
+  uint32_t generation = 0;
+  bool browser_available = false;
+  bool main_document_committed = false;
+  bool resources_known = false;
+  std::string url;
+  std::string title;
+  bool loading = false;
+  bool can_go_back = false;
+  bool can_go_forward = false;
+};
 
 struct PageViewport {
   std::string page_id;
@@ -35,6 +49,9 @@ struct PageEvent {
     kWindowCloseCancelled,
     kTitleChanged,
     kNavigationChanged,
+    kBrowserUnavailable,
+    kReplaced,
+    kDocumentCommitted,
     // Native, page-scoped activity signals. These are advisory protection
     // inputs for the trusted runtime; they never cause a page to be closed.
     kResourcesChanged,
@@ -52,6 +69,9 @@ struct PageEvent {
   std::string page_id;
   CefRefPtr<CefBrowser> browser;
   CefString title;
+  uint32_t generation = 0;
+  uint32_t previous_generation = 0;
+  bool resources_known = false;
   bool audio = false;
   bool call = false;
   bool download = false;
@@ -114,6 +134,7 @@ class PageManager : public CefBaseRefCounted {
   void Layout();
 
   CefRefPtr<CefBrowser> BrowserForPage(const std::string& page_id) const;
+  std::optional<PageSnapshot> SnapshotForPage(const std::string& page_id) const;
   std::optional<std::string> PageIdForBrowser(
       CefRefPtr<CefBrowser> browser) const;
 

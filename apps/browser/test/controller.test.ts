@@ -30,7 +30,10 @@ test("window shutdown preserves the session, while cancellation persists actual 
           const events = yield* PubSub.unbounded<EngineEvent>();
           const engine = EngineConnection.of({
             pid: 1,
-            ready: Effect.succeed({ event: "host.ready", params: {} }),
+            ready: Effect.succeed({
+              event: "host.ready",
+              params: { pageBrowserGeneration: true },
+            }),
             exit: Effect.never,
             events: Stream.fromPubSub(events),
             request: () => Effect.succeed({}),
@@ -71,14 +74,24 @@ test("window shutdown preserves the session, while cancellation persists actual 
             );
           yield* controller.start;
           const first = yield* controller.openPage("https://one.test/");
-          yield* emit("pages.created", { pageId: first });
+          yield* emit("pages.created", { pageId: first, generation: 1 });
           const second = yield* controller.openPage("https://two.test/");
-          yield* emit("pages.created", { pageId: second });
+          yield* emit("pages.created", { pageId: second, generation: 1 });
           const explicit = yield* controller.openPage("https://explicit-close.test/");
-          yield* emit("pages.created", { pageId: explicit });
+          yield* emit("pages.created", { pageId: explicit, generation: 1 });
           yield* emit("window.closing");
-          yield* emit("pages.closed", { pageId: first, reason: "window-close" });
-          yield* emit("pages.closed", { pageId: explicit, reason: "page-close" });
+          yield* emit("pages.closed", {
+            pageId: first,
+            generation: 1,
+            reason: "window-close",
+            remainingPages: 2,
+          });
+          yield* emit("pages.closed", {
+            pageId: explicit,
+            generation: 1,
+            reason: "page-close",
+            remainingPages: 1,
+          });
           yield* expectPersisted([first, second]);
           assert.equal(
             (yield* controller.snapshot).pages.find((page) => page.id === first)?.lifecycle,
@@ -87,7 +100,12 @@ test("window shutdown preserves the session, while cancellation persists actual 
           yield* emit("window.closeCancelled");
           yield* expectPersisted([second]);
           // A late close from the cancelled batch must not leave a phantom saved tab.
-          yield* emit("pages.closed", { pageId: second, reason: "window-close" });
+          yield* emit("pages.closed", {
+            pageId: second,
+            generation: 1,
+            reason: "window-close",
+            remainingPages: 0,
+          });
           yield* expectPersisted([]);
           assert.equal(yield* controller.lastError, undefined);
         }),
@@ -110,7 +128,10 @@ test("filters non-page engine feedback, selects a successor, and persists the cu
           const opened: string[] = [];
           const engine = EngineConnection.of({
             pid: 1,
-            ready: Effect.succeed({ event: "host.ready", params: {} }),
+            ready: Effect.succeed({
+              event: "host.ready",
+              params: { pageBrowserGeneration: true },
+            }),
             exit: Effect.never,
             events: Stream.fromPubSub(engineEvents),
             request: (method, params = {}) =>
@@ -155,7 +176,7 @@ test("filters non-page engine feedback, selects a successor, and persists the cu
           yield* controller.dispatch("browser.navigate");
           yield* PubSub.publish(engineEvents, {
             event: "pages.created",
-            params: { pageId: opened[0]! },
+            params: { pageId: opened[0]!, generation: 1 },
           });
           yield* Effect.sleep(5);
 
@@ -165,12 +186,17 @@ test("filters non-page engine feedback, selects a successor, and persists the cu
           yield* controller.dispatch("browser.navigate");
           yield* PubSub.publish(engineEvents, {
             event: "pages.created",
-            params: { pageId: opened[1]! },
+            params: { pageId: opened[1]!, generation: 1 },
           });
           yield* Effect.sleep(5);
           yield* PubSub.publish(engineEvents, {
             event: "pages.closed",
-            params: { pageId: opened[1]! },
+            params: {
+              pageId: opened[1]!,
+              generation: 1,
+              reason: "page-close",
+              remainingPages: 1,
+            },
           });
           yield* Effect.sleep(5);
           assert.deepEqual(
@@ -228,6 +254,186 @@ test("filters non-page engine feedback, selects a successor, and persists the cu
   }
 });
 
+test("drops a generation-zero close while an initial browser attachment is opening", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-opening-close-"));
+  try {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const events = yield* PubSub.unbounded<EngineEvent>();
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({
+              event: "host.ready",
+              params: { pageBrowserGeneration: true },
+            }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(events),
+            request: () => Effect.succeed({}),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(
+                  NativeSurface,
+                  NativeSurface.of({ events: Stream.empty, commit: () => Effect.succeed(1) }),
+                ),
+              ),
+            ),
+          );
+          yield* controller.start;
+          const failed = yield* controller.openPage("https://failed.test/");
+          yield* PubSub.publish(events, {
+            event: "pages.closed",
+            params: { pageId: failed, generation: 0, reason: "page-close", remainingPages: 0 },
+          });
+          yield* Effect.yieldNow;
+          assert.equal((yield* controller.snapshot).pages.length, 0);
+
+          const next = yield* controller.openPage("https://next.test/");
+          yield* PubSub.publish(events, {
+            event: "pages.created",
+            params: { pageId: next, generation: 1 },
+          });
+          yield* Effect.yieldNow;
+          assert.equal((yield* controller.snapshot).pages[0]?.id, next);
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps a logical page and its persistence through replacement while rejecting stale generations", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-browser-replacement-"));
+  try {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const events = yield* PubSub.unbounded<EngineEvent>();
+          const requests: Array<{
+            readonly method: string;
+            readonly params: Record<string, unknown>;
+          }> = [];
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({
+              event: "host.ready",
+              params: { pageBrowserGeneration: true, pageResourceSignals: true },
+            }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(events),
+            request: (method, params = {}) =>
+              Effect.sync(() => {
+                requests.push({ method, params });
+                return {};
+              }),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(
+                  NativeSurface,
+                  NativeSurface.of({ events: Stream.empty, commit: () => Effect.succeed(1) }),
+                ),
+              ),
+            ),
+          );
+          const emit = (event: string, params: EngineEvent["params"]) =>
+            PubSub.publish(events, { event, params }).pipe(Effect.andThen(Effect.sleep(10)));
+
+          yield* controller.start;
+          const id = yield* controller.openPage("https://one.test/");
+          yield* emit("pages.created", { pageId: id, generation: 1 });
+          yield* emit("pages.documentCommitted", { pageId: id, generation: 1 });
+          yield* emit("pages.resourcesChanged", {
+            pageId: id,
+            generation: 1,
+            known: true,
+            audio: false,
+            call: false,
+            download: false,
+            unsavedInput: false,
+          });
+          yield* controller.dispatch(`page.pin:${id}`);
+          yield* emit("pages.navigationChanged", {
+            pageId: id,
+            generation: 1,
+            url: "https://current.test/",
+            loading: false,
+            canGoBack: true,
+            canGoForward: false,
+          });
+          yield* emit("pages.browserUnavailable", { pageId: id, generation: 1 });
+          yield* emit("pages.titleChanged", { pageId: id, generation: 1, title: "stale" });
+          yield* emit("pages.replaced", {
+            pageId: id,
+            generation: 2,
+            previousGeneration: 1,
+          });
+          yield* emit("pages.navigationChanged", {
+            pageId: id,
+            generation: 1,
+            url: "https://stale.test/",
+            loading: false,
+            canGoBack: false,
+            canGoForward: false,
+          });
+          yield* emit("pages.resourcesChanged", {
+            pageId: id,
+            generation: 1,
+            known: true,
+            audio: false,
+            call: false,
+            download: false,
+            unsavedInput: false,
+          });
+
+          const page = (yield* controller.snapshot).pages.find((entry) => entry.id === id);
+          assert.equal(page?.url, "https://current.test/");
+          assert.equal(page?.title, "https://one.test/");
+          assert.deepEqual(page?.protections, {
+            audio: true,
+            call: true,
+            download: true,
+            unsavedInput: true,
+          });
+          assert.equal(
+            requests.some((request) => request.method === "pages.reload"),
+            false,
+            "replacement must not reload automatically",
+          );
+          const persisted = JSON.parse(
+            yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+          ) as {
+            interface: { pinnedPageIds: string[] };
+            pages: Array<{ id: string; url: string }>;
+          };
+          assert.deepEqual(persisted.interface.pinnedPageIds, [id]);
+          assert.deepEqual(
+            persisted.pages.map((entry) => ({ id: entry.id, url: entry.url })),
+            [{ id, url: "https://current.test/" }],
+          );
+
+          yield* controller.dispatch("browser.reload");
+          assert.deepEqual(requests.at(-1), { method: "pages.reload", params: { id } });
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a pending scoped DOM write activates and protects only its stable page", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hitchhiker-browser-dom-protection-"));
   const originalNow = Date.now;
@@ -245,7 +451,7 @@ test("a pending scoped DOM write activates and protects only its stable page", a
             pid: 1,
             ready: Effect.succeed({
               event: "host.ready",
-              params: { pageResourceSignals: true },
+              params: { pageResourceSignals: true, pageBrowserGeneration: true },
             }),
             exit: Effect.never,
             events: Stream.fromPubSub(engineEvents),
@@ -287,11 +493,20 @@ test("a pending scoped DOM write activates and protects only its stable page", a
           for (const url of ["https://one.test", "https://two.test", "https://three.test"])
             yield* controller.openPage(url);
           for (const id of opened) {
-            yield* PubSub.publish(engineEvents, { event: "pages.created", params: { pageId: id } });
+            yield* PubSub.publish(engineEvents, {
+              event: "pages.created",
+              params: { pageId: id, generation: 1 },
+            });
+            yield* PubSub.publish(engineEvents, {
+              event: "pages.documentCommitted",
+              params: { pageId: id, generation: 1 },
+            });
             yield* PubSub.publish(engineEvents, {
               event: "pages.resourcesChanged",
               params: {
                 pageId: id,
+                generation: 1,
+                known: true,
                 audio: false,
                 call: false,
                 download: false,
@@ -312,6 +527,26 @@ test("a pending scoped DOM write activates and protects only its stable page", a
           assert.deepEqual(lifecycle, [{ pageId: opened[2]!, state: "frozen" }]);
           assert.equal(
             (yield* controller.snapshot).pages.find((page) => page.id === opened[1])?.lifecycle,
+            "loaded",
+          );
+          yield* PubSub.publish(engineEvents, {
+            event: "pages.replaced",
+            params: {
+              pageId: opened[2]!,
+              generation: 2,
+              previousGeneration: 1,
+            },
+          });
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust(1_000);
+          yield* Effect.yieldNow;
+          assert.deepEqual(
+            lifecycle,
+            [{ pageId: opened[2]!, state: "frozen" }],
+            "a replacement without current resources must stay ineligible for freezing",
+          );
+          assert.equal(
+            (yield* controller.snapshot).pages.find((page) => page.id === opened[2])?.lifecycle,
             "loaded",
           );
         }),
