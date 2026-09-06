@@ -76,6 +76,7 @@ const makeFakeEngine = Effect.fn("makeFakeEngine")(function* (): Effect.fn.Retur
   const events = yield* PubSub.unbounded<JsonObject>();
   const exit = yield* Deferred.make<number, EngineError>();
   const sent: JsonObject[] = [];
+  let claimed = false;
 
   const sendCdp = Effect.fn("FakeEngine.sendCdp")(function* (message: JsonObject) {
     sent.push(message);
@@ -103,10 +104,18 @@ const makeFakeEngine = Effect.fn("makeFakeEngine")(function* (): Effect.fn.Retur
       ready: Effect.never,
       exit: Deferred.await(exit),
       events: Stream.empty,
-      cdpEvents: Stream.fromPubSub(events),
       request: () =>
         Effect.fail(new EngineError({ code: "unsupported", message: "unused in relay tests" })),
-      sendCdp,
+      loadUnpacked: () =>
+        Effect.fail(new EngineError({ code: "unsupported", message: "unused in relay tests" })),
+      uninstall: () =>
+        Effect.fail(new EngineError({ code: "unsupported", message: "unused in relay tests" })),
+      claimRawCdp: Effect.suspend(() => {
+        if (claimed)
+          return Effect.fail(new EngineError({ code: "cdp-owned", message: "already claimed" }));
+        claimed = true;
+        return Effect.succeed({ events: Stream.fromPubSub(events), send: sendCdp });
+      }),
     }),
     sent,
     fail: PubSub.shutdown(events),
@@ -150,6 +159,60 @@ test("serves authenticated discovery and forwards browser-level CDP messages", a
       assert.deepEqual(fake.sent.at(-1), { id: 7, method: "Target.getTargets" });
     }),
   );
+});
+
+test("permits flattened sessions while rejecting extension mutation, legacy nesting, and reserved IDs", async () => {
+  await Effect.runPromise(
+    withRelay(async (relay, fake) => {
+      const socket = await connect(relay.url);
+      const response = nextMessage(socket);
+      socket.send(
+        JSON.stringify({ id: 12, sessionId: "flattened", method: "Runtime.enable", params: {} }),
+      );
+      assert.deepEqual(await response, { id: 12, result: { targetInfos: [] } });
+      assert.deepEqual(fake.sent.at(-1), {
+        id: 12,
+        sessionId: "flattened",
+        method: "Runtime.enable",
+        params: {},
+      });
+    }),
+  );
+
+  for (const message of [
+    { id: 20, method: "Extensions.loadUnpacked", params: { path: "/tmp/extension" } },
+    { id: 21, sessionId: "flattened", method: "Extensions.uninstall", params: { id: "a" } },
+    {
+      id: 22,
+      method: "Target.sendMessageToTarget",
+      params: {
+        sessionId: "legacy",
+        message: JSON.stringify({
+          id: 1,
+          method: "Extensions.loadUnpacked",
+          params: { path: "/tmp/extension" },
+        }),
+      },
+    },
+    { id: 2_147_483_647, method: "Browser.getVersion" },
+    { id: -2_147_483_648, method: "Browser.getVersion" },
+  ] satisfies JsonObject[]) {
+    await Effect.runPromise(
+      withRelay(async (relay, fake) => {
+        const socket = await connect(relay.url);
+        const sentBeforeClientMessage = fake.sent.length;
+        const response = nextMessage(socket);
+        socket.send(JSON.stringify(message));
+        assert.deepEqual(await response, {
+          id: message.id,
+          ...(typeof message.sessionId === "string" ? { sessionId: message.sessionId } : {}),
+          error: { code: -32601, message: "Method is not available through this relay" },
+        });
+        assert.equal(socket.readyState, WebSocket.OPEN);
+        assert.equal(fake.sent.length, sentBeforeClientMessage);
+      }),
+    );
+  }
 });
 
 test("supports standard discovery and WebSocket paths with a Bearer capability", async () => {

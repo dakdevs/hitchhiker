@@ -14,7 +14,9 @@ test(
     const profileRoot = await mkdtemp(join(tmpdir(), "hitchhiker-native-lease-"));
     const launch = <A, E>(operation: Effect.Effect<A, E, EngineConnection>) =>
       operation.pipe(
-        Effect.provide(EngineConnection.layer({ executable: binary!, profileRoot })),
+        Effect.provide(
+          EngineConnection.layer({ executable: binary!, profileRoot, extensionManagement: false }),
+        ),
         Effect.scoped,
       );
     try {

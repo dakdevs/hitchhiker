@@ -57,6 +57,7 @@ class ShellWindowDelegate : public CefWindowDelegate {
     }
     window->Show();
     if (bridge_) {
+      bridge_->SetCloseRequestHandler([this] { RequestCloseFromBridge(); });
       bridge_->SetUiCommitHandler([this](CefRefPtr<CefDictionaryValue> params,
                                         std::string* error) {
         const auto type = params->GetType("revision");
@@ -178,11 +179,25 @@ class ShellWindowDelegate : public CefWindowDelegate {
   void OnWindowFullscreenTransition(CefRefPtr<CefWindow>, bool complete) override {
     if (complete) ApplyLayout();
   }
-  bool CanClose(CefRefPtr<CefWindow>) override {
+  bool BeginCloseTransaction() {
     closing_ = true;
     const bool clients_drained = handler_->CanCloseShell();
     const bool pages_drained = !manager_ || manager_->CloseAll() == 0;
     return clients_drained && pages_drained;
+  }
+  void RequestCloseFromBridge() {
+    if (!root_ || root_->IsClosed() || closing_) return;
+    if (BeginCloseTransaction() && !root_->IsClosed()) {
+      // Return the protocol acknowledgement before destruction can stop the
+      // bridge writer. Page-drain closure already uses this same next-turn
+      // pattern in OnPageEvent.
+      CefPostTask(TID_UI, base::BindOnce([](CefRefPtr<CefWindow> root) {
+        if (!root->IsClosed()) root->Close();
+      }, root_));
+    }
+  }
+  bool CanClose(CefRefPtr<CefWindow>) override {
+    return BeginCloseTransaction();
   }
   void OnWindowDestroyed(CefRefPtr<CefWindow>) override {
     if (bridge_) { bridge_->Stop(); bridge_ = nullptr; }

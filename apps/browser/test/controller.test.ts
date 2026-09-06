@@ -9,7 +9,7 @@ import {
   type EngineEvent,
   type SurfaceEvent,
 } from "@hitchhiker/runtime";
-import { Deferred, Effect, Layer, PubSub, Schema, Stream } from "effect";
+import { Deferred, Effect, Layer, PubSub, Schedule, Schema, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { makeBrowserController, normalizeAddressDraft } from "../src/controller.ts";
 
@@ -19,6 +19,83 @@ test("normalizes addresses and keeps plain search text out of engine navigation"
   assert.equal(normalizeAddressDraft("two words"), "https://duckduckgo.com/?q=two%20words");
   assert.equal(normalizeAddressDraft(""), undefined);
   assert.equal(normalizeAddressDraft("file:///private"), undefined);
+});
+
+test("window shutdown preserves the session, while cancellation persists actual surviving pages", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-window-session-"));
+  try {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const events = yield* PubSub.unbounded<EngineEvent>();
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({ event: "host.ready", params: {} }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(events),
+            request: () => Effect.succeed({}),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(
+                  NativeSurface,
+                  NativeSurface.of({ events: Stream.empty, commit: () => Effect.succeed(1) }),
+                ),
+              ),
+            ),
+          );
+          const emit = (event: string, params = {}) =>
+            PubSub.publish(events, { event, params }).pipe(Effect.andThen(Effect.sleep(15)));
+          const persistedIds = () =>
+            Effect.promise(async () => {
+              const value = Schema.decodeUnknownSync(
+                Schema.Struct({ pages: Schema.Array(Schema.Struct({ id: Schema.String })) }),
+              )(JSON.parse(await readFile(join(directory, "browser-state.json"), "utf8")));
+              return value.pages.map((page) => page.id);
+            });
+          const expectPersisted = (expected: readonly string[]) =>
+            persistedIds().pipe(
+              Effect.flatMap((actual) =>
+                JSON.stringify(actual) === JSON.stringify(expected)
+                  ? Effect.void
+                  : Effect.fail(
+                      new Error(`Expected ${expected.join(",")}; got ${actual.join(",")}`),
+                    ),
+              ),
+              Effect.retry({ times: 100, schedule: Schedule.spaced(10) }),
+            );
+          yield* controller.start;
+          const first = yield* controller.openPage("https://one.test/");
+          yield* emit("pages.created", { pageId: first });
+          const second = yield* controller.openPage("https://two.test/");
+          yield* emit("pages.created", { pageId: second });
+          const explicit = yield* controller.openPage("https://explicit-close.test/");
+          yield* emit("pages.created", { pageId: explicit });
+          yield* emit("window.closing");
+          yield* emit("pages.closed", { pageId: first, reason: "window-close" });
+          yield* emit("pages.closed", { pageId: explicit, reason: "page-close" });
+          yield* expectPersisted([first, second]);
+          assert.equal(
+            (yield* controller.snapshot).pages.find((page) => page.id === first)?.lifecycle,
+            "closed",
+          );
+          yield* emit("window.closeCancelled");
+          yield* expectPersisted([second]);
+          // A late close from the cancelled batch must not leave a phantom saved tab.
+          yield* emit("pages.closed", { pageId: second, reason: "window-close" });
+          yield* expectPersisted([]);
+          assert.equal(yield* controller.lastError, undefined);
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("filters non-page engine feedback, selects a successor, and persists the current mutation", async () => {
@@ -36,14 +113,15 @@ test("filters non-page engine feedback, selects a successor, and persists the cu
             ready: Effect.succeed({ event: "host.ready", params: {} }),
             exit: Effect.never,
             events: Stream.fromPubSub(engineEvents),
-            cdpEvents: Stream.empty,
             request: (method, params = {}) =>
               Effect.sync(() => {
                 if (method === "pages.open" && typeof params.id === "string")
                   opened.push(params.id);
                 return {};
               }),
-            sendCdp: () => Effect.void,
+            loadUnpacked: () => Effect.die("unused extension load"),
+            uninstall: () => Effect.die("unused extension uninstall"),
+            claimRawCdp: Effect.die("unused raw CDP claim"),
           });
           const surface = NativeSurface.of({
             commit: (next) =>
@@ -171,7 +249,6 @@ test("a pending scoped DOM write activates and protects only its stable page", a
             }),
             exit: Effect.never,
             events: Stream.fromPubSub(engineEvents),
-            cdpEvents: Stream.empty,
             request: (method, params = {}) =>
               Effect.sync(() => {
                 if (method === "pages.open" && typeof params.id === "string")
@@ -190,7 +267,9 @@ test("a pending scoped DOM write activates and protects only its stable page", a
                 }
                 return {};
               }),
-            sendCdp: () => Effect.void,
+            loadUnpacked: () => Effect.die("unused extension load"),
+            uninstall: () => Effect.die("unused extension uninstall"),
+            claimRawCdp: Effect.die("unused raw CDP claim"),
           });
           const surface = NativeSurface.of({
             commit: () => Effect.succeed(1),

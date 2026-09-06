@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { Context, Effect, Fiber, Layer, Option, Schedule, Schema, Stream } from "effect";
 import { EngineConnection, EngineError } from "../src/engine.ts";
@@ -14,6 +15,15 @@ import { NativeSurface } from "../src/surface.ts";
 import { row, column, text, viewport as pageViewport } from "@hitchhiker/ui";
 
 const binary = process.env.HITCHHIKER_NATIVE_BINARY;
+const extensionFixture = fileURLToPath(
+  new URL("../../../apps/host-probe/fixtures/extension", import.meta.url),
+);
+const extensionArtifactsModule = pathToFileURL(
+  fileURLToPath(new URL("../../../apps/browser/src/extension-artifacts.ts", import.meta.url)),
+).href;
+const profileLeaseModule = pathToFileURL(
+  fileURLToPath(new URL("../../../apps/browser/src/profile-write-lease.ts", import.meta.url)),
+).href;
 const Value = Schema.Struct({ result: Schema.Struct({ value: Schema.Json }) });
 const decodeValue = Schema.decodeUnknownEffect(Value);
 const viewportBounds = Schema.decodeUnknownOption(
@@ -26,6 +36,46 @@ test(
   async () => {
     if (!binary) return;
     const directory = await mkdtemp(join(tmpdir(), "hitchhiker-engine-"));
+    const firstProfile = join(directory, "first profile 🚀");
+    const keylessSource = join(directory, "keyless extension 🚀");
+    const keyedSource = join(directory, "keyed extension");
+    await cp(extensionFixture, keylessSource, { recursive: true, force: false });
+    await cp(extensionFixture, keyedSource, { recursive: true, force: false });
+    const keyedManifestPath = join(keyedSource, "manifest.json");
+    const keyedManifest = JSON.parse(await readFile(keyedManifestPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    keyedManifest.key = "AQID";
+    await writeFile(keyedManifestPath, JSON.stringify(keyedManifest), "utf8");
+    const { createExtensionArtifactStore } = (await import(extensionArtifactsModule)) as {
+      readonly createExtensionArtifactStore: (options: {
+        readonly profileLease: unknown;
+      }) => Effect.Effect<{
+        readonly stage: (sourceDirectory: string) => Effect.Effect<{
+          readonly directory: string;
+          readonly expectedChromiumId: string;
+        }>;
+      }>;
+    };
+    const { acquireProfileWriteLease } = (await import(profileLeaseModule)) as {
+      readonly acquireProfileWriteLease: (
+        profileRoot: string,
+        executable: string,
+      ) => Effect.Effect<unknown, unknown, never>;
+    };
+    const [keylessArtifact, keyedArtifact] = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const profileLease = yield* acquireProfileWriteLease(firstProfile, binary);
+          const extensionArtifacts = yield* createExtensionArtifactStore({ profileLease });
+          return yield* Effect.all([
+            extensionArtifacts.stage(keylessSource),
+            extensionArtifacts.stage(keyedSource),
+          ]);
+        }),
+      ),
+    );
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");
       response.end(
@@ -66,7 +116,17 @@ test(
       await Effect.runPromise(
         Effect.gen(function* () {
           const first = yield* EngineConnection;
+          yield* Effect.addFinalizer(() =>
+            first.request("window.close").pipe(Effect.catch(() => Effect.void)),
+          );
           yield* first.ready;
+          const keylessId = yield* first.loadUnpacked(keylessArtifact.directory);
+          assert.equal(keylessId, keylessArtifact.expectedChromiumId);
+          const keyedId = yield* first.loadUnpacked(keyedArtifact.directory);
+          assert.equal(keyedId, keyedArtifact.expectedChromiumId);
+          assert.notEqual(keyedId, keylessId);
+          yield* first.uninstall(keyedId);
+          yield* first.uninstall(keylessId);
           assert.deepEqual(yield* first.request("pages.list"), []);
           yield* first.request("pages.open", { id: "first", url });
           yield* loaded(first, "first");
@@ -127,17 +187,6 @@ test(
             ),
             true,
           );
-          const response = yield* first.cdpEvents.pipe(
-            Stream.filter((event) => event.id === 31),
-            Stream.take(1),
-            Stream.runCollect,
-            Effect.forkScoped,
-          );
-          yield* Effect.yieldNow;
-          yield* first.sendCdp({ id: 31, method: "Browser.getVersion" });
-          const versions = yield* Fiber.join(response).pipe(Effect.timeout(5000));
-          assert.equal(versions.length, 1);
-          assert.ok("result" in versions[0]);
           yield* Effect.gen(function* () {
             const store = yield* createGrantStore({ directory: join(directory, "grants") });
             const issued = yield* store.issue({
@@ -167,7 +216,10 @@ test(
             const browser = yield* Effect.acquireRelease(
               Effect.promise(() => chromium.connectOverCDP(relay.url, { timeout: 5000 })),
               (client) =>
-                Effect.promise(() => client.close()).pipe(Effect.catch(() => Effect.void)),
+                Effect.promise(() => client.close()).pipe(
+                  Effect.timeoutOrElse({ duration: 2_000, orElse: () => Effect.void }),
+                  Effect.catch(() => Effect.void),
+                ),
             );
             const page = browser
               .contexts()
@@ -180,6 +232,18 @@ test(
               "persistent",
             );
             yield* Effect.promise(() => page.locator("#input").fill("via-playwright"));
+            const browserSession = yield* Effect.promise(() => browser.newBrowserCDPSession());
+            const blockedMutation = yield* Effect.promise(() =>
+              browserSession
+                .send("Extensions.loadUnpacked", { path: keylessArtifact.directory })
+                .then(
+                  () => undefined,
+                  (error: unknown) => error,
+                ),
+            );
+            assert.notEqual(blockedMutation, undefined);
+            assert.match(String(blockedMutation), /Method is not available through this relay/);
+            assert.equal(yield* Effect.promise(() => page.title()), "Hitchhiker transport fixture");
             yield* store.revoke(issued.grant.id);
             yield* Effect.promise(
               () =>
@@ -219,6 +283,7 @@ test(
               EngineConnection.layer({
                 executable: binary,
                 profileRoot: join(directory, "second"),
+                extensionManagement: false,
               }),
             ),
             Effect.scoped,
@@ -238,13 +303,21 @@ test(
             yield* close(restored);
           }).pipe(
             Effect.provide(
-              EngineConnection.layer({ executable: binary, profileRoot: join(directory, "first") }),
+              EngineConnection.layer({
+                executable: binary,
+                profileRoot: firstProfile,
+                extensionManagement: false,
+              }),
             ),
             Effect.scoped,
           );
         }).pipe(
           Effect.provide(
-            EngineConnection.layer({ executable: binary, profileRoot: join(directory, "first") }),
+            EngineConnection.layer({
+              executable: binary,
+              profileRoot: firstProfile,
+              extensionManagement: true,
+            }),
           ),
           Effect.scoped,
         ),

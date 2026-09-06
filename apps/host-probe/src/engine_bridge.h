@@ -23,6 +23,10 @@ class EngineBridge : public CefBaseRefCounted {
   // The root validates and applies this command through its native UI ABI.
   using UiCommitHandler = std::function<bool(CefRefPtr<CefDictionaryValue>,
                                              std::string*)>;
+  // The root owns the close transaction because it coordinates managed page
+  // windows, popups, and beforeunload cancellation. The bridge must not call
+  // CefWindow::Close directly for a control-plane shutdown request.
+  using CloseRequestHandler = std::function<void()>;
 
   static CefRefPtr<EngineBridge> Create(CefRefPtr<PageManager> manager,
                                         CefRefPtr<CefWindow> root_window);
@@ -38,6 +42,7 @@ class EngineBridge : public CefBaseRefCounted {
   void SendEvent(const std::string& name,
                  CefRefPtr<CefDictionaryValue> params);
   void SetUiCommitHandler(UiCommitHandler handler);
+  void SetCloseRequestHandler(CloseRequestHandler handler);
 
  private:
   class Core;

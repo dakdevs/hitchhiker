@@ -149,6 +149,10 @@ shortcut's interactive keyboard routing still needs verification in an unlocked 
 
 ## Verification and remaining release work
 
+Local unpacked Manifest V3 extensions are managed in **Settings → Chrome extensions**, with native
+permission review, profile copies, startup replay and removal. See [Chrome extensions](EXTENSIONS.md)
+for the local installation flow, recovery behavior, limits and current compatibility gaps.
+
 `pnpm check` verifies portable code. Native tests require the two executable environment variables;
 without them their cases are explicitly skipped. The original host regression also exercises MV3
 content scripts, service workers, storage, multiple pages, and repeated layout changes.

@@ -36,6 +36,13 @@ import {
   type Surface,
 } from "@hitchhiker/ui";
 import { Effect, Option, PubSub, Schema, Semaphore, Stream } from "effect";
+import type { ProfileWriteLease } from "./profile-write-lease.ts";
+import {
+  extensionPermissionPages,
+  renderExtensionControls,
+  type BrowserExtensionControls,
+  type ExtensionControlsState,
+} from "./extension-controls.ts";
 import {
   loadBrowserPersistence,
   saveBrowserPersistence,
@@ -91,7 +98,7 @@ const decodePress = Schema.decodeUnknownOption(Press, { onExcessProperty: "error
 const decodeInput = Schema.decodeUnknownOption(Input, { onExcessProperty: "error" });
 
 type PageMetadata = { readonly id: string; readonly url: string; readonly title: string };
-type Screen = "browser" | "settings" | "plugins";
+type Screen = "browser" | "settings" | "plugins" | "extensions";
 
 interface ControllerState {
   browser: BrowserState;
@@ -147,6 +154,8 @@ export interface BrowserController {
 }
 export interface BrowserControllerOptions {
   readonly freezeEnabled?: boolean;
+  readonly extensions?: BrowserExtensionControls;
+  readonly profileLease?: ProfileWriteLease;
 }
 
 const now = () => Date.now();
@@ -217,6 +226,7 @@ const renderSettings = (state: ControllerState): Surface =>
           ],
           { gap: 8 },
         ),
+        button("settings-extensions", "Chrome extensions", "interface.extensions"),
         button("settings-back", "Back", "screen.browser"),
       ],
       { padding: 20, gap: 12, flex: 1 },
@@ -290,7 +300,9 @@ const render = (
   state: ControllerState,
   plugins: readonly BrowserPluginSummary[] = [],
   pluginStatus?: string,
+  extensions?: ExtensionControlsState,
 ): Surface => {
+  if (state.screen === "extensions" && extensions) return renderExtensionControls(extensions);
   if (state.screen === "settings") return renderSettings(state);
   if (state.screen === "plugins") return renderPlugins(plugins, pluginStatus);
   const interfaceState = state.newPage
@@ -337,11 +349,22 @@ export const makeBrowserController = (
     let pluginSummaries: readonly BrowserPluginSummary[] = [];
     let pluginStatus: string | undefined;
     let managingPlugin = false;
+    let extensionInput = InitialInput;
+    let extensionControls: ExtensionControlsState = {
+      entries: [],
+      directory: "",
+      permissionPage: 0,
+      reviewedThrough: 0,
+      busy: false,
+      readOnly: options.extensions?.readOnly ?? false,
+      available: options.extensions !== undefined,
+    };
     const controllerScope = yield* Effect.scope;
     let pluginAction:
       | ((operation: PluginManagementAction, id: string) => Effect.Effect<void, unknown>)
       | undefined;
     let restoring = false;
+    let closingPersistence: BrowserPersistence | undefined;
     let pluginSurface: unknown;
     let pluginBindings: Surface["bindings"] = [];
     let pluginOwner: string | undefined;
@@ -356,7 +379,8 @@ export const makeBrowserController = (
     yield* Effect.addFinalizer(() => PubSub.shutdown(pluginEvents));
 
     const persist = Effect.fn("BrowserController.persist")(function* () {
-      return yield* saveBrowserPersistence(profileRoot, asPersistence(state)).pipe(
+      const write = saveBrowserPersistence(profileRoot, closingPersistence ?? asPersistence(state));
+      return yield* (options.profileLease ? options.profileLease.withWrite(write) : write).pipe(
         Effect.mapError(
           (error) => new EngineError({ code: "persistence", message: error.message }),
         ),
@@ -406,7 +430,7 @@ export const makeBrowserController = (
     });
     const commit = Effect.fn("BrowserController.commit")(function* () {
       if (pluginOwner === undefined) {
-        const next = render(state, pluginSummaries, pluginStatus);
+        const next = render(state, pluginSummaries, pluginStatus, extensionControls);
         yield* applySurface(next, next.bindings);
       } else yield* applySurface(pluginSurface, pluginBindings);
     });
@@ -456,7 +480,7 @@ export const makeBrowserController = (
       yield* lock.withPermit(
         Effect.gen(function* () {
           if (pluginOwner !== owner) return;
-          const next = render(state, pluginSummaries, pluginStatus);
+          const next = render(state, pluginSummaries, pluginStatus, extensionControls);
           yield* applySurface(next, next.bindings);
           pluginOwner = undefined;
           pluginSurface = undefined;
@@ -543,6 +567,10 @@ export const makeBrowserController = (
               state = { ...state, screen: "plugins" };
               return;
             }
+            if (action === "interface.extensions") {
+              state = { ...state, screen: "extensions" };
+              return;
+            }
             if (action === "screen.browser") {
               state = { ...state, screen: "browser" };
               return;
@@ -620,6 +648,161 @@ export const makeBrowserController = (
       );
 
     const dispatch = Effect.fn("BrowserController.dispatch")(function* (action: string) {
+      if (action === "interface.extensions" && options.extensions) {
+        yield* options.extensions.list().pipe(
+          Effect.match({
+            onSuccess: (entries) => {
+              extensionControls = { ...extensionControls, entries };
+            },
+            onFailure: () => {
+              extensionControls = {
+                ...extensionControls,
+                status:
+                  "Extension metadata is unavailable. Restart in safe mode if this continues.",
+              };
+            },
+          }),
+        );
+      }
+      if (action.startsWith("extensions.")) {
+        const controls = options.extensions;
+        if (state.screen !== "extensions" || !controls || extensionControls.busy) return;
+        if (
+          action === "extensions.permissions.next" ||
+          action === "extensions.permissions.previous"
+        ) {
+          const preview = extensionControls.preview;
+          if (!preview) return;
+          const page = Math.max(
+            0,
+            Math.min(
+              extensionPermissionPages(preview) - 1,
+              extensionControls.permissionPage + (action.endsWith("next") ? 1 : -1),
+            ),
+          );
+          extensionControls = {
+            ...extensionControls,
+            permissionPage: page,
+            reviewedThrough: Math.max(extensionControls.reviewedThrough, page),
+          };
+          yield* lock.withPermit(commit());
+          return;
+        }
+        if (controls.readOnly) return;
+        const preview = extensionControls.preview;
+        let operation: Effect.Effect<unknown, unknown> | undefined;
+        if (action === "extensions.preview" && !preview) {
+          const directory = extensionInput.text;
+          operation = controls.previewLocal(directory).pipe(
+            Effect.tap((next) =>
+              Effect.sync(() => {
+                extensionControls = {
+                  ...extensionControls,
+                  preview: next,
+                  permissionPage: 0,
+                  reviewedThrough: 0,
+                };
+              }),
+            ),
+          );
+        } else if (
+          action === "extensions.install" &&
+          preview &&
+          extensionControls.reviewedThrough >= extensionPermissionPages(preview) - 1
+        ) {
+          operation = controls.confirmInstall(preview.installationId, preview.digest).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                extensionControls = { ...extensionControls, preview: undefined };
+              }),
+            ),
+          );
+        } else if (action === "extensions.cancel" && preview) {
+          const existing = extensionControls.entries.find(
+            (entry) => entry.installationId === preview.installationId,
+          );
+          operation = (
+            existing?.state === "error"
+              ? Effect.void
+              : controls.cancelPreview(preview.installationId, preview.digest)
+          ).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                extensionControls = { ...extensionControls, preview: undefined };
+              }),
+            ),
+          );
+        } else {
+          const review = /^extensions\.review\.([a-f0-9]{32})$/.exec(action);
+          const entry =
+            review &&
+            extensionControls.entries.find(
+              (item) =>
+                item.installationId === review[1] &&
+                (item.state === "prepared" ||
+                  (item.state === "error" && item.errorIntent === "install")),
+            );
+          if (entry && !preview)
+            operation = controls.reviewPrepared(entry.installationId, entry.digest).pipe(
+              Effect.tap((next) =>
+                Effect.sync(() => {
+                  extensionControls = {
+                    ...extensionControls,
+                    preview: next,
+                    permissionPage: 0,
+                    reviewedThrough: 0,
+                  };
+                }),
+              ),
+            );
+          const removal = /^extensions\.remove\.([a-f0-9]{32})$/.exec(action);
+          if (
+            removal &&
+            extensionControls.entries.some(
+              (entry) =>
+                entry.installationId === removal[1] &&
+                (entry.state === "enabled" ||
+                  entry.state === "removing" ||
+                  (entry.state === "error" && entry.errorIntent === "remove")),
+            )
+          )
+            operation = controls.remove(removal[1]!);
+        }
+        if (!operation) return;
+        extensionControls = {
+          ...extensionControls,
+          busy: true,
+          status: "Applying extension change…",
+        };
+        yield* lock.withPermit(commit());
+        yield* operation.pipe(
+          Effect.andThen(controls.list()),
+          Effect.match({
+            onSuccess: (entries) => {
+              extensionControls = { ...extensionControls, entries, status: undefined };
+            },
+            onFailure: () => {
+              extensionControls = {
+                ...extensionControls,
+                status:
+                  "The extension change could not be completed. Restart before retrying an interrupted installation or removal.",
+              };
+            },
+          }),
+          Effect.ensuring(
+            lock
+              .withPermit(
+                Effect.gen(function* () {
+                  extensionControls = { ...extensionControls, busy: false };
+                  if (state.screen === "extensions" && pluginOwner === undefined) yield* commit();
+                }),
+              )
+              .pipe(Effect.ignoreCause),
+          ),
+          Effect.forkIn(controllerScope),
+        );
+        return;
+      }
       const operation = /^plugins\.(enable|disable|rollback)\.([a-z][a-z0-9-]{1,62})$/.exec(action);
       if (operation && pluginAction) {
         if (managingPlugin) return;
@@ -740,14 +923,26 @@ export const makeBrowserController = (
 
     // Native can queue several key events at one revision. Coalescing their
     // redraw keeps that revision alive long enough for every queued edit.
-    const updateInput = (event: NativeTextInputEvent) =>
+    const updateInput = (event: NativeTextInputEvent, extension = false) =>
       lock.withPermit(
         Effect.gen(function* () {
-          state = {
-            ...state,
-            input: reduceNativeTextInput(state.input, event),
-            inputDirty: true,
-          };
+          if (extension) {
+            if (
+              state.screen !== "extensions" ||
+              extensionControls.busy ||
+              extensionControls.preview
+            )
+              return;
+            const next = reduceNativeTextInput(extensionInput, event);
+            if (Buffer.byteLength(next.text, "utf8") > 4000) return;
+            extensionInput = next;
+            extensionControls = { ...extensionControls, directory: next.text };
+          } else
+            state = {
+              ...state,
+              input: reduceNativeTextInput(state.input, event),
+              inputDirty: true,
+            };
           if (inputCommitScheduled) return;
           inputCommitScheduled = true;
           yield* Effect.sleep(16).pipe(
@@ -768,6 +963,24 @@ export const makeBrowserController = (
       readonly params: Record<string, unknown>;
     }) =>
       Effect.suspend(() => {
+        if (event.event === "window.closing")
+          return lock.withPermit(
+            Effect.gen(function* () {
+              // Shutdown drains real pages, but the next session must retain them.
+              closingPersistence ??= asPersistence(state);
+              yield* persist();
+            }),
+          );
+        if (event.event === "window.closeCancelled")
+          return lock.withPermit(
+            Effect.gen(function* () {
+              // Some pages can finish closing before another cancels its prompt.
+              // Resume persistence from the actual survivors; late closes are normal.
+              closingPersistence = undefined;
+              yield* persist();
+              yield* commit();
+            }),
+          );
         if (event.event === "pages.resourcesChanged") {
           return decodePageResourceEvent(event).pipe(
             Effect.flatMap(({ params }) =>
@@ -862,6 +1075,21 @@ export const makeBrowserController = (
                   inputDirty: false,
                 };
               } else if (event.event === "pages.closed") {
+                if (closingPersistence && event.params.reason === "page-close") {
+                  const pages = closingPersistence.pages.filter((page) => page.id !== id);
+                  const previous = closingPersistence.interfaceState;
+                  closingPersistence = {
+                    ...closingPersistence,
+                    pages,
+                    interfaceState: {
+                      ...previous,
+                      pageOrder: previous.pageOrder.filter((pageId) => pageId !== id),
+                      pinnedPageIds: previous.pinnedPageIds.filter((pageId) => pageId !== id),
+                      selectedPageId:
+                        previous.selectedPageId === id ? pages[0]?.id : previous.selectedPageId,
+                    },
+                  };
+                }
                 pendingDomWrites.delete(id);
                 const remainingResources = new Map(knownResources);
                 remainingResources.delete(id);
@@ -950,11 +1178,17 @@ export const makeBrowserController = (
         const pressed = decodePress(event.payload);
         return Option.isNone(pressed) ? Effect.void : dispatch(pressed.value.action);
       }
-      if (event.event === "input" && event.nodeId === "address") {
+      if (
+        event.event === "input" &&
+        (event.nodeId === "address" || event.nodeId === "extension-directory")
+      ) {
         const input = decodeInput(event.payload);
         return Option.isNone(input)
           ? Effect.void
-          : updateInput(input.value as NativeTextInputEvent);
+          : updateInput(
+              input.value as NativeTextInputEvent,
+              event.nodeId === "extension-directory",
+            );
       }
       return Effect.void;
     };

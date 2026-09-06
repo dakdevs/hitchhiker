@@ -57,7 +57,6 @@ const withDriver = <A>(
         ready: Effect.succeed({ event: "host.ready", params: {} }),
         exit: Effect.never,
         events: Stream.fromPubSub(events),
-        cdpEvents: Stream.empty,
         request: (method, raw = {}) => {
           if (method !== "cdp.send")
             return Effect.fail(new EngineError({ code: "method", message: "unexpected method" }));
@@ -137,7 +136,9 @@ const withDriver = <A>(
             return Effect.succeed({ result: { value: { status: "ok" } } });
           return Effect.succeed({});
         },
-        sendCdp: () => Effect.void,
+        loadUnpacked: () => Effect.die("unused extension load"),
+        uninstall: () => Effect.die("unused extension uninstall"),
+        claimRawCdp: Effect.die("unused raw CDP claim"),
       });
       const driver = yield* makeBrowserDomDriver({
         protectWrite: () => Effect.sync(() => calls.push("protectWrite")),

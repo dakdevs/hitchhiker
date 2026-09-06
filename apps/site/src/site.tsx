@@ -28,6 +28,7 @@ type Page =
   | "quickstart"
   | "configuration"
   | "plugins"
+  | "extensions"
   | "native-ui"
   | "permissions"
   | "automation"
@@ -71,6 +72,19 @@ const docs: Doc[] = [
       "No signed browser release is available yet. Native tests explicitly skip when their executable environment variables are absent; a portable green check does not prove native behavior.",
     ],
     code: 'pnpm install --frozen-lockfile\npnpm check\n# After building the native host:\nexport HITCHHIKER_NATIVE_BINARY="$PWD/work/host-probe/build/Release/hitchhiker-probe.app/Contents/MacOS/hitchhiker-probe"\npnpm --filter @hitchhiker/browser dev',
+  },
+  {
+    page: "extensions",
+    group: "Build",
+    title: "Chrome extensions",
+    description: "Install and review local Manifest V3 packages.",
+    icon: Puzzle,
+    body: [
+      "Chrome extensions run in Chromium, while Hitchhiker plugins compose the Native browser interface. In the developer build, open Settings → Chrome extensions, enter an absolute unpacked directory, and choose Review extension. Review every page of required and optional permissions and site access before installing the copied package.",
+      "Hitchhiker stores an immutable profile copy with a stable Chromium ID and package digest. Enabled extensions reload before saved pages open, preserving extension storage. Reload an existing page to activate newly installed content scripts. Pending reviews can be resumed after restart. Remove uninstalls the extension and may delete its extension data; package files are collected at the next safe startup.",
+      "Safe mode skips extension startup, including corrupt metadata. An uncertain installation outcome requires a restart; interrupted removal never replays the extension. Raw CDP uses a separate grant and makes extension controls read-only for that launch. It cannot invoke the unsafe package-loading or uninstall commands. Local installation paths and permission-review actions are not available through MCP or Hitchhiker plugins.",
+      "This is unpacked developer extension support. Chrome Web Store and CRX installation, updates, toolbar action popups and shared-window tab compatibility are unfinished. The pinned CEF host gives each Hitchhiker page a distinct Chromium window ID. The profile currently supports 16 stored installations, with bounded regular-file packages and no symlinks. Full limits and recovery instructions are in docs/EXTENSIONS.md in the repository.",
+    ],
   },
   {
     page: "configuration",

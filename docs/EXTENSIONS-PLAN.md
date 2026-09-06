@@ -1,7 +1,8 @@
 # Chrome extension management plan
 
-This is a read-only design for the next implementation slice. It was checked against CEF
-`144.0.6+g5f7e671+chromium-144.0.7559.59`. No extension manager is implemented by this document.
+Implementation is in progress against CEF
+`144.0.6+g5f7e671+chromium-144.0.7559.59`. The acceptance checks below remain required before
+claiming integrated extension management.
 
 ## Verified routes and limits
 
@@ -49,8 +50,9 @@ Chromium ID, desired enabled state, and last load error. Apply owner-only permis
 single-writer, no-follow rules used by the plugin store.
 
 Start the engine with `--enable-unsafe-extension-debugging` only when the local extension manager is
-enabled. `packages/runtime/src/engine.ts` already owns the browser-level CDP pipe on fd 3/4; add one
-bounded request/response helper with reserved IDs and timeouts. Do not send these methods through
+enabled. `packages/runtime/src/engine.ts` owns the browser-level CDP pipe on fd 3/4 and now provides
+typed, bounded `loadUnpacked` and `uninstall` operations with reserved IDs and timeouts. Do not send
+these methods through
 `apps/host-probe/src/engine_bridge.cc::cdp.send`, because that attaches to a page target. Restore all
 registry entries through `Extensions.loadUnpacked` after `host.ready` and before
 `apps/browser/src/controller.ts` opens persisted pages. Require the returned ID to match the stored ID
@@ -74,12 +76,11 @@ path.
 ## CDP and recovery boundary
 
 The unsafe extension switch does not disable Chromium's renderer/GPU sandbox, but it allows the holder
-of the browser pipe to request a load from any readable absolute path. Hitchhiker's authenticated raw
-CDP relay currently forwards browser messages unchanged. Before enabling the switch in production,
-make extension mutations and raw relay ownership mutually exclusive, and reject
-`Extensions.loadUnpacked` and `Extensions.uninstall` from relayed client frames. Perform startup replay
-before opening the relay; while a relay is active, management can remain read-only for the MVP. Test
-reserved-ID collisions and nested/forwarded CDP messages before relaxing that rule.
+of the browser pipe to request a load from any readable absolute path. The runtime now makes extension
+mutations and raw relay ownership mutually exclusive, and rejects `Extensions.loadUnpacked`,
+`Extensions.uninstall`, reserved request IDs and legacy `Target.sendMessageToTarget` frames from the
+relay. Perform startup replay before opening the relay; while a relay is active, management can remain
+read-only for the MVP.
 
 `--safe-mode` must skip registry construction, omit the unsafe switch, and start without extensions,
 even when the artifact directory or registry is malformed. A normal load failure disables only that
@@ -118,3 +119,76 @@ developer extension support rather than Chrome extension parity.
   CDP, and packaging suites remain green.
 - The test report records distinct extension `windowId` values across Hitchhiker pages so passing
   content-script tests cannot be presented as same-window compatibility.
+
+## Current implementation packet
+
+The artifact store owns descriptor-based bounded copying, content integrity and stable installation
+paths; it never executes an extension. The engine owns typed load/uninstall commands and an
+irreversible browser-pipe handoff to the raw CDP relay. The manager owns the desired-state registry,
+permission-review preview, install/removal intent, startup replay and recovery. Native controls are
+trusted local entrypoints; no source directory or unsafe extension command is exposed through MCP or
+Hitchhiker plugins. Generic browser-pipe sending moves behind a claimed raw connection rather than
+remaining on the engine service beside managed mutations.
+
+The engine packet is implemented. `EngineOptions.extensionManagement` is explicit and controls the
+unsafe Chromium switch. Management requests validate canonical profile-owned artifact paths, reserve
+their own browser-pipe IDs, subscribe before sending, require exact result shapes and drain late
+reserved replies. Timeout, cancellation or malformed replies after possible submission return
+`extension-uncertain` and permanently refuse raw handoff until engine restart. `claimRawCdp` is an
+irreversible transition and rejects pending management work. Both the relay and the claimed raw
+sender block the two extension mutation methods and legacy nested forwarding; standard flattened
+CDP sessions remain available.
+
+Portable Node 24 tests pass 22/22 for the engine and relay boundary. The real pinned CEF test passes
+1/1 and proves exact expected-ID parity for a keyless artifact whose canonical path contains spaces
+and Unicode, a manifest-key (`AQID`) artifact, live load/uninstall, blocked relay mutation, continued
+Playwright page access, revocation, profile isolation and persistence. Evidence is in
+`work/extension-control-native.log`. The manager/registry integration and the broader acceptance list
+above remain separate work.
+
+Explicit first-packet artifact limits are 1 MiB manifest, 256 MiB per file, 512 MiB total, 10,000
+entries, depth 64, 4,096 UTF-8 bytes per relative path and 16 published artifacts. Preserve valid
+Unicode, spaces, `_locales` and other representable filenames; Chromium validates resource use.
+Filesystem publication is atomic, but copying a caller-owned tree is not a privileged filesystem
+snapshot. Descriptor identity, metadata and repeated tree checks detect ordinary concurrent mutation.
+The store never follows symlinks or copies special files.
+
+A store deletion primitive is trusted-only: the manager must prove an artifact was never submitted
+to Chromium, or that its engine has fully stopped. Uncertain load/uninstall outcomes retain files.
+Do not collect before engine startup without an exclusive profile lease, since another instance may
+still be reading the same profile. Review of the durable state machine precedes integration.
+
+## Integrated developer support
+
+The native Settings screen now stages an unpacked directory, paginates all declared permissions,
+binds confirmation to the staged installation ID/digest, and exposes review retry and removal.
+Plugin-owned surfaces cannot dispatch these trusted actions, and MCP receives no local-path API.
+The registry records review, submission and removal intent before side effects. Definite rejection
+retains a visible retryable error; an uncertain outcome closes the app and prevents raw-pipe handoff.
+Startup replay precedes page restoration. Fresh-engine recovery converges interrupted removal and
+collects removed packages and orphan publications; malformed registry data cannot authorize collection.
+
+The controller now retains a parent-owned BSD file lock through filesystem-write completion, using
+an inherited descriptor and a short-lived native lock helper. Artifact scratch recovery is once per
+lease. Native and portable tests cover cancelled writes, descriptor retention after helper exit,
+controller death, symlink/hardlink refusal, bounded copies and crash cuts in registry transitions.
+
+The real managed-extension test passes across four app sessions, including profile paths with spaces
+and Unicode. It verifies permission preview before submission, injection into two documents, stable
+extension identity/storage after deleting the source directory and restarting, separate-profile
+isolation, raw-session read-only controls, removal, restart without replay, and package collection.
+The two pages retain distinct Chromium window IDs, explicitly confirming the compatibility limit.
+Evidence: `work/managed-extensions-native.log` and `work/extensions-native-final.log`.
+
+This test exposed a separate session bug: the native close command bypassed the shell's managed close
+transaction, and child closure erased persisted tabs. The command now routes through the coordinator,
+emits window-closing/cancellation events, and preserves each page's close reason. The controller saves
+the closing session while reconciling actual page teardown; cancellation resumes persistence from
+surviving pages. The native bridge allows a bounded output flush at shutdown. The current integration
+passes all 79 runtime and 64 browser native tests without skips. Interactive before-unload dialog
+routing still requires an unlocked desktop.
+
+A transport follow-up remains: runtime queue shutdown can drop buffered tail events under adverse
+scheduling. The successful normal-shutdown test does not prove a lossless event-drain contract.
+Implement ordered terminal delivery and explicit bounded drain failure before release; do not replace
+that contract with a fixed sleep in the browser controller.

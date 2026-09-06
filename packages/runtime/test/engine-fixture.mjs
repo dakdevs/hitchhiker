@@ -2,10 +2,15 @@
 import { createInterface } from "node:readline";
 import { closeSync, writeSync } from "node:fs";
 import { Socket } from "node:net";
+import { basename } from "node:path";
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 send({
   event: "host.ready",
-  params: { version: 1, windowClientBounds: { x: 0, y: 0, width: 1000, height: 700 } },
+  params: {
+    version: 1,
+    args: process.argv.slice(2),
+    windowClientBounds: { x: 0, y: 0, width: 1000, height: 700 },
+  },
 });
 createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method, params } = JSON.parse(line);
@@ -31,6 +36,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   send({ id, result: params });
 });
 let raw = "";
+const extensionId = "a".repeat(32);
+const replyCdp = (message) => writeSync(4, `${JSON.stringify(message)}\0`);
 new Socket({ fd: 3, readable: true, writable: false }).on("data", (chunk) => {
   raw += chunk.toString();
   for (;;) {
@@ -38,6 +45,34 @@ new Socket({ fd: 3, readable: true, writable: false }).on("data", (chunk) => {
     if (end < 0) break;
     const message = JSON.parse(raw.slice(0, end));
     raw = raw.slice(end + 1);
-    writeSync(4, `${JSON.stringify({ id: message.id, result: { product: "Fixture/1.0" } })}\0`);
+    if (message.method === "Extensions.loadUnpacked") {
+      const artifactName = basename(message.params.path);
+      const behavior = artifactName.startsWith("ab") ? "g" : artifactName[0];
+      if (behavior === "b")
+        replyCdp({
+          id: message.id,
+          error: { code: -32602, message: `Rejected ${message.params.path}`, data: "fixture" },
+        });
+      else if (behavior === "c") replyCdp({ id: message.id, result: { id: "invalid" } });
+      else if (behavior === "d") continue;
+      else if (behavior === "e")
+        setTimeout(() => replyCdp({ id: message.id, result: { id: extensionId } }), 250);
+      else if (behavior === "f")
+        setTimeout(() => replyCdp({ id: message.id, result: { id: extensionId } }), 50);
+      else if (behavior === "g")
+        replyCdp({ id: message.id, result: { id: extensionId }, unexpected: true });
+      else replyCdp({ id: message.id, result: { id: extensionId } });
+      continue;
+    }
+    if (message.method === "Extensions.uninstall") {
+      if (message.params.id.startsWith("b"))
+        replyCdp({ id: message.id, error: { code: -32602, message: "Rejected uninstall" } });
+      else if (message.params.id.startsWith("c"))
+        replyCdp({ id: message.id, result: { extra: true } });
+      else if (message.params.id.startsWith("d")) continue;
+      else replyCdp({ id: message.id, result: {} });
+      continue;
+    }
+    replyCdp({ id: message.id, result: { product: "Fixture/1.0" } });
   }
 });

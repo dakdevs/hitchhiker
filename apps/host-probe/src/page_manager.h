@@ -28,11 +28,24 @@ struct PageEvent {
     kCreated,
     kClosed,
     kCloseCancelled,
+    // A root-window close batch has started or been cancelled. These events
+    // have no page_id: the receiver must snapshot or reconcile its whole
+    // session rather than infer batch state from individual page teardown.
+    kWindowClosing,
+    kWindowCloseCancelled,
     kTitleChanged,
     kNavigationChanged,
     // Native, page-scoped activity signals. These are advisory protection
     // inputs for the trusted runtime; they never cause a page to be closed.
     kResourcesChanged,
+  };
+
+  enum class CloseReason {
+    // Normal page closure, including a child page window closed outside an
+    // explicit PageManager::Close call.
+    kPageClose,
+    // Closure requested as part of PageManager::CloseAll for root shutdown.
+    kWindowClose,
   };
 
   Type type;
@@ -43,6 +56,10 @@ struct PageEvent {
   bool call = false;
   bool download = false;
   bool unsaved_input = false;
+  // Valid for kClosed. The reason is captured when this particular page is
+  // asked to close, so CancelCloseAll cannot retroactively relabel pages that
+  // are already draining.
+  CloseReason close_reason = CloseReason::kPageClose;
   // Valid for kClosed. A value of zero means that all requested page windows
   // and browsers have finished tearing down.
   size_t remaining_pages = 0;

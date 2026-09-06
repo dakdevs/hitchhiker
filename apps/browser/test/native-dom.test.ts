@@ -470,6 +470,7 @@ test(
               EngineConnection.layer({
                 executable: binary,
                 profileRoot: profile,
+                extensionManagement: false,
               }),
             ),
           ),

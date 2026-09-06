@@ -17,6 +17,10 @@ import { createPluginManager } from "./plugin-manager.ts";
 import { browserMcpApi } from "./mcp.ts";
 import { makeBrowserController } from "./controller.ts";
 import { makeBrowserDomDriver } from "./dom.ts";
+import { acquireProfileWriteLease } from "./profile-write-lease.ts";
+import { createExtensionArtifactStore } from "./extension-artifacts.ts";
+import { createExtensionManager, type ExtensionManagerError } from "./extension-manager.ts";
+import type { BrowserExtensionControls } from "./extension-controls.ts";
 
 const argument = (name: string) => {
   const prefix = `${name}=`;
@@ -33,14 +37,71 @@ const profileRoot =
 const program = Effect.gen(function* () {
   if (!executable || !isAbsolute(executable) || !isAbsolute(profileRoot))
     return yield* Effect.die("HITCHHIKER_NATIVE_BINARY and --profile-root must be absolute paths");
-  const runtime = EngineConnection.layer({ executable, profileRoot });
+  const profileLease = yield* acquireProfileWriteLease(profileRoot, executable);
+  const safeMode = process.argv.includes("--safe-mode");
+  const runtime = EngineConnection.layer({
+    executable,
+    profileRoot: profileLease.profileRoot,
+    extensionManagement: !safeMode,
+  });
   const layers = Layer.provideMerge(NativeSurface.layer, runtime);
   yield* Effect.gen(function* () {
     const engine = yield* EngineConnection;
     const fatalRecovery = yield* Deferred.make<never, EngineError>();
     const browserExit = Effect.raceFirst(engine.exit, Deferred.await(fatalRecovery));
     const rawCdp = process.argv.includes("--cdp");
-    const controller = yield* makeBrowserController(profileRoot, { freezeEnabled: !rawCdp });
+    let extensions: BrowserExtensionControls | undefined;
+    if (!safeMode) {
+      yield* engine.ready;
+      extensions = yield* Effect.gen(function* () {
+        // Engine readiness excludes a surviving previous engine. The outer
+        // descriptor lease excludes any previous controller filesystem writer.
+        const artifacts = yield* createExtensionArtifactStore({ profileLease });
+        const manager = yield* createExtensionManager({
+          profileRoot: profileLease.profileRoot,
+          lease: profileLease,
+          engine,
+          artifacts,
+        });
+        yield* manager.restoreBeforePages();
+        if (rawCdp) yield* manager.enterReadOnly();
+        const checked = <A>(operation: Effect.Effect<A, ExtensionManagerError>) =>
+          operation.pipe(
+            Effect.tapError((error) =>
+              error.restartRequired
+                ? Deferred.fail(
+                    fatalRecovery,
+                    new EngineError({ code: "extensions", message: error.message }),
+                  )
+                : Effect.void,
+            ),
+          );
+        return {
+          list: manager.list,
+          previewLocal: (path: string) => checked(manager.previewLocal(path)),
+          reviewPrepared: (id: string, digest: string) =>
+            checked(manager.reviewPrepared(id, digest)),
+          confirmInstall: (id: string, digest: string) =>
+            checked(manager.confirmInstall(id, digest)),
+          cancelPreview: (id: string, digest: string) => checked(manager.cancelPreview(id, digest)),
+          remove: (id: string) => checked(manager.remove(id)),
+          readOnly: rawCdp,
+        } satisfies BrowserExtensionControls;
+      }).pipe(
+        Effect.catch((error) =>
+          "restartRequired" in error && error.restartRequired
+            ? Effect.fail(new EngineError({ code: "extensions", message: error.message }))
+            : Effect.logError(
+                "Extension metadata is unavailable; starting without managed extensions. Use --safe-mode to skip extension startup.",
+              ).pipe(Effect.as(undefined)),
+        ),
+      );
+    }
+    const controller = yield* makeBrowserController(profileLease.profileRoot, {
+      freezeEnabled: !rawCdp,
+      extensions,
+      profileLease,
+    });
     yield* controller.start;
     const pluginDirectory = argument("--plugin");
     const mcp = process.argv.includes("--mcp");

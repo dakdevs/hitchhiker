@@ -52,6 +52,10 @@ constexpr size_t kMaxViewports = 32;
 constexpr int kIoPollMs = 100;
 constexpr int kCdpTimeoutMs = 15 * 1000;
 constexpr int kMaxCoordinate = 1000000;
+// Root teardown must not discard the session-close event that it just queued.
+// Keep this finite: a parent that has stopped reading stdout must not freeze
+// CEF's UI thread while Stop joins the writer.
+constexpr int kShutdownOutputDrainMs = 500;
 
 void Diagnose(const char* message) {
   std::fprintf(stderr, "HITCHHIKER_HOST_IPC %s\n", message);
@@ -149,6 +153,11 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     // Stop may be called from the CEF UI thread or during final ref release.
     const bool was_stopped = stopped_.exchange(true);
     if (!was_stopped) {
+      {
+        std::lock_guard<std::mutex> lock(output_lock_);
+        output_drain_deadline_ = std::chrono::steady_clock::now() +
+                                 std::chrono::milliseconds(kShutdownOutputDrainMs);
+      }
       output_cv_.notify_all();
     }
     if (reader_.joinable()) reader_.join();
@@ -167,7 +176,9 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     CEF_REQUIRE_UI_THREAD();
     if (stopped_) return;
     CefRefPtr<CefDictionaryValue> params = CefDictionaryValue::Create();
-    params->SetString("pageId", event.page_id);
+    if (!event.page_id.empty()) {
+      params->SetString("pageId", event.page_id);
+    }
     switch (event.type) {
       case PageEvent::kCreated:
         page_ids_.insert(event.page_id);
@@ -186,10 +197,21 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
         registrations_.erase(event.page_id);
         observers_.erase(event.page_id);
         params->SetInt("remainingPages", static_cast<int>(event.remaining_pages));
+        params->SetString(
+            "reason",
+            event.close_reason == PageEvent::CloseReason::kWindowClose
+                ? "window-close"
+                : "page-close");
         SendEvent("pages.closed", params);
         break;
       case PageEvent::kCloseCancelled:
         SendEvent("pages.closeCancelled", params);
+        break;
+      case PageEvent::kWindowClosing:
+        SendEvent("window.closing", params);
+        break;
+      case PageEvent::kWindowCloseCancelled:
+        SendEvent("window.closeCancelled", params);
         break;
       case PageEvent::kTitleChanged:
         params->SetString("title", event.title.ToString().substr(0, 4096));
@@ -228,6 +250,11 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     ui_commit_handler_ = std::move(handler);
   }
 
+  void SetCloseRequestHandler(EngineBridge::CloseRequestHandler handler) {
+    CEF_REQUIRE_UI_THREAD();
+    close_request_handler_ = std::move(handler);
+  }
+
   void ProcessInput(std::string input) {
     CEF_REQUIRE_UI_THREAD();
     if (stopped_) return;
@@ -252,7 +279,14 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
 
   void RequestClose() {
     CEF_REQUIRE_UI_THREAD();
-    if (!stopped_ && root_ && !root_->IsClosed()) root_->Close();
+    if (stopped_) return;
+    if (close_request_handler_) {
+      close_request_handler_();
+      return;
+    }
+    // The standalone bridge fallback has no shell coordinator. Production
+    // wiring always installs the handler above.
+    if (root_ && !root_->IsClosed()) root_->Close();
   }
 
   void OnDevToolsResult(const std::string& page_id,
@@ -370,21 +404,29 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     pthread_sigmask(SIG_BLOCK, &blocked_signals, nullptr);
     const int previous_flags = fcntl(STDOUT_FILENO, F_GETFL, 0);
     if (previous_flags >= 0) fcntl(STDOUT_FILENO, F_SETFL, previous_flags | O_NONBLOCK);
-    while (!stopped_ && !output_failed_) {
+    while (!output_failed_) {
       std::string line;
       {
         std::unique_lock<std::mutex> lock(output_lock_);
         output_cv_.wait_for(lock, std::chrono::milliseconds(kIoPollMs), [this] {
           return stopped_ || output_failed_ || !output_.empty();
         });
-        if (stopped_ || output_failed_) break;
-        if (output_.empty()) continue;
+        if (output_failed_) break;
+        if (output_.empty()) {
+          if (stopped_) break;
+          continue;
+        }
+        if (stopped_ && output_drain_deadline_ &&
+            std::chrono::steady_clock::now() >= *output_drain_deadline_) {
+          break;
+        }
         line = std::move(output_.front());
         output_bytes_ -= line.size();
         output_.pop_front();
       }
       size_t offset = 0;
-      while (!stopped_ && offset < line.size()) {
+      while (offset < line.size()) {
+        if (ShutdownOutputDrainExpired()) break;
         pollfd descriptor{STDOUT_FILENO, POLLOUT, 0};
         if (poll(&descriptor, 1, kIoPollMs) <= 0) continue;
         const ssize_t count = write(STDOUT_FILENO, line.data() + offset, line.size() - offset);
@@ -395,6 +437,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
         }
       }
       if (output_failed_) break;
+      if (offset < line.size()) break;
     }
     if (previous_flags >= 0) fcntl(STDOUT_FILENO, F_SETFL, previous_flags);
   }
@@ -435,6 +478,13 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     output_.push_back(std::move(line));
     output_cv_.notify_one();
     return true;
+  }
+
+  bool ShutdownOutputDrainExpired() {
+    if (!stopped_) return false;
+    std::lock_guard<std::mutex> lock(output_lock_);
+    return output_drain_deadline_ &&
+           std::chrono::steady_clock::now() >= *output_drain_deadline_;
   }
 
   void FailOutput(const char* reason) {
@@ -545,8 +595,12 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     }
     if (method == "viewports.set") { HandleViewports(request_id, params); return; }
     if (method == "window.close") {
+      // Begin the root-owned transaction first. This queues window.closing
+      // ahead of the acknowledgement on the same FIFO, giving the controller
+      // a durable snapshot boundary before an otherwise-fast host exit.
+      RequestClose();
       ReplyResult(request_id, NewValue(CefDictionaryValue::Create()));
-      RequestClose(); return;
+      return;
     }
     if (method == "ui.commit") {
       if (!ui_commit_handler_) {
@@ -649,6 +703,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
   std::map<std::string, CefRefPtr<CefRegistration>> registrations_;
   std::map<int, PendingCdp> pending_cdp_;
   EngineBridge::UiCommitHandler ui_commit_handler_;
+  EngineBridge::CloseRequestHandler close_request_handler_;
   std::atomic<bool> stopped_{false};
   bool started_ = false;
   std::thread reader_;
@@ -661,6 +716,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
   std::condition_variable output_cv_;
   std::deque<std::string> output_;
   size_t output_bytes_ = 0;
+  std::optional<std::chrono::steady_clock::time_point> output_drain_deadline_;
 };
 
 std::atomic<int> EngineBridge::Core::next_cdp_id_{1};
@@ -685,4 +741,8 @@ void EngineBridge::SendEvent(const std::string& name, CefRefPtr<CefDictionaryVal
 }
 void EngineBridge::SetUiCommitHandler(UiCommitHandler handler) {
   core_->SetUiCommitHandler(std::move(handler));
+}
+
+void EngineBridge::SetCloseRequestHandler(CloseRequestHandler handler) {
+  core_->SetCloseRequestHandler(std::move(handler));
 }

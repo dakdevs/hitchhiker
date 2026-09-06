@@ -179,7 +179,7 @@ test(
 );
 
 test(
-  "safe-mode starts the real browser without opening an invalid plugin store",
+  "safe-mode starts the real browser without opening invalid plugin or extension stores",
   { skip: !binary || !pluginHost, timeout: 30_000 },
   async () => {
     const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-safe-native-")));
@@ -196,6 +196,9 @@ test(
     );
     // A regular file where a plugin directory belongs would fail manager construction.
     await writeFile(join(profile, "hitchhiker-plugins"), "invalid plugin store", { mode: 0o600 });
+    await writeFile(join(profile, "hitchhiker-extensions"), "invalid extension store", {
+      mode: 0o600,
+    });
     const transport = new StdioClientTransport({
       command: launcher ?? process.execPath,
       args: [
@@ -222,6 +225,10 @@ test(
       assert.equal(
         (await client.listTools()).tools.some((tool) => tool.name.startsWith("hitchhiker_plugin")),
         false,
+      );
+      assert.equal(
+        await readFile(join(profile, "hitchhiker-extensions"), "utf8"),
+        "invalid extension store",
       );
     } finally {
       await transport.close();

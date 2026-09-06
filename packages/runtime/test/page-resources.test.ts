@@ -222,7 +222,11 @@ test(
           assert.equal(yield* engine.exit, 0);
         }).pipe(
           Effect.provide(
-            EngineConnection.layer({ executable: binary, profileRoot: join(directory, "profile") }),
+            EngineConnection.layer({
+              executable: binary,
+              profileRoot: join(directory, "profile"),
+              extensionManagement: false,
+            }),
           ),
           Effect.scoped,
         ),

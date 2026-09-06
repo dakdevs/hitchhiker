@@ -6,7 +6,8 @@ components, runtime plugins, and explicit automation permissions.
 **Status: implementation and native-host integration in progress. No browser release is available.**
 The development browser runs multiple live Chromium pages with a replaceable Native interface.
 Isolated TypeScript plugins, MCP, authenticated CDP, profile persistence and reversible page freezing
-pass real native integration tests. A local MV3 extension works across layout and lifecycle changes.
+pass real native integration tests. Local unpacked MV3 extensions have native permission review,
+profile-owned packages, restart replay and removal; see [extension support](docs/EXTENSIONS.md).
 Persistent plugin installation and rollback are integrated. Scoped MCP snapshots and semantic
 click/fill work on the top document, with expiring refs and origin grants. Full extension compatibility, release
 rendering and distribution signing remain in development.

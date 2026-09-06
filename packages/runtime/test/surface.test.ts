@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Context, Effect, Fiber, Layer, PubSub, Schema, Scope, Stream } from "effect";
 import { row, text, type Surface, viewport } from "@hitchhiker/ui";
-import { EngineConnection, type EngineEvent, type JsonObject } from "../src/engine.ts";
+import { EngineConnection, EngineError, type EngineEvent, type JsonObject } from "../src/engine.ts";
 import { NativeSurface } from "../src/surface.ts";
 
 interface RecordedRequest {
@@ -18,13 +18,14 @@ const mockEngine = Effect.gen(function* () {
     ready: Effect.succeed({ event: "host.ready", params: { version: 1 } }),
     exit: Effect.never,
     events: Stream.fromPubSub(events),
-    cdpEvents: Stream.empty,
     request: (method, params = {}) =>
       Effect.sync(() => {
         requests.push({ method, params });
         return {};
       }),
-    sendCdp: () => Effect.void,
+    loadUnpacked: () => Effect.fail(new EngineError({ code: "unsupported", message: "unused" })),
+    uninstall: () => Effect.fail(new EngineError({ code: "unsupported", message: "unused" })),
+    claimRawCdp: Effect.succeed({ events: Stream.empty, send: () => Effect.void }),
   });
   return {
     requests,

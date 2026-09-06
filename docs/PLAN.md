@@ -324,3 +324,36 @@ bundle: scoped DOM, persistent plugin lifecycle, and corrupt-store safe mode. Ev
 `work/scoped-dom-bundle-build.log`, `work/scoped-dom-bundle-verify.log`, and
 `work/scoped-dom-bundle-native.log`. It remains an ad hoc signed arm64 developer artifact; interactive
 macOS verification and release signing/notarization remain outstanding.
+
+### Chrome extension management implementation
+
+The scoped automation/CPU packet is published as `e34bfcb`; GitHub Check run `34017345905` passed.
+The next packet implements the unpacked MV3 extension path in `EXTENSIONS-PLAN.md`: a bounded
+immutable profile store, typed Chromium load/uninstall control, native local permission review,
+durable installation/removal intent, and replay before restoring pages. Raw CDP takes exclusive
+browser-pipe ownership and cannot invoke unsafe extension methods. Safe mode omits extension setup.
+This is progress toward existing Chrome extension support, not a redefinition of the final browser:
+CRX/Web Store distribution, updates, action UI and same-window compatibility remain required work.
+
+The unpacked extension manager is integrated with native permission review, immutable profile copies,
+durable install/remove intent, explicit retries, startup replay and safe package collection. Independent
+review caught and fixed multi-entry replay overwrites, post-submission persistence uncertainty,
+interrupted-removal retention and symlink-target chmod. Native testing caught a separate app-shutdown
+path that bypassed managed page closure and erased the saved session; native close routing and
+controller session preservation are corrected. All 79 runtime and 64 browser native tests pass with
+no skips (`work/extensions-native-final.log`). The four-session extension test proves storage, page
+restoration, profile isolation and removal across restart. See `EXTENSIONS-PLAN.md` for exact limits.
+
+The website now has a Chrome extensions guide; desktop/mobile checks at 1440, 720 and 390 pixels show
+no document overflow or page errors. `docs/EXTENSIONS.md` documents installation and recovery. The
+developer bundle was rebuilt and relocated outside the checkout to a path with spaces. Strict
+signature/import checks pass, as do all four actual integration cases: managed extensions, MCP DOM,
+persistent plugin lifecycle, and safe mode with malformed plugin/extension stores. Evidence is in
+`work/extensions-bundle-build.log`, `work/extensions-bundle-verify.log` and
+`work/extensions-bundle-native.log`. This is still an ad hoc signed arm64 developer app.
+
+Next correctness work is ordered engine-event draining at process exit: current shutdown may drop
+queued tail events under adverse scheduling, despite normal native restart tests passing. Follow with
+the real Chromium discard experiment in `DISCARD-PLAN.md`; a Chrome-runtime extension route is plausible
+but not verified. Do not describe reversible freezing as actual RAM discard or substitute URL-only
+recreation for Chromium session-preserving discard without a product decision.

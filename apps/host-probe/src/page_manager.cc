@@ -102,6 +102,9 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
     bool call = false;
     bool download = false;
     bool unsaved_input = false;
+    // Default to the ordinary page-close semantic for a page window that CEF
+    // closes outside an explicit manager request.
+    PageEvent::CloseReason close_reason = PageEvent::CloseReason::kPageClose;
   };
 
   using PageMap = std::map<std::string, PageRecord>;
@@ -311,6 +314,7 @@ PageCloseResult PageManagerCore::Close(const std::string& page_id) {
     return PageCloseResult::kAlreadyRequested;
   }
   page.close_requested = true;
+  page.close_reason = PageEvent::CloseReason::kPageClose;
 
   if (page.browser) {
     page.browser->GetHost()->CloseBrowser(false);
@@ -327,11 +331,21 @@ size_t PageManagerCore::CloseAll() {
   }
   closing_all_ = true;
 
+  // Session persistence needs this before any child page is eligible to
+  // drain. Do not derive page reasons from closing_all_: an unload dialog can
+  // cancel this batch while other pages still finish closing.
+  Emit(PageEvent{PageEvent::Type::kWindowClosing, {}});
+
   std::vector<CefRefPtr<CefBrowser>> browsers;
   std::vector<CefRefPtr<CefWindow>> windows_without_browsers;
   browsers.reserve(pages_.size());
   windows_without_browsers.reserve(pages_.size());
   for (auto& [page_id, page] : pages_) {
+    // Preserve an earlier explicit page close. That page is not part of the
+    // session-close transaction even if root shutdown starts while it drains.
+    if (!page.close_requested) {
+      page.close_reason = PageEvent::CloseReason::kWindowClose;
+    }
     page.close_requested = true;
     if (page.browser) {
       browsers.push_back(page.browser);
@@ -351,7 +365,11 @@ size_t PageManagerCore::CloseAll() {
 
 void PageManagerCore::CancelCloseAll() {
   CEF_REQUIRE_UI_THREAD();
+  if (!closing_all_) {
+    return;
+  }
   closing_all_ = false;
+  Emit(PageEvent{PageEvent::Type::kWindowCloseCancelled, {}});
 }
 
 bool PageManagerCore::AcknowledgeCloseCancelled(
@@ -370,10 +388,12 @@ bool PageManagerCore::AcknowledgeCloseCancelled(
   }
 
   it->second.close_requested = false;
+  it->second.close_reason = PageEvent::CloseReason::kPageClose;
   // Other pages from the same close batch may still complete closing. The
-  // canceled page can resume immediately, and a later CloseAll call can start
-  // a new batch for whatever remains.
-  closing_all_ = false;
+  // canceled page can resume immediately. Finish the batch before emitting
+  // the page event, so callers that only observe PageManager still restore
+  // their working session even without an outer shell callback.
+  CancelCloseAll();
 
   PageEvent event{PageEvent::kCloseCancelled, *page_id};
   event.browser = it->second.browser;
@@ -665,10 +685,12 @@ void PageManagerCore::TryFinalize(const std::string& page_id) {
     return;
   }
 
+  const PageEvent::CloseReason close_reason = it->second.close_reason;
   pages_.erase(it);
   viewports_.erase(page_id);
 
   PageEvent event{PageEvent::Type::kClosed, page_id};
+  event.close_reason = close_reason;
   event.remaining_pages = pages_.size();
   Emit(std::move(event));
 }

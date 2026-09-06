@@ -56,7 +56,11 @@ test(
       await Effect.runPromise(
         Effect.scoped(
           Effect.gen(function* () {
-            const runtime = EngineConnection.layer({ executable: binary, profileRoot: profile });
+            const runtime = EngineConnection.layer({
+              executable: binary,
+              profileRoot: profile,
+              extensionManagement: false,
+            });
             const layers = Layer.provideMerge(NativeSurface.layer, runtime);
             yield* Effect.gen(function* () {
               const engine = yield* EngineConnection;
@@ -98,7 +102,8 @@ test(
 
               // Exercise the browser-root raw CDP pipe immediately so a host
               // failure is reported before waiting on controller events.
-              yield* engine.sendCdp({ id: 1, method: "Browser.getVersion" });
+              const raw = yield* engine.claimRawCdp;
+              yield* raw.send({ id: 1, method: "Browser.getVersion" });
               yield* controller.start;
               yield* waitFor("both restored pages", () =>
                 controller.snapshot.pipe(Effect.map((state) => state.pages.length === 2)),

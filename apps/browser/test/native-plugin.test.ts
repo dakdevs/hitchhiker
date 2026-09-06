@@ -74,7 +74,11 @@ test(
           Effect.provide(
             Layer.provideMerge(
               NativeSurface.layer,
-              EngineConnection.layer({ executable: binary!, profileRoot: profile }),
+              EngineConnection.layer({
+                executable: binary!,
+                profileRoot: profile,
+                extensionManagement: false,
+              }),
             ),
           ),
           Effect.scoped,

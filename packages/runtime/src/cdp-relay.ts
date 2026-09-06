@@ -9,7 +9,9 @@ const MaxCdpMessageBytes = 32 * 1024 * 1024;
 const DefaultQueuedOutputBytes = 8 * 1024 * 1024;
 const DefaultPendingInputBytes = 32 * 1024 * 1024;
 const DefaultPendingInputMessages = 64;
-const InternalVersionRequestId = 2_147_483_647;
+const InternalVersionRequestId = -2_147_483_648;
+const TrustedManagementRequestIdFloor = 2_147_000_000;
+const TrustedManagementRequestIdCeiling = 2_147_483_647;
 
 const JsonObjectFromString = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json));
 const decodeJsonObject = Schema.decodeUnknownEffect(JsonObjectFromString);
@@ -161,6 +163,9 @@ export const openCdpRelay = Effect.fn("openCdpRelay")(function* (
   let shutdownPromise: Promise<void> | undefined;
   let awaitingVersionReply = true;
   const versionReply = yield* Deferred.make<JsonObject, CdpRelayError>();
+  const browserPipe = yield* options.engine.claimRawCdp.pipe(
+    Effect.mapError((error) => relayError(error.code, error.message)),
+  );
 
   const shutdown = (): Promise<void> => {
     revoked = true;
@@ -225,7 +230,7 @@ export const openCdpRelay = Effect.fn("openCdpRelay")(function* (
     return bearer !== undefined && constantTimeEqual(bearer, token);
   };
 
-  const backendFiber = yield* options.engine.cdpEvents.pipe(
+  const backendFiber = yield* browserPipe.events.pipe(
     Stream.runForEach((message) => {
       const id = decodeCdpMessageId(message);
       if (awaitingVersionReply && Option.isSome(id) && id.value.id === InternalVersionRequestId) {
@@ -259,8 +264,8 @@ export const openCdpRelay = Effect.fn("openCdpRelay")(function* (
   // one-shot Browser.getVersion request can publish its response.
   yield* Effect.yieldNow;
 
-  yield* options.engine
-    .sendCdp({ id: InternalVersionRequestId, method: "Browser.getVersion" })
+  yield* browserPipe
+    .send({ id: InternalVersionRequestId, method: "Browser.getVersion" })
     .pipe(Effect.mapError(() => relayError("backend", "CDP backend rejected discovery request")));
   const versionMessage = yield* Deferred.await(versionReply).pipe(
     Effect.timeoutOrElse({
@@ -433,7 +438,37 @@ export const openCdpRelay = Effect.fn("openCdpRelay")(function* (
             ),
           );
           if (revoked || activeClient !== client) return;
-          await Effect.runPromise(options.engine.sendCdp(decoded));
+          const clientId = decodeCdpMessageId(decoded);
+          if (
+            (Option.isSome(clientId) &&
+              (clientId.value.id === InternalVersionRequestId ||
+                (clientId.value.id >= TrustedManagementRequestIdFloor &&
+                  clientId.value.id <= TrustedManagementRequestIdCeiling))) ||
+            decoded.method === "Extensions.loadUnpacked" ||
+            decoded.method === "Extensions.uninstall" ||
+            decoded.method === "Target.sendMessageToTarget"
+          ) {
+            if (Option.isNone(clientId))
+              throw relayError("client-method", "Client requested a reserved CDP operation");
+            const rejected = JSON.stringify({
+              id: clientId.value.id,
+              ...(typeof decoded.sessionId === "string" ? { sessionId: decoded.sessionId } : {}),
+              error: { code: -32601, message: "Method is not available through this relay" },
+            });
+            const rejectedBytes = Buffer.byteLength(rejected);
+            if (
+              rejectedBytes > MaxCdpMessageBytes ||
+              client.bufferedAmount + rejectedBytes > queuedOutputLimitBytes
+            )
+              throw relayError("client-capacity", "Client output capacity reached");
+            await new Promise<void>((resolve, reject) =>
+              client.send(rejected, { binary: false }, (error) =>
+                error == null ? resolve() : reject(error),
+              ),
+            );
+            return;
+          }
+          await Effect.runPromise(browserPipe.send(decoded));
         })
         .catch(() => shutdown())
         .then(() => {

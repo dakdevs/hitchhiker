@@ -12,6 +12,8 @@
 #include "src/simple_app.h"
 #include "src/simple_handler.h"
 #include <filesystem>
+#include <cstring>
+#include <cerrno>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -166,6 +168,17 @@ class ProfileLease {
 
 // Entry point function for the browser process.
 int main(int argc, char* argv[]) {
+  // A short-lived trusted helper acquires a BSD lock on the parent's inherited
+  // open-file description. The Node controller retains fd ownership after this
+  // process exits; no CEF process or GUI is started in this mode.
+  if (argc == 2 && std::strcmp(argv[1], "--lock-controller-profile-fd") == 0) {
+    struct stat info{};
+    if (fstat(3, &info) != 0 || !S_ISREG(info.st_mode) ||
+        info.st_uid != geteuid() || info.st_nlink != 1 ||
+        (info.st_mode & 0777) != 0600) return 74;
+    if (flock(3, LOCK_EX | LOCK_NB) == 0) return 0;
+    return errno == EWOULDBLOCK || errno == EAGAIN ? 75 : 74;
+  }
   // Load the CEF framework library at runtime instead of linking directly
   // as required by the macOS sandbox implementation.
   CefScopedLibraryLoader library_loader;
