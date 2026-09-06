@@ -16,8 +16,8 @@ The current launcher operates one profile per process. Profile-picker UI remains
 
 ## Local grants
 
-The local grants command issues credentials deliberately; MCP and plugin calls cannot silently
-issue their own permissions. `issue` prints JSON containing the one-time bearer token and grant ID.
+The local grants command issues credentials deliberately. MCP plugin installation can delegate
+only permissions already held by its connection; plugin code cannot silently grant itself authority. `issue` prints JSON containing the one-time bearer token and grant ID.
 `list` prints metadata without tokens. `revoke` changes durable state read by existing connections.
 
 ```sh
@@ -41,8 +41,9 @@ Standard output is exclusively JSON-RPC. This launcher starts the browser proces
 to another running instance using the same profile.
 
 The current tools list/open/navigate/close pages, get/set configuration, and select sidebar/top tabs.
-They check durable grants on every call. DOM automation, live plugin installation through MCP, and
-remote MCP transport for hosted clients remain additional work. Local stdio support does not by
+With `HITCHHIKER_PLUGIN_HOST` configured, five additional tools list, install/update, enable, disable,
+and roll back plugins. They check durable grants on every call. DOM automation and remote MCP
+transport for hosted clients remain additional work. Local stdio support does not by
 itself establish a hosted ChatGPT connection.
 
 ## CDP
@@ -84,8 +85,46 @@ Activation may return a Promise. It is ready only after that Promise resolves; t
 a host deadline. Each revision runs in its own App-Sandboxed JavaScriptCore process. A failed or
 revoked UI plugin releases its surface back to the trusted interface. If bounded recovery retries
 cannot restore trusted controls, the launcher closes the failed browser session. Add `--safe-mode` to skip
-plugin loading on startup. Persistent installation/update UI and known-good revision rollback are
-not yet implemented. See [the isolation evidence](PLUGIN-ISOLATION.md) for exact resource limits.
+plugin loading on startup and prevent enabling plugins for that launch. See
+[the isolation evidence](PLUGIN-ISOLATION.md) for exact resource limits.
+
+## Persistent installation through MCP
+
+Issue the MCP connection a grant that includes `plugins.install` and the capabilities the plugin
+will need. For the canvas example, use
+`--capabilities=plugins.install,pages.list,pages.manage,ui.compose`. Set `HITCHHIKER_PLUGIN_HOST` as
+shown above and launch the stdio server. The bundled developer app supplies the host path itself.
+Persistent plugin tools are unavailable in `--safe-mode` or with the `--plugin` developer override.
+Safe mode skips opening the plugin store entirely, including invalid directories or registry data.
+
+Call `hitchhiker_plugin_install` with `manifest` containing the package manifest and `code` containing
+the compiled JavaScript IIFE. Reinstalling the same plugin ID with a new version is an update. The
+server accepts uploaded data; it never reads a caller-selected local path, runs npm scripts, resolves
+imports, or accepts a caller-selected grant ID. Stdio frames are bounded at 256 KiB, so keep the entire
+JSON request below that limit, including escaping and multibyte text. The direct artifact store has a
+512 KiB compiled-code limit.
+
+The connection delegates a child grant with only the plugin's declared capabilities. It inherits the
+parent's profile, allowed origins, and expiry. Revoking the connection grant also revokes access for
+its installed descendants. Delegation never includes raw CDP. The private plugin registry stores
+artifact hashes and grant IDs, not bearer tokens, and is separate from portable configuration.
+
+`hitchhiker_plugins_list` returns installation and running status. Use `hitchhiker_plugin_enable`,
+`hitchhiker_plugin_disable`, or `hitchhiker_plugin_rollback` with an `id`. The default interface's
+Plugins screen exposes the same enable/disable/rollback controls. Permission grants are still issued
+through the trusted CLI; a graphical permission editor remains unfinished.
+
+Each update starts a fresh isolated worker, waits for activation and a short health interval, and
+retains the previous revision for rollback. Replacement briefly returns to the trusted interface.
+Rollback restores the plugin revision and interface; page creation, navigation, or configuration
+changes a plugin already performed are not transactional and are not undone. The manager allows
+sixteen installations, four concurrent workers, and one enabled interface owner. Background plugins
+can run alongside it. Artifact storage is bounded; package garbage collection and a catalog remain
+future work.
+
+Command–Shift–Escape is reserved by the native host to disable plugins and open trusted plugin
+controls, independent of the plugin's interface. `--safe-mode` is the startup recovery path. The
+shortcut's interactive keyboard routing still needs verification in an unlocked macOS session.
 
 ## Verification and remaining release work
 
@@ -93,8 +132,18 @@ not yet implemented. See [the isolation evidence](PLUGIN-ISOLATION.md) for exact
 without them their cases are explicitly skipped. The original host regression also exercises MV3
 content scripts, service workers, storage, multiple pages, and repeated layout changes.
 
+After building the workspace and native helpers, use `pnpm test:native` with
+`HITCHHIKER_NATIVE_BINARY` and `HITCHHIKER_PLUGIN_HOST` set to absolute executable paths. This command
+requires both helpers and runs the runtime and browser suites one file at a time. Avoid competing
+native test runs: plugin wall-clock watchdogs intentionally remain active, and simultaneous Chromium
+startups can exhaust a fixture's 500 ms command window. The window currently includes cold worker
+startup; separating startup from execution accounting remains a performance refinement.
+
 The development build still needs interactive macOS focus/IME/accessibility verification, complete
-Chrome extension installation and same-window tab compatibility, a Metal presenter, live package
-management, remote MCP, profile management/export/sync integration, and distribution signing,
+Chrome extension installation and same-window tab compatibility, a Metal presenter, remote MCP, profile management/export/sync integration, and distribution signing,
 notarization, and updates. Reversible freezing reduces inactive CPU work; it is not tab discard or
 proof of lower renderer memory use.
+
+The plugin registry uses a private mutation lock. If a broker is killed during a registry write, stop
+all profile writers before removing a stale `hitchhiker-plugins/.plugin-write-lock` directory.
+Safe mode bypasses plugin restoration; corrupted metadata cannot take down the default browser.

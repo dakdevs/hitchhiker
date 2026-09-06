@@ -7,8 +7,8 @@ components, runtime plugins, and explicit automation permissions.
 The development browser runs multiple live Chromium pages with a replaceable Native interface.
 Isolated TypeScript plugins, MCP, authenticated CDP, profile persistence and reversible page freezing
 pass real native integration tests. A local MV3 extension works across layout and lifecycle changes.
-Persistent plugin installation, full extension compatibility, release rendering and packaging remain
-in development.
+Persistent plugin installation and rollback are integrated. Full extension compatibility, release
+rendering and distribution signing remain in development.
 See `docs/ENGINE-FEASIBILITY.md` for measured evidence and current limits.
 See [the runtime evidence](docs/RUNTIME.md) for Native composition and automation boundaries.
 
@@ -66,3 +66,5 @@ Apache-2.0. Third-party components retain their respective licenses. Chromium/CE
 will require accompanying upstream notices in the packaged browser.
 
 Run the browser, issue local grants, connect MCP/CDP, and load the TypeScript canvas example with the [development guide](docs/DEVELOPMENT.md).
+
+Build a relocatable, ad hoc signed Apple Silicon app with [the macOS packaging guide](apps/browser/packaging/README.md).

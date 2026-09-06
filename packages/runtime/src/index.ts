@@ -8,13 +8,14 @@ export type {
   GrantIssue,
   GrantAuthentication,
   GrantAuthorization,
+  GrantDelegation,
   AuthorizedGrant,
 } from "./grants.ts";
 export { openCdpRelay, CdpRelayError } from "./cdp-relay.ts";
 export type { CdpRelay, CdpRelayOptions } from "./cdp-relay.ts";
 export { mcpStdioInputLimit, runMcpStdio } from "./mcp-stdio.ts";
 export { McpActionError, registerBrowserMcp } from "./mcp.ts";
-export type { McpBrowserApi, McpOptions } from "./mcp.ts";
+export type { McpBrowserApi, McpOptions, McpPluginApi } from "./mcp.ts";
 export {
   activatePage,
   decodePageResourceEvent,

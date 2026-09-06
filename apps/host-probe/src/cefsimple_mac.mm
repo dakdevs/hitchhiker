@@ -12,6 +12,31 @@
 #include "src/simple_app.h"
 #include "src/simple_handler.h"
 #include <filesystem>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+// Kernel-owned lifetime prevents two brokers from restoring the same profile's
+// plugins. Unlike a directory sentinel, it is released even after a process crash.
+class ProfileLease {
+ public:
+  ~ProfileLease() { if (fd_ >= 0) close(fd_); }
+  bool Acquire(const std::string& root) {
+    std::error_code error;
+    std::filesystem::create_directories(root, error);
+    if (error) return false;
+    fd_ = open((root + "/.hitchhiker-browser.lock").c_str(),
+               O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd_ < 0) return false;
+    struct stat info{};
+    return fstat(fd_, &info) == 0 && S_ISREG(info.st_mode) &&
+           info.st_uid == geteuid() && info.st_nlink == 1 &&
+           fchmod(fd_, 0600) == 0 && flock(fd_, LOCK_EX | LOCK_NB) == 0;
+  }
+ private:
+  int fd_ = -1;
+};
 
 // Receives notifications from the application.
 @interface SimpleAppDelegate : NSObject <NSApplicationDelegate>
@@ -174,8 +199,19 @@ int main(int argc, char* argv[]) {
       fprintf(stderr, "Hitchhiker profile root must be an absolute path\n");
       return 1;
     }
-    CefString(&settings.root_cache_path) = profile_root;
-    CefString(&settings.cache_path) = profile_root + "/Default";
+    ProfileLease profile_lease;
+    if (!profile_lease.Acquire(profile_root)) {
+      fprintf(stderr, "Hitchhiker profile is already in use or cannot be locked\n");
+      return 1;
+    }
+    std::error_code canonical_error;
+    const auto canonical_root = std::filesystem::canonical(profile_root, canonical_error).string();
+    if (canonical_error) {
+      fprintf(stderr, "Hitchhiker profile root could not be resolved\n");
+      return 1;
+    }
+    CefString(&settings.root_cache_path) = canonical_root;
+    CefString(&settings.cache_path) = canonical_root + "/Default";
 
     // When generating projects with CMake the CEF_USE_SANDBOX value will be
     // defined automatically. Pass -DUSE_SANDBOX=OFF to the CMake command-line

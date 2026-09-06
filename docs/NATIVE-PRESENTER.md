@@ -114,73 +114,71 @@ silently dirty.
 
 ## Standalone macOS developer bundle
 
-The current components can be staged into a developer bundle without implementing Metal:
+`pnpm bundle:macos` now produces an unsigned/developer Apple Silicon bundle at
+`work/package/Hitchhiker Developer/Hitchhiker.app`:
 
 ```text
 Hitchhiker.app/Contents/
-  MacOS/Hitchhiker                         small native launcher
-  Helpers/Hitchhiker Engine.app/           complete CEF host and its five helper apps
-  Helpers/PluginHost.app/                  client plus PluginBroker.xpc and worker
-  Helpers/node                             Node 24.19.0 arm64 executable
-  Resources/controller/                    compiled browser and production module graph
+  MacOS/Hitchhiker                         native launcher and CFBundleExecutable
+  MacOS/hitchhiker-probe                   CEF engine
+  Frameworks/                              CEF framework and five helper apps
+  Helpers/PluginHost.app/                  client, PluginBroker.xpc, and worker
+  Helpers/node                             official Node 24.19.0 arm64 executable
+  Resources/controller/                    compiled browser and production graph
   Resources/licenses/                      Node, CEF, Native, and project notices
+  Resources/build-manifest.json            pinned build inputs and source state
 ```
 
-The launcher resolves paths relative to its own bundle, sets absolute
-`HITCHHIKER_NATIVE_BINARY` and `HITCHHIKER_PLUGIN_HOST` values, and starts bundled Node with the
-compiled `apps/browser/dist/main.js`. It forwards arguments and termination and returns the controller
-exit status. Profile data remains outside the signed bundle under Application Support. A script as
-`CFBundleExecutable` is unsuitable for the signed path; use a small Mach-O launcher.
+The CEF engine must live in the outer application bundle. Embedding the complete CEF main app below
+`Contents/Helpers` passed static signature checks but trapped in `cef_initialize` during bundle
+lookup. The same payload ran when copied out as a standalone app. The implemented layout makes the
+outer Hitchhiker app own CEF's standard `Frameworks` and `Resources` directories and places the native
+launcher and engine beside each other in `Contents/MacOS`. The launcher's paths remain relative to its
+own bundle, and it sets absolute `HITCHHIKER_NATIVE_BINARY` and `HITCHHIKER_PLUGIN_HOST` values before
+executing the bundled controller with bundled Node.
 
-Build all TypeScript packages from a clean checkout with the exact lockfile before staging. The
-compiled browser still imports `@hitchhiker/*`, `effect`, `@effect/platform-node`, and `ws`; copying
-only `dist/main.js` cannot work. Produce a pnpm 11.24.0 production deployment from the workspace
-lockfile, or deliberately bundle the controller, then allowlist the resulting files. The present
-workspace's generated `apps/browser/dist/main.js` predates current MCP/plugin source and is not a
-packaging input until rebuilt. No compiler, pnpm store, tests, TypeScript sources, or developer-only
-packages should be required at runtime.
+`apps/browser/packaging/bundle-macos.mjs` downloads and verifies the official Node 24.19.0 archive,
+requires Native commit `5665a355cae768dff734d79dd4c0bd9d099f83fb` from a clean checkout, checks CEF
+`144.0.6+g5f7e671+chromium-144.0.7559.59` and its sandbox-enabled CMake configuration, and builds the
+native helpers. It copies the workspace into `work/package-staging`, performs the frozen production
+install, TypeScript build, and pnpm deployment there, then rejects any controller symlink that escapes
+the staged package. This isolation is required: running pnpm production deployment against the
+working checkout changes `.pnpm-workspace-state-v1.json` to production mode and can break later
+development commands. The final build preserved that file's SHA-256 and modification time.
 
-Use the official `node-v24.19.0-darwin-arm64.tar.xz`, SHA-256
-`3f1cf157479c1480352083105e13faf9d008ede98e7e157746b6df940d197b94`, from the
-[Node 24.19.0 release directory](https://nodejs.org/download/release/v24.19.0/). Inspection confirmed
-`v24.19.0`, an arm64 Mach-O, and only system CoreFoundation, Security, libc++, and libSystem dynamic
-dependencies. Runtime staging needs the approximately 116 MiB `bin/node` and Node `LICENSE`, not the
-archive's headers, npm tree, or development libraries.
+Repeated CEF post-build copies can accumulate self-referential framework links. Packaging reconstructs
+the versioned framework from the pinned release, rewrites helper bundle identities, signs CEF Mach-O
+files and nested bundles from the inside out, preserves the existing PluginHost/XPC signature, preserves
+the official Node signature and V8 entitlements, signs the launcher, and signs the outer app last.
+Verification checks strict signatures, Node's version, the pinned input manifest, controller module
+loading, launcher help, and bundle-contained symlinks. A sibling `Hitchhiker.app.manifest.json` records
+final file hashes and symlink targets.
 
-The upstream Node binary is Developer-ID signed with hardened runtime and several V8/development
-entitlements, including JIT, unsigned executable memory, disabled library validation, dyld environment
-variables, and `get-task-allow`. Preserve its signature for the first local developer bundle. A later
-distribution signing pass must determine and test the minimum V8 entitlements; blindly re-signing it
-without JIT allowances can break Node, while carrying the upstream development entitlements into a
-notarized release is not an accepted policy.
+Build and verify from the repository root:
 
-Keep both nested app structures intact. The CEF artifact already contains the framework, resource
-packs, libraries, and five helper apps. The PluginHost build correctly signs worker, XPC service, and
-outer app in deepest-first order and passes strict verification. Its effective deployment floor makes
-the current combined bundle Apple Silicon macOS 14 or later.
+```sh
+NATIVE_SDK_SOURCE=/absolute/path/to/native-at-5665a355 \
+  pnpm bundle:macos
 
-The current CEF app is only linker/ad-hoc signed; `codesign --verify --deep --strict` fails because its
-resources are unsealed. A packaging step must give the engine and helpers stable Hitchhiker bundle IDs,
-then explicitly sign nested dylibs/frameworks, helper executables/apps, the engine, PluginHost nested
-code, the launcher, and the outer app from deepest to outermost. Do not use `codesign --deep` as the
-signing algorithm; retain it only as one verification check. Developer packaging may use an ad-hoc
-identity without a timestamp. Developer-ID signing, notarization, stapling, update signing, universal
-binaries, and byte-for-byte reproducibility of timestamped signatures remain separate release work and
-require the owner's identity.
+node apps/browser/packaging/bundle-macos.mjs --verify-only \
+  --output="$PWD/work/package/Hitchhiker Developer/Hitchhiker.app"
+```
 
-## Developer-bundle acceptance
+The final checkpoint was copied to `/tmp/Hitchhiker Final Bundle.Sgb47d/Hitchhiker.app`. This exact
+relocated copy passed strict verification and `--help`; `packages/runtime/test/native-plugin-management.test.ts`
+then passed 2/2 through its bundled launcher, covering install, update, rollback, disable/enable,
+restart with preserved pages, grant revocation, and corrupt-store safe-mode recovery. Commands and
+complete output are recorded in:
 
-- A clean, network-disabled machine launches the copied `.app` without repository, pnpm, Zig, CMake,
-  Xcode, or a system Node installation.
-- The staged Node reports exactly 24.19.0 and every non-system Mach-O dependency resolves inside its
-  owning bundle. A manifest records source revisions, archive checksums, lockfile hash, file hashes,
-  architectures, deployment targets, and signing mode.
-- Strict verification passes for PluginHost, CEF helpers/framework/app, launcher, and outer bundle.
-  `spctl`/notarization are not claimed for an ad-hoc developer artifact.
-- Finder launch and CLI launch both create the controller, one CEF engine, expected CEF helpers, and
-  on demand one PluginHost broker/worker; shutdown leaves none behind.
-- Default browsing, profile persistence, Native interface commits, MCP stdio, authenticated CDP,
-  plugin activation/recovery, sandbox denial, and the existing native regression suites pass using
-  only paths inside the staged bundle and a disposable Application Support profile.
-- Moving the app to a different directory does not break launch. Altering any sealed runtime file
-  fails verification, and application data never writes inside the bundle.
+- `work/publish-macos-bundle-verify.log`
+- `work/publish-macos-bundle-management.log`
+
+The management command set `HITCHHIKER_BROWSER_LAUNCHER` to the relocated launcher. Its source-tree
+native and PluginHost variables only satisfy the test's native gate; the launcher overwrites both with
+paths from the copied app.
+
+This 490 MiB result is an ad hoc signed developer artifact for arm64 macOS 14 or later. The CEF sandbox
+remains enabled. It is not Developer-ID signed, notarized, stapled, universal, update-enabled, or proven
+on a clean network-disabled Mac. Finder launch, locked-session launch, and a full dependency audit on a
+second machine remain release acceptance work. Distribution signing must determine and test the minimum
+Node/V8 entitlements instead of copying the upstream development entitlements unchanged.

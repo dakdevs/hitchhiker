@@ -9,7 +9,8 @@ using NativeCommandSink = std::function<void(NativeCommand)>;
 using NativeEventSink = std::function<void(const std::string& json)>;
 void* InstallNativeSidebar(CefRefPtr<CefWindow> window,
                            NativeCommandSink sink,
-                           NativeEventSink event_sink = {});
+                           NativeEventSink event_sink = {},
+                           std::function<void()> recovery = {});
 void ResizeNativeSidebar(void* sidebar, int height);
 void ResizeNativeSurface(void* sidebar, int width, int height);
 bool CommitNativeTree(void* sidebar, const char* json, size_t length,

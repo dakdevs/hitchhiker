@@ -5,8 +5,15 @@ import type { McpBrowserApi } from "./mcp.ts";
 
 export const LivePluginManifest = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{1,62}$/)),
-  version: Schema.String.check(Schema.isPattern(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/)),
-  name: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(100)),
+  version: Schema.String.check(
+    Schema.isMaxLength(64),
+    Schema.isPattern(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
+  ),
+  name: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(100),
+    Schema.isPattern(/^(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF])*$/),
+  ),
   capabilities: Schema.Array(
     Schema.Literals([
       "pages.list",
@@ -20,7 +27,7 @@ export const LivePluginManifest = Schema.Struct({
       "cdp.connect",
     ]),
   ).check(Schema.isMaxLength(16)),
-});
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type LivePluginManifest = typeof LivePluginManifest.Type;
 export class PluginCallError extends Schema.TaggedError<PluginCallError>()("PluginCallError", {
   message: Schema.String,

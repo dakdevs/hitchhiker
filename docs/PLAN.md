@@ -31,7 +31,21 @@ toolchains, and security-sensitive browser automation. `AGENTS.md` is the planni
   sidebar/top layout and per-interface selection belong to a replaceable first-party interface.
   Several viewports may show distinct pages concurrently; replacing UI must retain page identity.
 
-## Current state and context
+## Current implementation
+
+The development browser runs Native UI around live Chromium pages. The default sidebar/top interface
+and an independent canvas plugin use public page/viewport/component APIs. Isolated compiled plugins
+support persistent MCP installation, updates, rollback and grant revocation. Local stdio MCP and a
+separately authorized loopback CDP relay are integrated. The relocatable arm64 developer app passes
+real plugin lifecycle and safe-mode checks. Detailed checkpoint evidence appears below.
+
+The browser is not release-ready. Scoped DOM automation, remote MCP, complete Chrome extension
+management/tab compatibility, profile management/export/sync, true renderer discard, Metal/motion,
+interactive accessibility/input verification, signing/notarization and updates remain. Native tests
+run serially because they enforce real wall-clock resource budgets. Codex sidebar registration remains a
+manual app step because available project tools do not provide it.
+
+## Starting environment (historical)
 
 This repository began empty. The Native source is being inspected at
 `/Users/dak/Documents/Codex/2026-09-05/usi/work/native`, commit
@@ -229,3 +243,41 @@ accessibility, device capture or release packaging, which remain open.
 
 Next work is persistent plugin installation/update/rollback and a relocatable developer macOS bundle.
 See [NATIVE-PRESENTER.md](NATIVE-PRESENTER.md) for the separate future Metal integration boundary.
+
+### Persistent plugins and developer bundle, 2026-09-05
+
+- [x] Compiled artifacts are bounded, hashed, immutable profile data; no package scripts run.
+- [x] MCP installation delegates only the caller's allowed capabilities, persists no child bearer,
+      and respects inherited origin/profile/expiry restrictions and ancestor revocation.
+- [x] Install/update/enable/disable/rollback and startup restore run fresh isolated workers. Tests cover
+      interrupted activation, health-window failure, rollback failure, revoked recovery grants and
+      bounded crash recovery. The native Plugins screen shows permissions and lifecycle controls.
+- [x] Actual MCP client exercised install/update/rollback/disable/enable/restart against the native
+      browser, retaining the page identity, then revoked the parent grant and observed durable disable.
+- [x] Native profile `flock` denies a second engine before readiness and releases after a crash.
+      Canonical CEF root/cache paths prevent macOS `/var` aliases from falling back to memory storage.
+- [x] Native-enabled runtime checkpoint: 59 passed, no skips. Browser suite: 24 passed, no skips.
+- [x] Expanded native runtime suite: 60 passed, no skips, in a serial test run. Instrumented concurrent
+      runs confirmed the 500 ms wall watchdog killed the initial plugin activation under contention;
+      a separate EOF deadline was also affected. `pnpm test:native` provides an explicit serial lane.
+      Temporary watchdog instrumentation was removed. Separating cold worker startup from execution
+      accounting remains a performance refinement; the watchdog has not been loosened.
+- [x] Final native-enabled browser suite: 25 passed, no skips. The added pinned DOM feasibility probe
+      verifies top-frame isolation, hostile-main-world resistance, loaded child-frame AX exclusion,
+      and rejection of old contexts/objects after navigation. Public scoped DOM tools remain next work;
+      see `SCOPED-DOM-PLAN.md`. The separate Chrome extension design is in `EXTENSIONS-PLAN.md`.
+- [x] Relocatable ad hoc signed arm64 app includes the production controller, pinned Node, CEF and
+      isolated PluginHost. The launcher and engine share the outer application's CEF resources;
+      nesting the complete CEF app was rejected after an initialization crash. A relocated path with
+      spaces passes both actual MCP plugin lifecycle and corrupt-store safe-mode tests. Packaging
+      builds in an isolated copy and leaves the developer dependency installation unchanged.
+- [ ] Interactive Command–Shift–Escape recovery validation after macOS unlock. Native event monitor
+      and trusted broker recovery are compiled; no plugin-provided action can invoke this path.
+- [ ] Graphical permission issuance, artifact garbage collection/catalog, and isolated source compiler.
+
+The default Plugin controls remain responsive while an isolated worker starts; duplicate clicks do
+not enqueue repeated starts. One prior revision is retained. A plugin's earlier page/configuration
+side effects are not rolled back. Registry mutation uses a private directory lock; a process killed
+while holding that lock can leave it stale. Stop all profile writers before manually removing
+`hitchhiker-plugins/.plugin-write-lock`. Safe mode bypasses registry restoration even when its data is
+invalid; a metadata failure does not terminate the default browser.

@@ -224,6 +224,24 @@ test(
             Effect.scoped,
           );
           yield* close(first);
+          // macOS /var and /private/var name the same profile. Both CEF cache paths
+          // must be canonicalized or the first launch silently uses memory storage.
+          yield* Effect.gen(function* () {
+            const restored = yield* EngineConnection;
+            yield* restored.ready;
+            yield* restored.request("pages.open", { id: "restored", url });
+            yield* loaded(restored, "restored");
+            assert.equal(
+              yield* evaluate(restored, "restored", "localStorage.getItem('probe')"),
+              "one",
+            );
+            yield* close(restored);
+          }).pipe(
+            Effect.provide(
+              EngineConnection.layer({ executable: binary, profileRoot: join(directory, "first") }),
+            ),
+            Effect.scoped,
+          );
         }).pipe(
           Effect.provide(
             EngineConnection.layer({ executable: binary, profileRoot: join(directory, "first") }),

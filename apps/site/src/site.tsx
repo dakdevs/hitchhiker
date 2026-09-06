@@ -91,7 +91,7 @@ const docs: Doc[] = [
     body: [
       "TypeScript plugins use @hitchhiker/plugin-sdk and @hitchhiker/ui. Bundle an entry point as an IIFE and include hitchhiker.plugin.json with an ID, name, version, and declared capabilities. The local developer launcher loads fixed, bounded regular files; it never runs a package’s npm scripts.",
       "Each plugin revision executes in a separate JavaScriptCore worker behind an App-Sandboxed XPC broker. It has no Node, filesystem, network, timer, or generic native bridge. Host calls require both the manifest declaration and a current grant whose principal matches the installed plugin ID.",
-      "Activation may be asynchronous. A failed, over-budget, or revoked UI plugin returns control to the trusted interface. The canvas example replaces tabs with cards and two viewports. Persistent installation, live updates, known-good revision rollback, and MCP package management remain under development.",
+      "Activation may be asynchronous. A failed, over-budget, or revoked UI plugin returns control to the trusted interface. The canvas example replaces tabs with cards and two viewports. MCP installs compiled packages as immutable hashed artifacts. Live updates retain a previous revision; the native Plugins screen supports enable, disable, and rollback. Catalog distribution and a graphical permission editor remain in development.",
     ],
     code: 'import { definePlugin } from "@hitchhiker/plugin-sdk";\nimport { column, text } from "@hitchhiker/ui";\n\ndefinePlugin({\n  async activate(browser) {\n    await browser.ui.publish({\n      root: column("welcome", [text("title", "Your browser")], { flex: 1 }),\n      bindings: [],\n    });\n  },\n});',
   },
@@ -116,7 +116,7 @@ const docs: Doc[] = [
     icon: ShieldCheck,
     body: [
       "Local grants persist profile, capability, origin scope, expiry, and revocation. The trusted grant store generates random bearer credentials and persists their hashes in an atomically replaced private file. A cross-process mutation lock prevents concurrent grant writes from losing revocations.",
-      "Plugin declarations do not grant authority. Every host call and forwarded event checks the current grant and installed identity. Replacing the UI requires ui.compose. The local grants command is the current trusted issuance and recovery path; an integrated permission-review interface remains unfinished.",
+      "Plugin declarations do not grant authority. Every host call and forwarded event checks the current grant and installed identity. Replacing the UI requires ui.compose. The local grants command issues permissions. An MCP installer may delegate only rights its connection already holds, and revoking that parent grant disables its installed descendants. The Plugins screen shows declared capabilities; a graphical permission editor remains unfinished.",
       "browser.full-control excludes raw CDP. A separate cdp.connect permission gives control over the whole Chromium profile and cannot be constrained to selected website origins. Ordinary website content never receives the private host pipes.",
     ],
     code: "pnpm --filter @hitchhiker/browser grants issue \\\n  --principal=my-agent \\\n  --capabilities=pages.list,pages.manage,configuration.write\npnpm --filter @hitchhiker/browser grants list\npnpm --filter @hitchhiker/browser grants revoke GRANT_ID",
@@ -128,9 +128,9 @@ const docs: Doc[] = [
     description: "Connect agents through scoped, inspectable control.",
     icon: Command,
     body: [
-      "The local stdio MCP server exposes page list/open/navigate/close, configuration get/set, and sidebar/top selection. Each call checks a pre-issued credential against durable grants. Tool results that contain page titles or URLs remain untrusted website content.",
+      "The local stdio MCP server exposes page list/open/navigate/close, configuration get/set, sidebar/top selection, and plugin list/install/enable/disable/rollback when PluginHost is configured. Each call checks a pre-issued credential against durable grants. Tool results that contain page titles or URLs remain untrusted website content.",
       "CDP uses private inherited Chromium pipes and an explicitly enabled authenticated loopback relay. Playwright has been verified against the real browser, including input changes, profile isolation, and disconnection after grant revocation. Raw CDP is disabled unless separately requested at launch.",
-      "Local stdio starts its own browser instance. Attaching to an already-running application, remote MCP for hosted ChatGPT clients, DOM-level MCP tools, and live plugin installation through MCP are still being implemented. See docs/DEVELOPMENT.md for current launch commands.",
+      "Local stdio starts its own browser instance. Attaching to an already-running application, remote MCP for hosted ChatGPT clients, and DOM-level MCP tools are still being implemented. See docs/DEVELOPMENT.md for current launch commands.",
     ],
     code: '# Supply a credential issued by the local grants command.\nexport HITCHHIKER_MCP_TOKEN="YOUR_TOKEN"\nnode --experimental-strip-types apps/browser/src/main.ts --mcp',
   },
@@ -155,7 +155,7 @@ const docs: Doc[] = [
     icon: Sparkles,
     body: [
       "Hitchhiker is an open-source browser framework with a macOS-first development build. Teams can build the public source and compose their own Native interface, defaults, and isolated plugins. The repository is published at github.com/dakdevs/hitchhiker.",
-      "The current native build and plugin helper are reproducible development artifacts. Developer ID signing, notarization, automatic updates, profile management, optional sync, and complete Chrome extension installation/compatibility are not finished. Do not distribute this build as a production browser.",
+      "The macOS packaging command builds a relocatable Apple Silicon developer app containing the controller, Node, CEF engine and isolated plugin host. It verifies local ad hoc signatures and records source and file hashes. Developer ID signing, notarization, automatic updates, profile management, optional sync, and complete Chrome extension installation/compatibility are not finished. Do not distribute this build as a production browser.",
     ],
     code: "Your browser\n  ├── Native surface package\n  ├── scoped plugin bundles\n  ├── profile defaults\n  └── Hitchhiker Chromium host",
   },

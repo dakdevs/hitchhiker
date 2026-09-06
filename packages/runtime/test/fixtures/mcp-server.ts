@@ -33,6 +33,7 @@ const grants: GrantStoreApi = {
           },
         })
       : Effect.fail({ _tag: "GrantStoreError", code: "denied", message: "denied" } as never),
+  authenticateGrant: () => Effect.die("fixture never trusts grant IDs"),
   authorize: (token, request) =>
     token === "preissued" &&
     capabilities.includes(request.capability) &&
@@ -48,6 +49,9 @@ const grants: GrantStoreApi = {
           },
         })
       : Effect.fail({ _tag: "GrantStoreError", code: "denied", message: "denied" } as never),
+  authorizeGrant: () => Effect.die("fixture never trusts grant IDs"),
+  delegate: () => Effect.die("fixture never delegates grants"),
+  delegateGrant: () => Effect.die("fixture never delegates grants"),
   revocations: Stream.empty,
 };
 

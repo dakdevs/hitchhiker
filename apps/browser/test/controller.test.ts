@@ -9,7 +9,7 @@ import {
   type EngineEvent,
   type SurfaceEvent,
 } from "@hitchhiker/runtime";
-import { Effect, Layer, PubSub, Schema, Stream } from "effect";
+import { Deferred, Effect, Layer, PubSub, Schema, Stream } from "effect";
 import { makeBrowserController, normalizeAddressDraft } from "../src/controller.ts";
 
 test("normalizes addresses and keeps plain search text out of engine navigation", () => {
@@ -112,6 +112,35 @@ test("filters non-page engine feedback, selects a successor, and persists the cu
             interface: { pinnedPageIds: string[] };
           };
           assert.deepEqual(persisted.interface.pinnedPageIds, [opened[0]]);
+
+          const releaseActivation = yield* Deferred.make<void>();
+          let pluginCalls = 0;
+          yield* controller.updatePluginControls(
+            [
+              {
+                id: "pending-plugin",
+                name: "Pending",
+                version: "1.0.0",
+                enabled: false,
+                running: false,
+              },
+            ],
+            () =>
+              Effect.sync(() => {
+                pluginCalls++;
+              }).pipe(Effect.andThen(Deferred.await(releaseActivation))),
+          );
+          yield* controller.dispatch("interface.plugins");
+          yield* controller.dispatch("plugins.enable.pending-plugin").pipe(Effect.timeout(500));
+          yield* Effect.yieldNow;
+          yield* controller.dispatch("plugins.enable.pending-plugin");
+          assert.equal(pluginCalls, 1, "duplicate clicks must not enqueue additional activations");
+          yield* controller.dispatch("screen.browser").pipe(Effect.timeout(500));
+          assert(
+            JSON.stringify(committed.at(-1)).includes("main-page"),
+            "browsing remains responsive while a plugin starts",
+          );
+          yield* Deferred.succeed(releaseActivation, undefined);
         }),
       ),
     );

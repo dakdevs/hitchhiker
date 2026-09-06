@@ -2,6 +2,7 @@ import type { BrowserConfiguration, BrowserPage, Capability } from "@hitchhiker/
 import { Effect, Schema } from "effect";
 import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import type { GrantStoreApi } from "./grants.ts";
+import { LivePluginManifest } from "./plugin-dispatch.ts";
 
 export class McpActionError extends Schema.TaggedError<McpActionError>()("McpActionError", {
   message: Schema.String,
@@ -26,6 +27,20 @@ export interface McpOptions {
   readonly token: string;
   readonly grants: GrantStoreApi;
   readonly browser: McpBrowserApi;
+  readonly plugins?: McpPluginApi;
+}
+
+/** Trusted installation consumes uploaded data, never a caller-selected filesystem path. */
+export interface McpPluginApi {
+  readonly stage: (input: {
+    readonly manifest: LivePluginManifest;
+    readonly code: string;
+  }) => Effect.Effect<{ readonly hash: string }, unknown>;
+  readonly install: (hash: string, grantId: string) => Effect.Effect<void, unknown>;
+  readonly list: () => Effect.Effect<unknown, unknown>;
+  readonly enable: (id: string) => Effect.Effect<void, unknown>;
+  readonly disable: (id: string) => Effect.Effect<void, unknown>;
+  readonly rollback: (id: string) => Effect.Effect<void, unknown>;
 }
 
 const Configuration = Schema.Struct({
@@ -81,6 +96,37 @@ const tools = Toolkit.make(
     success: Result,
     failure: McpActionError,
   }),
+);
+
+const PluginId = LivePluginManifest.fields.id;
+const pluginTools = Toolkit.make(
+  Tool.make("hitchhiker_plugins_list", {
+    description:
+      "List installed plugins, enabled state and rollback availability. No credentials or source code are returned.",
+    parameters: EmptyParameters,
+    success: Result,
+    failure: McpActionError,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("hitchhiker_plugin_install", {
+    description:
+      "Install or update a compiled Hitchhiker plugin. Upload a manifest and JavaScript IIFE; no package scripts run. Its permissions must fit this connection's grant, and revoking that grant stops its installed plugins.",
+    parameters: Schema.Struct({
+      manifest: LivePluginManifest,
+      code: Schema.String.check(Schema.isMaxLength(196_608)),
+    }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  ...(["enable", "disable", "rollback"] as const).map((operation) =>
+    Tool.make(`hitchhiker_plugin_${operation}`, {
+      description: `${operation === "rollback" ? "Restore the previous verified revision of" : operation === "enable" ? "Enable" : "Disable"} an installed Hitchhiker plugin.`,
+      parameters: Schema.Struct({ id: PluginId }).annotate({
+        parseOptions: { onExcessProperty: "error" },
+      }),
+      success: Result,
+      failure: McpActionError,
+    }),
+  ),
 );
 
 /** Register against an externally scoped MCP transport. Every call rereads the current grant. */
@@ -149,4 +195,35 @@ export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (opt
       ),
   });
   yield* McpServer.registerToolkit(tools).pipe(Effect.provide(handlers));
+  const plugins = options.plugins;
+  if (plugins !== undefined) {
+    const installed = (operation: Effect.Effect<unknown, unknown>) =>
+      authorized("plugins.install", operation).pipe(Effect.flatMap(json));
+    const pluginHandlers = pluginTools.toLayer({
+      hitchhiker_plugins_list: () => installed(plugins.list()),
+      hitchhiker_plugin_install: ({ manifest, code }) =>
+        installed(
+          Effect.gen(function* () {
+            const grant = yield* options.grants.delegate(options.token, {
+              principal: manifest.id,
+              capabilities: manifest.capabilities,
+            });
+            // Failed/cancelled installation must not leave an unused delegated credential active.
+            const artifact = yield* Effect.gen(function* () {
+              const staged = yield* plugins.stage({ manifest, code });
+              yield* plugins.install(staged.hash, grant.id);
+              return staged;
+            }).pipe(Effect.onError(() => options.grants.revoke(grant.id).pipe(Effect.orDie)));
+            return { id: manifest.id, hash: artifact.hash, installed: true };
+          }),
+        ),
+      hitchhiker_plugin_enable: ({ id }) =>
+        installed(plugins.enable(id).pipe(Effect.as({ enabled: true }))),
+      hitchhiker_plugin_disable: ({ id }) =>
+        installed(plugins.disable(id).pipe(Effect.as({ enabled: false }))),
+      hitchhiker_plugin_rollback: ({ id }) =>
+        installed(plugins.rollback(id).pipe(Effect.as({ restored: true }))),
+    });
+    yield* McpServer.registerToolkit(pluginTools).pipe(Effect.provide(pluginHandlers));
+  }
 });

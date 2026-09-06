@@ -20,6 +20,7 @@ const MaxStoreBytes = 1024 * 1024;
 const MaxGrants = 1024;
 const MutationLockTimeoutMs = 1_000;
 const MutationLockRetryMs = 25;
+const MaxDelegationDepth = 8;
 
 export class GrantStoreError extends Schema.TaggedError<GrantStoreError>()("GrantStoreError", {
   code: Schema.String,
@@ -44,6 +45,11 @@ export interface GrantAuthorization {
 
 export interface GrantAuthentication {
   readonly profileId: string;
+}
+
+export interface GrantDelegation {
+  readonly principal: string;
+  readonly capabilities: readonly Capability[];
 }
 
 export interface AuthorizedGrant {
@@ -71,6 +77,25 @@ export interface GrantStoreApi {
     token: string,
     request: GrantAuthentication,
   ) => Effect.Effect<AuthorizedGrant, GrantStoreError>;
+  /** Trusted in-process lookup. Never pass a wire-supplied grant ID to this API. */
+  readonly authenticateGrant: (
+    id: string,
+    request: GrantAuthentication,
+  ) => Effect.Effect<AuthorizedGrant, GrantStoreError>;
+  /** Trusted in-process authorization. Wire boundaries must use the bearer-token API above. */
+  readonly authorizeGrant: (
+    id: string,
+    request: GrantAuthorization,
+  ) => Effect.Effect<AuthorizedGrant, GrantStoreError>;
+  readonly delegate: (
+    token: string,
+    input: GrantDelegation,
+  ) => Effect.Effect<CapabilityGrant, GrantStoreError>;
+  /** Trusted manager delegation. Never accept parentId from plugin or MCP wire input. */
+  readonly delegateGrant: (
+    parentId: string,
+    input: GrantDelegation,
+  ) => Effect.Effect<CapabilityGrant, GrantStoreError>;
   readonly revocations: Stream.Stream<GrantRevocation>;
 }
 
@@ -82,6 +107,7 @@ interface StoredGrant {
   readonly grant: CapabilityGrant;
   readonly issuedAt: number;
   readonly tokenHash: string;
+  readonly parentId?: string;
 }
 
 interface StoredState {
@@ -98,10 +124,27 @@ const PersistedGrant = Schema.Struct({
   grant: Schema.Unknown,
   issuedAt: Schema.Int,
   tokenHash: Schema.String,
+  parentId: Schema.optional(Schema.String),
 });
 const PersistedState = Schema.Struct({
   version: Schema.Literal(1),
   grants: Schema.Array(PersistedGrant),
+});
+const DelegationInput = Schema.Struct({
+  principal: Schema.String,
+  capabilities: Schema.Array(
+    Schema.Literals([
+      "pages.list",
+      "pages.manage",
+      "pages.read",
+      "pages.write",
+      "ui.compose",
+      "configuration.write",
+      "plugins.install",
+      "browser.full-control",
+      "cdp.connect",
+    ]),
+  ),
 });
 const decodePersistedState = Schema.decodeUnknownOption(PersistedState, {
   onExcessProperty: "error",
@@ -121,7 +164,12 @@ const parseStoredState = (value: unknown): StoredState | undefined => {
     grantIds.add(grant.value.id);
     tokenHashes.add(record.tokenHash);
     grants.push(
-      Object.freeze({ grant: grant.value, issuedAt: record.issuedAt, tokenHash: record.tokenHash }),
+      Object.freeze({
+        grant: grant.value,
+        issuedAt: record.issuedAt,
+        tokenHash: record.tokenHash,
+        ...(record.parentId === undefined ? {} : { parentId: record.parentId }),
+      }),
     );
   }
   return Object.freeze({ version: 1, grants: Object.freeze(grants) });
@@ -287,6 +335,55 @@ export const create = Effect.fn("GrantStore.create")(function* ({
       ),
     );
 
+  const active = (grant: CapabilityGrant, profileId: string, at: number) =>
+    grant.profileId === profileId &&
+    grant.revokedAt === undefined &&
+    (grant.expiresAt === undefined || at < grant.expiresAt);
+  const sameValues = (left: readonly string[], right: readonly string[]) =>
+    left.length === right.length && left.every((value, index) => value === right[index]);
+  const canDelegateCapability = (grant: CapabilityGrant, capability: Capability) =>
+    capability !== "cdp.connect" &&
+    (grant.capabilities.includes("browser.full-control") ||
+      grant.capabilities.includes(capability));
+  const validateStoredGrant = Effect.fn("GrantStore.validateStoredGrant")(function* (
+    state: StoredState,
+    leaf: StoredGrant,
+    profileId: string,
+    at: number,
+  ) {
+    if (!active(leaf.grant, profileId, at))
+      return yield* failure("denied", "Grant does not allow this request");
+    const seen = new Set<string>([leaf.grant.id]);
+    let child = leaf;
+    let depth = 1;
+    while (child.parentId !== undefined) {
+      if (depth >= MaxDelegationDepth || seen.has(child.parentId))
+        return yield* failure("denied", "Grant delegation chain is invalid");
+      const parent = state.grants.find((candidate) => candidate.grant.id === child.parentId);
+      if (parent === undefined || !active(parent.grant, profileId, at))
+        return yield* failure("denied", "Grant delegation chain is not authorized");
+      if (
+        !grantAllows(parent.grant, {
+          principal: parent.grant.principal,
+          profileId,
+          capability: "plugins.install",
+          now: at,
+        }) ||
+        child.grant.profileId !== parent.grant.profileId ||
+        child.grant.expiresAt !== parent.grant.expiresAt ||
+        !sameValues(child.grant.origins, parent.grant.origins) ||
+        !child.grant.capabilities.every((capability) =>
+          canDelegateCapability(parent.grant, capability),
+        )
+      )
+        return yield* failure("denied", "Grant delegation chain is not authorized");
+      seen.add(parent.grant.id);
+      child = parent;
+      depth++;
+    }
+    return { depth };
+  });
+
   const issue = Effect.fn("GrantStore.issue")(function* (input: GrantIssue) {
     const now = yield* Clock.currentTimeMillis;
     const id = `g${hex(yield* randomBytes(16))}`;
@@ -345,24 +442,21 @@ export const create = Effect.fn("GrantStore.create")(function* ({
   const list = () =>
     lock.withPermit(load().pipe(Effect.map((state) => state.grants.map((entry) => entry.grant))));
   const authenticateStored = Effect.fn("GrantStore.authenticateStored")(function* (
-    token: string,
+    lookup: { readonly token: string } | { readonly id: string },
     profileId: string,
   ) {
-    if (!/^[A-Za-z0-9_-]{43}$/.test(token))
+    if ("token" in lookup && !/^[A-Za-z0-9_-]{43}$/.test(lookup.token))
       return yield* failure("denied", "Grant token is not authorized");
-    const hash = yield* hashToken(token);
+    const hash = "token" in lookup ? yield* hashToken(lookup.token) : undefined;
     return yield* lock.withPermit(
       Effect.gen(function* () {
         const state = yield* load();
-        const entry = state.grants.find((candidate) => candidate.tokenHash === hash);
+        const entry = state.grants.find((candidate) =>
+          "id" in lookup ? candidate.grant.id === lookup.id : candidate.tokenHash === hash,
+        );
         if (!entry) return yield* failure("denied", "Grant token is not authorized");
         const now = yield* Clock.currentTimeMillis;
-        if (
-          entry.grant.profileId !== profileId ||
-          entry.grant.revokedAt !== undefined ||
-          (entry.grant.expiresAt !== undefined && now >= entry.grant.expiresAt)
-        )
-          return yield* failure("denied", "Grant does not allow this request");
+        yield* validateStoredGrant(state, entry, profileId, now);
         // The principal is an audit label from trusted issuance, not an external
         // authentication assertion.
         return { principal: entry.grant.principal, grant: entry.grant, now };
@@ -374,7 +468,15 @@ export const create = Effect.fn("GrantStore.create")(function* ({
     token: string,
     request: GrantAuthentication,
   ) {
-    const { principal, grant } = yield* authenticateStored(token, request.profileId);
+    const { principal, grant } = yield* authenticateStored({ token }, request.profileId);
+    return { principal, grant };
+  });
+
+  const authenticateGrant = Effect.fn("GrantStore.authenticateGrant")(function* (
+    id: string,
+    request: GrantAuthentication,
+  ) {
+    const { principal, grant } = yield* authenticateStored({ id }, request.profileId);
     return { principal, grant };
   });
 
@@ -382,7 +484,7 @@ export const create = Effect.fn("GrantStore.create")(function* ({
     token: string,
     request: GrantAuthorization,
   ) {
-    const authenticated = yield* authenticateStored(token, request.profileId);
+    const authenticated = yield* authenticateStored({ token }, request.profileId);
     if (
       !grantAllows(authenticated.grant, {
         principal: authenticated.principal,
@@ -394,12 +496,110 @@ export const create = Effect.fn("GrantStore.create")(function* ({
     return { principal: authenticated.principal, grant: authenticated.grant };
   });
 
+  const authorizeGrant = Effect.fn("GrantStore.authorizeGrant")(function* (
+    id: string,
+    request: GrantAuthorization,
+  ) {
+    const authenticated = yield* authenticateStored({ id }, request.profileId);
+    if (
+      !grantAllows(authenticated.grant, {
+        principal: authenticated.principal,
+        ...request,
+        now: authenticated.now,
+      })
+    )
+      return yield* failure("denied", "Grant does not allow this request");
+    return { principal: authenticated.principal, grant: authenticated.grant };
+  });
+
+  const decodeDelegation = (input: GrantDelegation) =>
+    Schema.decodeUnknownEffect(DelegationInput, { onExcessProperty: "error" })(input).pipe(
+      Effect.mapError(() => failure("invalid-grant", "Invalid delegated grant request")),
+    );
+  const delegateFrom = Effect.fn("GrantStore.delegateFrom")(function* (
+    lookup: { readonly tokenHash: string } | { readonly id: string },
+    input: GrantDelegation,
+  ) {
+    const decoded = yield* decodeDelegation(input);
+    if (decoded.capabilities.includes("cdp.connect"))
+      return yield* failure("denied", "Plugins cannot receive CDP authority");
+    const id = `g${hex(yield* randomBytes(16))}`;
+    const discardedToken = tokenText(yield* randomBytes(32));
+    const tokenHash = yield* hashToken(discardedToken);
+    const now = yield* Clock.currentTimeMillis;
+    return yield* mutate((state) =>
+      Effect.gen(function* () {
+        const parent = state.grants.find((candidate) =>
+          "id" in lookup
+            ? candidate.grant.id === lookup.id
+            : candidate.tokenHash === lookup.tokenHash,
+        );
+        if (parent === undefined) return yield* failure("denied", "Parent grant is not authorized");
+        const validated = yield* validateStoredGrant(state, parent, parent.grant.profileId, now);
+        if (validated.depth >= MaxDelegationDepth)
+          return yield* failure("denied", "Grant delegation depth limit reached");
+        if (
+          !grantAllows(parent.grant, {
+            principal: parent.grant.principal,
+            profileId: parent.grant.profileId,
+            capability: "plugins.install",
+            now,
+          }) ||
+          !decoded.capabilities.every((capability) =>
+            canDelegateCapability(parent.grant, capability),
+          )
+        )
+          return yield* failure("denied", "Parent grant cannot delegate requested capabilities");
+        const candidate = parseGrant({
+          id,
+          principal: decoded.principal,
+          profileId: parent.grant.profileId,
+          capabilities: decoded.capabilities,
+          origins: parent.grant.origins,
+          ...(parent.grant.expiresAt === undefined ? {} : { expiresAt: parent.grant.expiresAt }),
+        });
+        if (!candidate.ok) return yield* failure("invalid-grant", candidate.errors.join(" "));
+        if (state.grants.length >= MaxGrants)
+          return yield* failure("limit", "Grant store has reached its grant limit");
+        const stored = Object.freeze({
+          grant: candidate.value,
+          issuedAt: now,
+          tokenHash,
+          parentId: parent.grant.id,
+        });
+        return [
+          candidate.value,
+          Object.freeze({
+            version: 1 as const,
+            grants: Object.freeze([...state.grants, stored]),
+          }),
+        ] as const;
+      }),
+    );
+  });
+
+  const delegate = Effect.fn("GrantStore.delegate")(function* (
+    token: string,
+    input: GrantDelegation,
+  ) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token))
+      return yield* failure("denied", "Grant token is not authorized");
+    return yield* delegateFrom({ tokenHash: yield* hashToken(token) }, input);
+  });
+
+  const delegateGrant = (parentId: string, input: GrantDelegation) =>
+    delegateFrom({ id: parentId }, input);
+
   return {
     issue,
     revoke,
     list,
     authenticate,
+    authenticateGrant,
     authorize,
+    authorizeGrant,
+    delegate,
+    delegateGrant,
     revocations: Stream.fromPubSub(revocations),
   };
 });

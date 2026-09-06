@@ -8,9 +8,12 @@ import {
   createGrantStore,
   runMcpStdio,
   openCdpRelay,
+  type McpPluginApi,
 } from "@hitchhiker/runtime";
-import { Console, Deferred, Effect, Layer, Logger } from "effect";
-import { runPluginDirectory } from "./plugin.ts";
+import { Console, Deferred, Effect, Fiber, Layer, Logger, Stream } from "effect";
+import { createInstalledPluginLauncher, runPluginDirectory } from "./plugin.ts";
+import { createPluginArtifactStore } from "./plugin-artifacts.ts";
+import { createPluginManager } from "./plugin-manager.ts";
 import { browserMcpApi } from "./mcp.ts";
 import { makeBrowserController } from "./controller.ts";
 
@@ -41,6 +44,84 @@ const program = Effect.gen(function* () {
     const pluginDirectory = argument("--plugin");
     const mcp = process.argv.includes("--mcp");
     const grants = yield* createGrantStore({ directory: join(profileRoot, "hitchhiker-grants") });
+    const recoveryFailure = Deferred.fail(
+      fatalRecovery,
+      new EngineError({
+        code: "recovery",
+        message: "The trusted interface could not be restored; closing the browser",
+      }),
+    ).pipe(Effect.asVoid);
+    let plugins: McpPluginApi | undefined;
+    let stopDeveloperPlugin: Effect.Effect<void> = Effect.void;
+    let stopInstalledPlugins: Effect.Effect<void, unknown> = Effect.void;
+    const pluginExecutable = process.env.HITCHHIKER_PLUGIN_HOST;
+    if (
+      pluginExecutable !== undefined &&
+      !process.argv.includes("--safe-mode") &&
+      pluginDirectory === undefined
+    ) {
+      if (!isAbsolute(pluginExecutable))
+        return yield* Effect.die("HITCHHIKER_PLUGIN_HOST must be absolute");
+      const launch = yield* createInstalledPluginLauncher({
+        executable: pluginExecutable,
+        grants,
+        controller,
+        onRecoveryFailure: recoveryFailure,
+      });
+      const manager = yield* createPluginManager({
+        profileRoot,
+        grants,
+        launch,
+        safeMode: process.argv.includes("--safe-mode") || pluginDirectory !== undefined,
+        onRecoveryFailure: recoveryFailure,
+      });
+      const artifacts = yield* createPluginArtifactStore(profileRoot);
+      stopInstalledPlugins = manager.list().pipe(
+        Effect.flatMap((entries) =>
+          Effect.forEach(
+            entries.filter((entry) => entry.enabled),
+            (entry) => manager.disable(entry.id),
+            { discard: true },
+          ),
+        ),
+      );
+      plugins = {
+        stage: artifacts.stage,
+        install: manager.install,
+        list: manager.list,
+        enable: manager.enable,
+        disable: manager.disable,
+        rollback: manager.rollback,
+      };
+      yield* manager
+        .restore()
+        .pipe(
+          Effect.catchCause(() =>
+            Effect.logError(
+              "Installed plugins could not be restored. The default browser remains available; --safe-mode skips plugin startup.",
+            ),
+          ),
+        );
+      let reportedPluginMetadataError = false;
+      yield* Effect.gen(function* () {
+        const entries = yield* manager.list();
+        yield* controller.updatePluginControls(entries, (operation, id) => manager[operation](id));
+        reportedPluginMetadataError = false;
+      }).pipe(
+        Effect.catchCause(() =>
+          Effect.gen(function* () {
+            if (!reportedPluginMetadataError)
+              yield* Effect.logError(
+                "Installed plugin metadata is unavailable. Browser controls remain available.",
+              );
+            reportedPluginMetadataError = true;
+          }),
+        ),
+        Effect.andThen(Effect.sleep(1000)),
+        Effect.forever,
+        Effect.forkScoped,
+      );
+    }
     if (rawCdp) {
       const token = process.env.HITCHHIKER_CDP_TOKEN;
       if (!token)
@@ -61,7 +142,6 @@ const program = Effect.gen(function* () {
       yield* Console.error(JSON.stringify({ cdpDiscoveryUrl: relay.discoveryUrl }));
     }
     if (pluginDirectory && !process.argv.includes("--safe-mode")) {
-      const pluginExecutable = process.env.HITCHHIKER_PLUGIN_HOST;
       const token = process.env.HITCHHIKER_PLUGIN_TOKEN;
       if (
         !pluginExecutable ||
@@ -72,30 +152,44 @@ const program = Effect.gen(function* () {
         return yield* Effect.die(
           "--plugin requires an absolute package directory, HITCHHIKER_PLUGIN_HOST, and a pre-issued HITCHHIKER_PLUGIN_TOKEN",
         );
-      yield* runPluginDirectory({
+      const developerPlugin = yield* runPluginDirectory({
         directory: pluginDirectory,
         executable: pluginExecutable,
         token,
         grants,
         controller,
-        onRecoveryFailure: Deferred.fail(
-          fatalRecovery,
-          new EngineError({
-            code: "recovery",
-            message: "The trusted interface could not be restored; closing the browser",
-          }),
-        ).pipe(Effect.asVoid),
+        onRecoveryFailure: recoveryFailure,
       }).pipe(
         Effect.catchCause(() => Effect.logError("Plugin stopped.")),
         Effect.forkScoped,
       );
+      stopDeveloperPlugin = Fiber.interrupt(developerPlugin);
     }
+    yield* engine.events.pipe(
+      Stream.filter((event) => event.event === "browser.recover"),
+      Stream.runForEach(() =>
+        Effect.gen(function* () {
+          yield* stopDeveloperPlugin;
+          // Only a native app key monitor emits this event. Plugin-provided actions
+          // cannot invoke recovery or select a grant/registry identity.
+          yield* stopInstalledPlugins;
+          yield* controller.dispatch("interface.plugins");
+        }).pipe(Effect.catchCause(() => recoveryFailure)),
+      ),
+      Effect.forkScoped,
+    );
     if (mcp) {
       const token = process.env.HITCHHIKER_MCP_TOKEN;
       if (!token) return yield* Effect.die("--mcp requires a pre-issued HITCHHIKER_MCP_TOKEN");
       yield* Effect.raceFirst(
         browserExit,
-        runMcpStdio({ profileId: "default", token, grants, browser: browserMcpApi(controller) }),
+        runMcpStdio({
+          profileId: "default",
+          token,
+          grants,
+          browser: browserMcpApi(controller),
+          plugins,
+        }),
       );
     } else yield* browserExit;
   }).pipe(Effect.provide(layers));

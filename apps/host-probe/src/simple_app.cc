@@ -46,6 +46,9 @@ class ShellWindowDelegate : public CefWindowDelegate {
       auto event = CefParseJSON(json, JSON_PARSER_RFC);
       if (event && event->GetType() == VTYPE_DICTIONARY)
         bridge_->SendEvent("ui.event", event->GetDictionary());
+    }, [this] {
+      if (bridge_ && !closing_)
+        bridge_->SendEvent("browser.recover", CefDictionaryValue::Create());
     });
     if (!sidebar_) {
       fprintf(stderr, "HITCHHIKER_NATIVE_MOUNT_FAILED\n");

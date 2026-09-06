@@ -8,6 +8,8 @@ export interface LivePluginOptions extends Omit<PluginDispatchOptions, "manifest
   readonly executable: string;
   readonly code: string;
   readonly events: Stream.Stream<{ readonly event: string; readonly payload: unknown }>;
+  /** Runs only after the isolated worker's activation Promise has fulfilled. */
+  readonly onReady?: Effect.Effect<void>;
   /** Escalates a failed trusted-interface recovery to the owning application. */
   readonly onRecoveryFailure?: Effect.Effect<void>;
 }
@@ -31,6 +33,7 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
     ),
   );
   yield* host.activate(options.code);
+  yield* options.onReady ?? Effect.void;
   const forwarding = options.events.pipe(
     Stream.runForEach((event) =>
       Effect.gen(function* () {

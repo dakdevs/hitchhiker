@@ -29,6 +29,7 @@ import {
   column,
   reduceNativeTextInput,
   row,
+  scroll,
   text,
   type NativeTextInputEvent,
   type NativeTextInputState,
@@ -105,6 +106,18 @@ interface ControllerState {
   opening: ReadonlyMap<string, PageMetadata>;
 }
 
+export interface BrowserPluginSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly version: string;
+  readonly enabled: boolean;
+  readonly running: boolean;
+  readonly capabilities?: readonly string[];
+  readonly previousVersion?: string;
+  readonly lastFailure?: string;
+}
+export type PluginManagementAction = "enable" | "disable" | "rollback";
+
 export interface BrowserController {
   readonly start: Effect.Effect<void, EngineError>;
   readonly dispatch: (action: string) => Effect.Effect<void, EngineError>;
@@ -115,6 +128,10 @@ export interface BrowserController {
   readonly closePage: (pageId: string) => Effect.Effect<void, EngineError>;
   readonly configure: (configuration: BrowserConfiguration) => Effect.Effect<void, EngineError>;
   readonly configuration: Effect.Effect<BrowserConfiguration>;
+  readonly updatePluginControls: (
+    plugins: readonly BrowserPluginSummary[],
+    action: (operation: PluginManagementAction, id: string) => Effect.Effect<void, unknown>,
+  ) => Effect.Effect<void, EngineError>;
   /** Surfaces errors from controller event fibers instead of silently dropping them. */
   readonly publishPluginSurface: (
     owner: string,
@@ -205,17 +222,61 @@ const renderSettings = (state: ControllerState): Surface =>
     bindings: Object.freeze([]),
   });
 
-const renderPlugins = (): Surface =>
+const renderPlugins = (plugins: readonly BrowserPluginSummary[], status?: string): Surface =>
   Object.freeze({
-    root: column(
+    root: scroll(
       "plugins",
       [
         text("plugins-title", "Plugins", { fontSize: 18 }),
-        text("plugins-copy", "Developer plugins run in an isolated native host."),
+        ...(status ? [text("plugins-status", status)] : []),
+        text("plugins-copy", "Plugins run in an isolated native host with revocable permissions."),
         text(
           "plugins-installation",
-          "Launch with --plugin to load a compiled package. Installation controls are coming next.",
+          "Install compiled plugins through an authorized MCP connection, or use --plugin for development.",
         ),
+        ...plugins.flatMap((plugin) => [
+          text(`plugin-${plugin.id}-name`, `${plugin.name} · ${plugin.version}`, { fontSize: 15 }),
+          text(
+            `plugin-${plugin.id}-state`,
+            plugin.running ? "Running" : plugin.enabled ? "Enabled" : "Disabled",
+          ),
+          ...(plugin.capabilities
+            ? [
+                text(
+                  `plugin-${plugin.id}-permissions`,
+                  `Permissions: ${plugin.capabilities.join(", ") || "none"}`,
+                ),
+              ]
+            : []),
+          ...(plugin.lastFailure
+            ? [
+                text(
+                  `plugin-${plugin.id}-failure`,
+                  Array.from(plugin.lastFailure).slice(0, 120).join(""),
+                ),
+              ]
+            : []),
+          row(
+            `plugin-${plugin.id}-actions`,
+            [
+              button(
+                `plugin-${plugin.id}-toggle`,
+                plugin.enabled ? "Disable" : "Enable",
+                `plugins.${plugin.enabled ? "disable" : "enable"}.${plugin.id}`,
+              ),
+              ...(plugin.previousVersion
+                ? [
+                    button(
+                      `plugin-${plugin.id}-rollback`,
+                      `Restore ${plugin.previousVersion}`,
+                      `plugins.rollback.${plugin.id}`,
+                    ),
+                  ]
+                : []),
+            ],
+            { gap: 8 },
+          ),
+        ]),
         button("plugins-back", "Back", "screen.browser"),
       ],
       { padding: 20, gap: 12, flex: 1 },
@@ -223,9 +284,13 @@ const renderPlugins = (): Surface =>
     bindings: Object.freeze([]),
   });
 
-const render = (state: ControllerState): Surface => {
+const render = (
+  state: ControllerState,
+  plugins: readonly BrowserPluginSummary[] = [],
+  pluginStatus?: string,
+): Surface => {
   if (state.screen === "settings") return renderSettings(state);
-  if (state.screen === "plugins") return renderPlugins();
+  if (state.screen === "plugins") return renderPlugins(plugins, pluginStatus);
   const interfaceState = state.newPage
     ? { ...state.interfaceState, selectedPageId: undefined }
     : state.interfaceState;
@@ -267,6 +332,13 @@ export const makeBrowserController = (
     };
     let inputCommitScheduled = false;
     let lastError: string | undefined;
+    let pluginSummaries: readonly BrowserPluginSummary[] = [];
+    let pluginStatus: string | undefined;
+    let managingPlugin = false;
+    const controllerScope = yield* Effect.scope;
+    let pluginAction:
+      | ((operation: PluginManagementAction, id: string) => Effect.Effect<void, unknown>)
+      | undefined;
     let restoring = false;
     let pluginSurface: unknown;
     let pluginBindings: Surface["bindings"] = [];
@@ -331,7 +403,7 @@ export const makeBrowserController = (
     });
     const commit = Effect.fn("BrowserController.commit")(function* () {
       if (pluginOwner === undefined) {
-        const next = render(state);
+        const next = render(state, pluginSummaries, pluginStatus);
         yield* applySurface(next, next.bindings);
       } else yield* applySurface(pluginSurface, pluginBindings);
     });
@@ -381,7 +453,7 @@ export const makeBrowserController = (
       yield* lock.withPermit(
         Effect.gen(function* () {
           if (pluginOwner !== owner) return;
-          const next = render(state);
+          const next = render(state, pluginSummaries, pluginStatus);
           yield* applySurface(next, next.bindings);
           pluginOwner = undefined;
           pluginSurface = undefined;
@@ -429,7 +501,7 @@ export const makeBrowserController = (
       yield* open(url);
     });
 
-    const dispatch = (action: string) =>
+    const dispatchDefault = (action: string) =>
       change(
         () =>
           Effect.gen(function* () {
@@ -543,6 +615,46 @@ export const makeBrowserController = (
           action.startsWith("page.") ||
           action === "browser.new-page",
       );
+
+    const dispatch = Effect.fn("BrowserController.dispatch")(function* (action: string) {
+      const operation = /^plugins\.(enable|disable|rollback)\.([a-z][a-z0-9-]{1,62})$/.exec(action);
+      if (operation && pluginAction) {
+        if (managingPlugin) return;
+        const name = operation[1];
+        if (name === "enable" || name === "disable" || name === "rollback") {
+          managingPlugin = true;
+          pluginStatus = "Applying plugin change…";
+          if (state.screen === "plugins" && pluginOwner === undefined)
+            yield* lock.withPermit(commit());
+          // Activation may take several seconds. Keep the input stream responsive,
+          // and never hold the controller lock while the manager releases a surface.
+          yield* pluginAction(name, operation[2]!).pipe(
+            Effect.match({
+              onSuccess: () => {
+                pluginStatus = undefined;
+              },
+              onFailure: () => {
+                pluginStatus =
+                  "The plugin change could not be completed. Check its permissions or try a previous version.";
+              },
+            }),
+            Effect.ensuring(
+              lock
+                .withPermit(
+                  Effect.gen(function* () {
+                    managingPlugin = false;
+                    if (state.screen === "plugins" && pluginOwner === undefined) yield* commit();
+                  }),
+                )
+                .pipe(Effect.ignoreCause),
+            ),
+            Effect.forkIn(controllerScope),
+          );
+        }
+        return;
+      }
+      yield* dispatchDefault(action);
+    });
 
     const openTrusted = Effect.fn("BrowserController.openTrusted")(function* (url: string) {
       const normalized = normalizeWebUrl(url);
@@ -902,6 +1014,15 @@ export const makeBrowserController = (
       closePage: closeTrusted,
       configure,
       configuration: Effect.sync(() => state.configuration),
+      updatePluginControls: (plugins, action) =>
+        lock.withPermit(
+          Effect.gen(function* () {
+            const changed = JSON.stringify(plugins) !== JSON.stringify(pluginSummaries);
+            pluginSummaries = plugins;
+            pluginAction = action;
+            if (changed && state.screen === "plugins" && pluginOwner === undefined) yield* commit();
+          }),
+        ),
       publishPluginSurface,
       releasePluginSurface,
       pluginEvents: (owner) =>

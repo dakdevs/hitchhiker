@@ -3,10 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "bundle:macos": "node apps/browser/packaging/bundle-macos.mjs",
     "dev": "turbo run dev",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
+    "test:native": "node scripts/test-native.mjs",
     "lint": "oxlint --deny-warnings .",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",

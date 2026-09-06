@@ -61,6 +61,7 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
   void* app_;
   NativeCommandSink commands_;
   NativeEventSink events_;
+  std::function<void()> recovery_;
   NSTimer* timer_;
   id monitor_;
   BOOL captured_;
@@ -83,7 +84,7 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
   uint64_t raster_idle_;
   uint64_t raster_updated_bytes_;
 }
-- (instancetype)initWithSink:(NativeCommandSink)sink events:(NativeEventSink)events;
+- (instancetype)initWithSink:(NativeCommandSink)sink events:(NativeEventSink)events recovery:(std::function<void()>)recovery;
 - (void)tick;
 - (void)stop;
 - (void)receiveCommand:(const char*)command;
@@ -93,10 +94,29 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
 @implementation HHNativeSidebar
 - (BOOL)isFlipped { return YES; } - (BOOL)acceptsFirstResponder { return YES; } - (BOOL)acceptsFirstMouse:(NSEvent*)event { return YES; }
 - (BOOL)isAccessibilityElement { return YES; } - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityGroupRole; } - (NSString*)accessibilityLabel { return @"Hitchhiker native interface"; }
-- (instancetype)initWithSink:(NativeCommandSink)sink events:(NativeEventSink)events {
+- (instancetype)initWithSink:(NativeCommandSink)sink events:(NativeEventSink)events recovery:(std::function<void()>)recovery {
   if (!(self=[super initWithFrame:NSMakeRect(0,0,260,600)])) return nil; commands_=std::move(sink); events_=std::move(events); marked_=@"";
   app_=native_sdk_app_create(); if(!app_) return nil; native_sdk_app_start(app_); __weak HHNativeSidebar* weak=self;
-  monitor_=[NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown|NSEventMaskLeftMouseUp|NSEventMaskLeftMouseDragged) handler:^NSEvent*(NSEvent* e) { HHNativeSidebar* s=weak; if(!s||!s->app_||e.window!=s.window) return e; NSPoint p=[s convertPoint:e.locationInWindow fromView:nil]; if(e.type==NSEventTypeLeftMouseDown) { if(!NSPointInRect(p,s.bounds)) return e; s->captured_=YES; [s mouseDown:e]; return nil; } if(!s->captured_) return e; if(e.type==NSEventTypeLeftMouseUp) { s->captured_=NO; [s mouseUp:e]; } else { native_sdk_app_touch(s->app_,1,2,p.x,p.y,1); [s tick]; } return nil; }];
+  recovery_=std::move(recovery);
+  monitor_=[NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown|NSEventMaskLeftMouseDown|NSEventMaskLeftMouseUp|NSEventMaskLeftMouseDragged) handler:^NSEvent*(NSEvent* e) {
+    HHNativeSidebar* s=weak;
+    if(!s||!s->app_) return e;
+    if(e.type==NSEventTypeKeyDown) {
+      const auto modifiers=e.modifierFlags&(NSEventModifierFlagCommand|NSEventModifierFlagShift|NSEventModifierFlagControl|NSEventModifierFlagOption);
+      if(e.keyCode==53 && modifiers==(NSEventModifierFlagCommand|NSEventModifierFlagShift) && s->recovery_) {
+        if(!e.isARepeat) s->recovery_();
+        return nil;
+      }
+      return e;
+    }
+    if(e.window!=s.window) return e;
+    NSPoint p=[s convertPoint:e.locationInWindow fromView:nil];
+    if(e.type==NSEventTypeLeftMouseDown) { if(!NSPointInRect(p,s.bounds)) return e; s->captured_=YES; [s mouseDown:e]; return nil; }
+    if(!s->captured_) return e;
+    if(e.type==NSEventTypeLeftMouseUp) { s->captured_=NO; [s mouseUp:e]; }
+    else { native_sdk_app_touch(s->app_,1,2,p.x,p.y,1); [s tick]; }
+    return nil;
+  }];
   timer_=[NSTimer scheduledTimerWithTimeInterval:1.0/30.0 repeats:YES block:^(NSTimer*) { [weak tick]; }]; [self tick]; return self;
 }
 - (void)stop {
@@ -126,6 +146,7 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
   raster_capacity_ = 0;
   commands_ = {};
   events_ = {};
+  recovery_ = {};
 }
 - (void)drainEvents { if(!committed_||!events_) return; size_t remaining=kMaxEventsPerTick; while(remaining) { size_t n=hitchhiker_next_event(nullptr,0); if(!n||n>remaining||n>kMaxEventsPerTick) break; std::vector<uint8_t> bytes(n); if(hitchhiker_next_event(bytes.data(),bytes.size())!=n) break; events_(std::string(reinterpret_cast<const char*>(bytes.data()),n)); remaining-=n; } }
 - (void)syncText { NativeInput input{}; if(!app_||!native_sdk_app_text_input_state(app_,&input)) return; if(input.active) { focused_=input.id; if(self.window.firstResponder!=self) [self.window makeFirstResponder:self]; } else { focused_=0; marked_=@""; } }
@@ -328,7 +349,7 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
 - (void)doCommandBySelector:(SEL)selector { NSString* n=NSStringFromSelector(selector); if([n isEqualToString:@"deleteBackward:"]) [self emitKey:@"backspace" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveLeft:"]) [self emitKey:@"arrowleft" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveRight:"]) [self emitKey:@"arrowright" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveUp:"]) [self emitKey:@"arrowup" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveDown:"]) [self emitKey:@"arrowdown" event:NSApp.currentEvent]; else if([n isEqualToString:@"insertNewline:"]) [self emitKey:@"enter" event:NSApp.currentEvent]; else [super doCommandBySelector:selector]; [self tick]; }
 @end
 
-void* InstallNativeSidebar(CefRefPtr<CefWindow> window, NativeCommandSink sink, NativeEventSink events) { if(!window||!sink) return nullptr; NSView* host=(__bridge NSView*)window->GetWindowHandle(); if(!host||!host.window.contentView) return nullptr; HHNativeSidebar* view=[[HHNativeSidebar alloc] initWithSink:std::move(sink) events:std::move(events)]; if(!view) return nullptr; [host.window.contentView addSubview:view positioned:NSWindowAbove relativeTo:nil]; fprintf(stderr,"HITCHHIKER_NATIVE_MOUNT\n"); return (__bridge_retained void*)view; }
+void* InstallNativeSidebar(CefRefPtr<CefWindow> window, NativeCommandSink sink, NativeEventSink events, std::function<void()> recovery) { if(!window||!sink) return nullptr; NSView* host=(__bridge NSView*)window->GetWindowHandle(); if(!host||!host.window.contentView) return nullptr; HHNativeSidebar* view=[[HHNativeSidebar alloc] initWithSink:std::move(sink) events:std::move(events) recovery:std::move(recovery)]; if(!view) return nullptr; [host.window.contentView addSubview:view positioned:NSWindowAbove relativeTo:nil]; fprintf(stderr,"HITCHHIKER_NATIVE_MOUNT\n"); return (__bridge_retained void*)view; }
 void ResizeNativeSurface(void* ptr,int width,int height) { if(ptr) [(__bridge HHNativeSidebar*)ptr setFrame:NSMakeRect(0,0,std::max(1,width),std::max(1,height))]; }
 void ResizeNativeSidebar(void* ptr,int height) { ResizeNativeSurface(ptr,260,height); }
 bool CommitNativeTree(void* ptr,const char* json,size_t length,uint64_t revision) { return ptr&&[(__bridge HHNativeSidebar*)ptr commit:json length:length revision:revision]; }

@@ -156,6 +156,159 @@ test("enforces revocation, profile, origin, expiry, and CDP's separate permissio
   );
 });
 
+test("delegates bounded nonsecret child grants and follows the durable parent chain", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-grants-"));
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* create({ directory });
+        const expiresAt = Date.now() + 60_000;
+        const parent = yield* store.issue({
+          principal: "plugin-manager",
+          profileId: "profile",
+          capabilities: ["pages.list", "pages.write", "plugins.install"],
+          origins: ["https://one.test"],
+          expiresAt,
+        });
+        const child = yield* store.delegate(parent.token, {
+          principal: "managed-plugin",
+          capabilities: ["pages.list", "pages.write"],
+        });
+        assert.deepEqual(child, {
+          id: child.id,
+          principal: "managed-plugin",
+          profileId: "profile",
+          capabilities: ["pages.list", "pages.write"],
+          origins: ["https://one.test"],
+          expiresAt,
+        });
+        assert.equal("token" in child, false);
+        assert.equal(
+          (yield* store.authorizeGrant(child.id, {
+            profileId: "profile",
+            capability: "pages.write",
+            origin: "https://one.test",
+          })).principal,
+          "managed-plugin",
+        );
+
+        const disk = yield* Effect.promise(() => readFile(join(directory, "grants.json"), "utf8"));
+        assert.equal(disk.includes(parent.token), false);
+        assert.equal(disk.includes(`"parentId":"${parent.grant.id}"`), true);
+
+        yield* store.revoke(parent.grant.id);
+        const reloaded = yield* create({ directory });
+        yield* assertDenied(reloaded.authenticateGrant(child.id, { profileId: "profile" }));
+        yield* assertDenied(
+          reloaded.authorizeGrant(child.id, {
+            profileId: "profile",
+            capability: "pages.list",
+          }),
+        );
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("delegation cannot elevate authority or exceed the parent-chain depth", async () => {
+  await withStore((store) =>
+    Effect.gen(function* () {
+      const parent = yield* store.issue({
+        principal: "manager",
+        profileId: "profile",
+        capabilities: ["pages.list", "plugins.install"],
+        origins: ["https://one.test"],
+        expiresAt: Date.now() + 60_000,
+      });
+      yield* assertDenied(
+        store.delegate(parent.token, {
+          principal: "elevated-plugin",
+          capabilities: ["pages.manage"],
+        }),
+      );
+      yield* assertDenied(
+        store.delegate(parent.token, {
+          principal: "cdp-plugin",
+          capabilities: ["cdp.connect"],
+        }),
+      );
+      yield* assertDenied(
+        store.delegate(parent.token, {
+          principal: "rewritten-plugin",
+          capabilities: ["pages.list"],
+          profileId: "other",
+          origins: [],
+          expiresAt: Date.now() + 120_000,
+        } as never),
+      );
+
+      const noInstaller = yield* store.issue({
+        principal: "ordinary",
+        profileId: "profile",
+        capabilities: ["pages.list"],
+        origins: [],
+      });
+      yield* assertDenied(
+        store.delegate(noInstaller.token, {
+          principal: "child",
+          capabilities: ["pages.list"],
+        }),
+      );
+
+      const root = yield* store.issue({
+        principal: "root-manager",
+        profileId: "profile",
+        capabilities: ["browser.full-control"],
+        origins: [],
+      });
+      let parentId = root.grant.id;
+      for (let depth = 2; depth <= 8; depth++) {
+        const child = yield* store.delegateGrant(parentId, {
+          principal: `manager-${depth}`,
+          capabilities: ["browser.full-control"],
+        });
+        parentId = child.id;
+      }
+      yield* assertDenied(
+        store.delegateGrant(parentId, {
+          principal: "manager-9",
+          capabilities: ["browser.full-control"],
+        }),
+      );
+    }),
+  );
+});
+
+test("trusted grant-ID authentication still denies expired and revoked grants", async () => {
+  await withStore((store) =>
+    Effect.gen(function* () {
+      const expired = yield* store.issue({
+        principal: "expired",
+        profileId: "profile",
+        capabilities: [],
+        origins: [],
+        expiresAt: 0,
+      });
+      yield* assertDenied(store.authenticateGrant(expired.grant.id, { profileId: "profile" }));
+      const revoked = yield* store.issue({
+        principal: "revoked",
+        profileId: "profile",
+        capabilities: ["pages.list"],
+        origins: [],
+      });
+      yield* store.revoke(revoked.grant.id);
+      yield* assertDenied(
+        store.authorizeGrant(revoked.grant.id, {
+          profileId: "profile",
+          capability: "pages.list",
+        }),
+      );
+    }),
+  );
+});
+
 test("rejects malformed persisted state without replacing it", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hitchhiker-grants-"));
   const path = join(directory, "grants.json");

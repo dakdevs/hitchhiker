@@ -86,6 +86,8 @@ failure closes the relay. A new principal must not inherit an old client's retai
 the application-level lease/restart policy remains to be integrated.
 
 The local MCP launcher and isolated plugin runtime are described in [DEVELOPMENT.md](DEVELOPMENT.md).
-Persistent package management, remote MCP, full extension installation/compatibility and distributable
-packaging remain unfinished. Do not expose the private engine channel as a public MCP transport or
-describe the current development build as a production browser.
+Persistent compiled plugin installation, updates, rollback and restart restoration are integrated.
+The optional plugin MCP tools delegate authority from the connection grant and cannot grant raw CDP.
+Remote MCP, full extension installation/compatibility and release packaging remain unfinished. The
+relocatable developer app passes native plugin lifecycle tests; it is not a notarized release. Do not expose the
+private engine channel as a public MCP transport or describe this build as a production browser.
