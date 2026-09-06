@@ -212,15 +212,18 @@ test(
           }
           assert.ok(before >= 2, "fixture timer became active before freeze");
           yield* freezePage(engine, "freeze");
+          // A timer can run between the preflight read and Chromium processing the freeze command.
+          const frozen = yield* ticks("freeze");
+          assert.ok(frozen >= before, "the same fixture remains loaded after freeze");
           yield* Effect.sleep(250);
-          assert.equal(yield* ticks("freeze"), before, "frozen page timer did not advance");
+          assert.equal(yield* ticks("freeze"), frozen, "frozen page timer did not advance");
           yield* activatePage(engine, "freeze");
           let after = yield* ticks("freeze");
-          for (let tries = 0; after <= before && tries < 40; ++tries) {
+          for (let tries = 0; after <= frozen && tries < 40; ++tries) {
             yield* Effect.sleep(25);
             after = yield* ticks("freeze");
           }
-          assert.ok(after > before, "active page timer resumed");
+          assert.ok(after > frozen, "active page timer resumed");
           yield* engine.request("window.close").pipe(Effect.catch(() => Effect.void));
           assert.equal(yield* engine.exit, 0);
         }).pipe(

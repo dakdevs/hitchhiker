@@ -154,6 +154,21 @@ const program = Effect.gen(function* () {
         enable: manager.enable,
         disable: manager.disable,
         rollback: manager.rollback,
+        requirements: () =>
+          manager.list().pipe(
+            Effect.map((entries) =>
+              entries.map((entry) => ({
+                manifest: {
+                  id: entry.id,
+                  name: entry.name,
+                  version: entry.version,
+                  capabilities: entry.capabilities,
+                },
+                hash: entry.hash,
+                enabled: entry.enabled,
+              })),
+            ),
+          ),
       };
       yield* manager
         .restore()

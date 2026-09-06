@@ -17,6 +17,7 @@ import {
   activatePage,
   decodePageLifecycleEvent,
   decodePageResourceEvent,
+  decodeCustomizationRecipe,
   EngineConnection,
   EngineError,
   freezePage,
@@ -24,6 +25,7 @@ import {
   rememberPageResources,
   selectPageFreezes,
   type PageResourceKnowledge,
+  type PortableSettings,
 } from "@hitchhiker/runtime";
 import {
   button,
@@ -151,6 +153,8 @@ export interface BrowserController {
   readonly protectDomWrite: (pageId: string) => Effect.Effect<void, EngineError>;
   readonly configure: (configuration: BrowserConfiguration) => Effect.Effect<void, EngineError>;
   readonly configuration: Effect.Effect<BrowserConfiguration>;
+  readonly portableSettings: Effect.Effect<PortableSettings>;
+  readonly applyPortableSettings: (settings: PortableSettings) => Effect.Effect<void, EngineError>;
   readonly updatePluginControls: (
     plugins: readonly BrowserPluginSummary[],
     action: (operation: PluginManagementAction, id: string) => Effect.Effect<void, unknown>,
@@ -941,6 +945,43 @@ export const makeBrowserController = (
         true,
       );
     });
+    const applyPortableSettings = Effect.fn("BrowserController.applyPortableSettings")(function* (
+      settings: PortableSettings,
+    ) {
+      const parsed = yield* decodeCustomizationRecipe({
+        ...settings,
+        version: 1,
+        plugins: [],
+      }).pipe(
+        Effect.mapError(
+          (error) => new EngineError({ code: "invalid-configuration", message: error.message }),
+        ),
+      );
+      yield* lock.withPermit(
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            if (closingPersistence !== undefined)
+              return yield* new EngineError({
+                code: "closing",
+                message: "The browser window is closing",
+              });
+            const next = {
+              ...state,
+              configuration: parsed.configuration,
+              interfaceConfiguration: parsed.interface,
+            };
+            const write = saveBrowserPersistence(profileRoot, asPersistence(next));
+            yield* (options.profileLease ? options.profileLease.withWrite(write) : write).pipe(
+              Effect.mapError(
+                (error) => new EngineError({ code: "persistence", message: error.message }),
+              ),
+            );
+            state = next;
+            yield* commit();
+          }),
+        ),
+      );
+    });
 
     // Native can queue several key events at one revision. Coalescing their
     // redraw keeps that revision alive long enough for every queued edit.
@@ -1409,6 +1450,13 @@ export const makeBrowserController = (
       protectDomWrite,
       configure,
       configuration: Effect.sync(() => state.configuration),
+      portableSettings: lock.withPermit(
+        Effect.sync(() => ({
+          configuration: state.configuration,
+          interface: state.interfaceConfiguration,
+        })),
+      ),
+      applyPortableSettings,
       updatePluginControls: (plugins, action) =>
         lock.withPermit(
           Effect.gen(function* () {

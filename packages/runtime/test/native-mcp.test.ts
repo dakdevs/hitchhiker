@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -265,6 +265,42 @@ test(
         ).isError,
         false,
       );
+      const exported = toolJson(
+        await client.callTool({ name: "hitchhiker_customization_export", arguments: {} }),
+      ) as { recipe: string };
+      assert.deepEqual(JSON.parse(exported.recipe), {
+        version: 1,
+        configuration: { colorScheme: "dark", sleepAfterMs: 60_000, alwaysAwakeOrigins: [] },
+        interface: { tabPlacement: "top" },
+        plugins: [],
+      });
+      const importedRecipe = {
+        version: 1,
+        configuration: {
+          colorScheme: "light",
+          sleepAfterMs: 120_000,
+          alwaysAwakeOrigins: [urlOrigin],
+        },
+        interface: { tabPlacement: "sidebar" },
+        plugins: [],
+      };
+      assert.deepEqual(
+        toolJson(
+          await client.callTool({
+            name: "hitchhiker_customization_import",
+            arguments: { recipe: JSON.stringify(importedRecipe) },
+          }),
+        ),
+        { applied: true, pluginRequirements: [], pluginsChanged: false },
+      );
+      const persisted = JSON.parse(await readFile(join(directory, "browser-state.json"), "utf8"));
+      assert.deepEqual(persisted.configuration, importedRecipe.configuration);
+      assert.equal(persisted.interface.tabPlacement, "sidebar");
+      assert(persisted.pages.some((page: { id: string }) => page.id === pageId));
+      const exportedAgain = toolJson(
+        await client.callTool({ name: "hitchhiker_customization_export", arguments: {} }),
+      ) as { recipe: string };
+      assert.deepEqual(JSON.parse(exportedAgain.recipe), importedRecipe);
       await Effect.runPromise(
         Effect.gen(function* () {
           const store = yield* create({ directory: grantDirectory });
@@ -273,6 +309,15 @@ test(
       );
       assert.equal(
         (await client.callTool({ name: "hitchhiker_pages_list", arguments: {} })).isError,
+        true,
+      );
+      assert.equal(
+        (
+          await client.callTool({
+            name: "hitchhiker_customization_import",
+            arguments: { recipe: exported.recipe },
+          })
+        ).isError,
         true,
       );
     } finally {

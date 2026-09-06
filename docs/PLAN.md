@@ -473,3 +473,20 @@ and all eleven bundle checks, including real plugin lifecycle and safe mode. Evi
 `work/plugin-cancellation-baseline-final.log`, `work/plugin-cancellation-root-final.log`,
 `work/plugin-cancellation-native-final.log` and `work/plugin-cancellation-bundle-{build,verify,native}.log`.
 Independent review accepted the final cancellation, durable recovery and lock boundaries.
+Commit `0c19998` publishes the repair; GitHub Check `34058687172` passed.
+
+Portable customization implementation now follows `CUSTOMIZATION-PLAN.md`: strict versioned recipes,
+combined controller settings persistence, MCP export/import and explicit plugin requirements that
+never confer permissions or activate code. Existing configuration-only exports remain supported.
+The implementation and independent review are complete. Root checks and all 176 native-suite tests
+pass (95 runtime, 81 browser, no skips), including real MCP recipe round trips and persisted settings.
+Portable tests verify preservation of pages, pinned presentation state and a custom plugin surface,
+restart, failed writes, strict input bounds, private-field projection, grants and nonactivation.
+The initial native run exposed a pre-command timer comparison in the existing freeze fixture; its
+post-acknowledgement comparison is documented in `CUSTOMIZATION-PLAN.md`. Final source evidence is in
+`work/customization-root-final.log`, `work/customization-native-final.log` and
+`work/customization-projection-tests.log`.
+The rebuilt app passes strict signature/import verification after relocation outside the checkout
+and all eleven developer-bundle checks, including its packaged MCP customization path. Evidence is in
+`work/customization-bundle-{build,verify,native}.log`. This remains an ad hoc signed arm64 developer
+artifact; notarization and interactive macOS verification are still outstanding.

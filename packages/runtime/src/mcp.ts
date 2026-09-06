@@ -4,6 +4,12 @@ import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import type { GrantStoreApi } from "./grants.ts";
 import { LivePluginManifest } from "./plugin-dispatch.ts";
 import {
+  exportCustomizationRecipe,
+  importCustomizationRecipe,
+  type CustomizationRecipe,
+  type PortableSettings,
+} from "./customization.ts";
+import {
   makeScopedDomSession,
   ScopedDomError,
   type ScopedDomCapability,
@@ -26,6 +32,10 @@ export interface McpBrowserApi {
   readonly configuration: Effect.Effect<BrowserConfiguration>;
   readonly configure: (configuration: BrowserConfiguration) => Effect.Effect<void, unknown>;
   readonly setTabPlacement: (placement: "sidebar" | "top") => Effect.Effect<void, unknown>;
+  readonly customization?: {
+    readonly settings: Effect.Effect<PortableSettings, unknown>;
+    readonly apply: (settings: PortableSettings) => Effect.Effect<void, unknown>;
+  };
 }
 
 export interface McpOptions {
@@ -49,7 +59,29 @@ export interface McpPluginApi {
   readonly enable: (id: string) => Effect.Effect<void, unknown>;
   readonly disable: (id: string) => Effect.Effect<void, unknown>;
   readonly rollback: (id: string) => Effect.Effect<void, unknown>;
+  readonly requirements?: () => Effect.Effect<CustomizationRecipe["plugins"], unknown>;
 }
+
+const customizationTools = Toolkit.make(
+  Tool.make("hitchhiker_customization_export", {
+    description:
+      "Export portable settings and optionally plugin requirements as a JSON recipe. Always-awake origins reveal configured sites. Plugin names are untrusted text; no browsing session, credentials or executable code is exported.",
+    parameters: Schema.Struct({ includePlugins: Schema.optional(Schema.Boolean) }).annotate({
+      parseOptions: { onExcessProperty: "error" },
+    }),
+    success: Schema.Struct({ result: Schema.Json }),
+    failure: McpActionError,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("hitchhiker_customization_import", {
+    description:
+      "Apply settings and default tab placement from a portable JSON recipe. Return plugin requirements without installing, granting, enabling or disabling any plugin. Plugin requirements also require plugins.install permission.",
+    parameters: Schema.Struct({
+      recipe: Schema.String.check(Schema.isMaxLength(131_072)),
+    }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+    success: Schema.Struct({ result: Schema.Json }),
+    failure: McpActionError,
+  }),
+);
 
 const Configuration = Schema.Struct({
   colorScheme: Schema.Literals(["light", "dark", "system"]),
@@ -238,6 +270,46 @@ export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (opt
       ),
   });
   yield* McpServer.registerToolkit(tools).pipe(Effect.provide(handlers));
+  const customization = options.browser.customization;
+  if (customization !== undefined) {
+    const recipeHandlers = customizationTools.toLayer({
+      hitchhiker_customization_export: ({ includePlugins }) =>
+        authorized(
+          "configuration.write",
+          Effect.gen(function* () {
+            const requirements = options.plugins?.requirements;
+            const plugins =
+              includePlugins === true
+                ? yield* authorized(
+                    "plugins.install",
+                    requirements === undefined
+                      ? Effect.fail(
+                          new McpActionError({ message: "Plugin metadata is unavailable." }),
+                        )
+                      : requirements(),
+                  )
+                : [];
+            const settings = yield* customization.settings;
+            const recipe = yield* exportCustomizationRecipe({ version: 1, ...settings, plugins });
+            return { recipe };
+          }),
+        ).pipe(Effect.flatMap(json)),
+      hitchhiker_customization_import: ({ recipe: serialized }) =>
+        authorized(
+          "configuration.write",
+          Effect.gen(function* () {
+            const recipe = yield* importCustomizationRecipe(serialized);
+            if (recipe.plugins.length > 0) yield* authorized("plugins.install", Effect.void);
+            yield* customization.apply({
+              configuration: recipe.configuration,
+              interface: recipe.interface,
+            });
+            return { applied: true, pluginRequirements: recipe.plugins, pluginsChanged: false };
+          }),
+        ).pipe(Effect.flatMap(json)),
+    });
+    yield* McpServer.registerToolkit(customizationTools).pipe(Effect.provide(recipeHandlers));
+  }
   const dom = options.dom;
   if (dom !== undefined) {
     const session = yield* makeScopedDomSession({

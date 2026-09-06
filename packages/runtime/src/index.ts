@@ -17,6 +17,13 @@ export { mcpStdioInputLimit, mcpStdioMaxStringIdBytes, runMcpStdio } from "./mcp
 export { McpActionError, registerBrowserMcp } from "./mcp.ts";
 export type { McpBrowserApi, McpOptions, McpPluginApi } from "./mcp.ts";
 export {
+  CustomizationError,
+  decodeCustomizationRecipe,
+  exportCustomizationRecipe,
+  importCustomizationRecipe,
+} from "./customization.ts";
+export type { CustomizationRecipe, PortableSettings } from "./customization.ts";
+export {
   activatePage,
   decodePageResourceEvent,
   freezePage,

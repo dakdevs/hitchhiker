@@ -122,6 +122,15 @@ the application-level lease/restart policy remains to be integrated.
 The local MCP launcher and isolated plugin runtime are described in [DEVELOPMENT.md](DEVELOPMENT.md).
 Persistent compiled plugin installation, updates, rollback and restart restoration are integrated.
 The optional plugin MCP tools delegate authority from the connection grant and cannot grant raw CDP.
+Portable customization recipes combine engine settings, default tab placement and optional plugin
+requirements. `hitchhiker_customization_export` takes optional `includePlugins` (default false) and
+returns `result.recipe`, a JSON string. `hitchhiker_customization_import` takes that string as `recipe`,
+applies settings and returns `pluginRequirements` with `pluginsChanged: false`. Both require
+`configuration.write`; including or importing plugin metadata additionally requires `plugins.install`.
+Import never installs or activates plugins or grants authority, including for matching installed
+artifacts. Recipes exclude browsing sessions, credentials, source code and plugin storage; configured
+always-awake origins are included and can reveal preferred sites. See [CUSTOMIZATION-PLAN.md](CUSTOMIZATION-PLAN.md)
+for the strict version, size and persistence boundaries. The older configuration-only helpers remain available.
 Scoped top-document snapshots and semantic click/fill use connection-local refs and repeated origin
 authorization. Child frames and general keyboard input remain unsupported; see
 [the scoped DOM contract](SCOPED-DOM-PLAN.md).

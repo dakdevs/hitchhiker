@@ -13,4 +13,8 @@ export const browserMcpApi = (controller: BrowserController): McpBrowserApi => (
   configuration: controller.configuration,
   configure: controller.configure,
   setTabPlacement: (placement) => controller.dispatch(`settings.tabs.${placement}`),
+  customization: {
+    settings: controller.portableSettings,
+    apply: controller.applyPortableSettings,
+  },
 });

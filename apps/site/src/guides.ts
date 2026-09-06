@@ -118,6 +118,25 @@ pnpm --filter @hitchhiker/browser dev --plugin="$PWD/apps/my-browser"`,
       "Installing a new revision of the same ID retains one prior revision for rollback. Rollback restores code and interface state, but does not undo navigation, page creation, or configuration changes already performed. The Plugins screen provides enable, disable, and rollback. Start with --safe-mode to bypass a broken plugin store; persistent installation tools are unavailable for that launch.",
     ],
   },
+  {
+    id: "portable-customization",
+    title: "Share a browser configuration",
+    paragraphs: [
+      "Use hitchhiker_customization_export over MCP to receive result.recipe, a portable JSON string. Pass includePlugins: true to include installed Hitchhiker plugin manifests, exact artifact hashes and desired enabled states. Settings export needs configuration.write; plugin metadata also needs plugins.install. Always-awake origins are included and can reveal which sites you configure.",
+      "Pass the string as recipe to hitchhiker_customization_import. It applies browser settings and default tab placement together and returns pluginRequirements with pluginsChanged: false. Import never installs code, grants permissions, enables or disables plugins. Install and authorize required plugins separately through the existing plugin tools. A custom plugin interface keeps ownership of its pages and layout.",
+      "Recipes accept version 1, up to 64 unique plugin IDs and 128 KiB of UTF-8 JSON. Unknown fields are rejected. Browsing sessions, history, cookies, credentials, plugin storage and executable code are excluded. Chrome extension transfer, plugin-specific settings and automatic sync are not yet included.",
+    ],
+    code: JSON.stringify(
+      {
+        version: 1,
+        configuration: { colorScheme: "system", sleepAfterMs: 300000, alwaysAwakeOrigins: [] },
+        interface: { tabPlacement: "sidebar" },
+        plugins: [],
+      },
+      null,
+      2,
+    ),
+  },
 ];
 
 export const nativeUiGuide: readonly GuideSection[] = [
