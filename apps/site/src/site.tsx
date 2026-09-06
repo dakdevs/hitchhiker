@@ -134,7 +134,8 @@ const docs: Doc[] = [
     body: [
       "The local stdio MCP server exposes page list/open/navigate/close, configuration get/set, sidebar/top selection, and plugin list/install/enable/disable/rollback when PluginHost is configured. Each call checks a pre-issued credential against durable grants. Tool results that contain page titles or URLs remain untrusted website content.",
       "CDP uses private inherited Chromium pipes and an explicitly enabled authenticated loopback relay. Playwright has been verified against the real browser, including input changes, profile isolation, and disconnection after grant revocation. Raw CDP is disabled unless separately requested at launch.",
-      "Local stdio starts its own browser instance. Attaching to an already-running application, remote MCP for hosted ChatGPT clients, and DOM-level MCP tools are still being implemented. See docs/DEVELOPMENT.md for current launch commands.",
+      "Scoped page snapshot, click, and fill tools use expiring element references and check the current top-document origin. Click performs semantic activation; fill supports text inputs and textareas. Password values are redacted. Child frames, general keyboard input, selectors, and arbitrary JavaScript remain unsupported.",
+      "Local stdio starts its own browser instance. Attaching to an already-running application and remote MCP for hosted ChatGPT clients remain unfinished. See docs/DEVELOPMENT.md for current launch commands and tool inputs.",
     ],
     code: '# Supply a credential issued by the local grants command.\nexport HITCHHIKER_MCP_TOKEN="YOUR_TOKEN"\nnode --experimental-strip-types apps/browser/src/main.ts --mcp',
   },
@@ -147,7 +148,7 @@ const docs: Doc[] = [
     body: [
       "The host owns performance policy. Native output-audio, media-capture, download, and conservative keyboard-edit signals protect pages. Missing resource information fails closed. Always-awake origins and visible viewport bindings also prevent freezing; pins alone do not.",
       "Reversible Chromium freezing stops inactive JavaScript work while retaining the page. It is not tab discard or proof of lower renderer memory use. Raw CDP launch mode disables automatic freezing because unrestricted automation can mutate state outside the trusted input signals.",
-      "The isolated plugin host externally enforces a 500 ms synchronous execution slice and a 150 MiB worker footprint budget, plus bounded messages and pending calls. Wall/RSS violations kill that plugin process. Native raster uses Retina scale, retained buffers, damage checks, and idle revision gating. Audio/capture callbacks and interactive smoothness still need device verification.",
+      "The isolated plugin worker enforces a 500 ms process-CPU slice for each JavaScript entry, including resumed asynchronous work. Its supervisor separately bounds startup to 4 seconds, a complete command to 5 seconds, and worker footprint to 150 MiB. A violation stops the worker. Native raster uses Retina scale, retained buffers, damage checks, and idle revision gating. Audio/capture callbacks and interactive smoothness still need device verification.",
     ],
     code: "Visible or protected → stay active\nInactive and eligible → reversible freeze\nSelected again → activate before display\nPlugin exceeds watchdog budget → stop plugin, restore controls",
   },

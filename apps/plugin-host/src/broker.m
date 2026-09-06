@@ -11,8 +11,11 @@
 
 enum { MAX_COMMANDS = 64 };
 static const size_t MAX_LINE_BYTES = 1024 * 1024;
-static const uint64_t COMMAND_LIMIT_MS = 500;
+static const uint64_t COMMAND_CPU_LIMIT_MS = 500;
+static const uint64_t WORKER_STARTUP_LIMIT_MS = 4000;
+static const uint64_t COMMAND_TOTAL_WALL_LIMIT_MS = 5000;
 static const uint64_t RSS_LIMIT_BYTES = 150ULL * 1024ULL * 1024ULL;
+enum { CPU_ACCOUNTING_EXIT = 76 };
 
 typedef struct {
   int64_t identifier;
@@ -25,7 +28,9 @@ typedef struct {
   pid_t worker_pid;
   int worker_input;
   uint64_t generation;
+  uint64_t startup_deadline_ms;
   BOOL closing;
+  BOOL ready;
   BOOL expected_stop;
   BOOL resource_kill;
   char resource_reason[16];
@@ -66,6 +71,13 @@ static BOOL write_all(int descriptor, const void *bytes, size_t length) {
   return YES;
 }
 
+static BOOL inspect_worker_exit(pid_t pid, siginfo_t *info) {
+  for (;;) {
+    if (waitid(P_PID, (id_t)pid, info, WEXITED | WNOWAIT) == 0) return YES;
+    if (errno != EINTR) return NO;
+  }
+}
+
 static void send_data(BrokerState *state, NSData *line) {
   if (!line || line.length > MAX_LINE_BYTES) return;
   xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
@@ -84,6 +96,21 @@ static void send_worker_state(BrokerState *state, const char *key, pid_t pid,
 static void send_object(BrokerState *state, NSDictionary *object) {
   NSData *encoded = [NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
   send_data(state, encoded);
+}
+
+static void send_resource(BrokerState *state, NSString *reason, uint64_t rss) {
+  send_object(state, @{
+    @"event" : @"plugin.resource",
+    @"params" : @{
+      @"reason" : reason,
+      @"rssBytes" : @(rss),
+      @"rssLimitBytes" : @(RSS_LIMIT_BYTES),
+      @"commandLimitMs" : @(COMMAND_CPU_LIMIT_MS),
+      @"cpuLimitMs" : @(COMMAND_CPU_LIMIT_MS),
+      @"startupLimitMs" : @(WORKER_STARTUP_LIMIT_MS),
+      @"commandWallLimitMs" : @(COMMAND_TOTAL_WALL_LIMIT_MS),
+    }
+  });
 }
 
 static NSDictionary *error_reply(NSNumber *identifier, NSString *code, NSString *message) {
@@ -105,10 +132,7 @@ static void remove_command_locked(BrokerState *state, int64_t identifier) {
 
 static void wait_command_locked(BrokerState *state, int64_t identifier) {
   for (size_t index = 0; index < state->command_count; index++)
-    if (state->commands[index].identifier == identifier) {
-      state->commands[index].deadline_ms = 0;
-      return;
-    }
+    if (state->commands[index].identifier == identifier) return;
 }
 
 static BOOL add_command_locked(BrokerState *state, int64_t identifier) {
@@ -117,7 +141,7 @@ static BOOL add_command_locked(BrokerState *state, int64_t identifier) {
     if (state->commands[index].identifier == identifier) return NO;
   state->commands[state->command_count++] = (CommandDeadline){
     .identifier = identifier,
-    .deadline_ms = now_ms() + COMMAND_LIMIT_MS,
+    .deadline_ms = now_ms() + COMMAND_TOTAL_WALL_LIMIT_MS,
   };
   return YES;
 }
@@ -151,29 +175,21 @@ static void *watch_worker(void *opaque) {
       break;
     }
     uint64_t current = now_ms();
-    BOOL deadline = NO;
+    BOOL startup_deadline = state->startup_deadline_ms > 0 &&
+                            state->startup_deadline_ms <= current;
+    BOOL command_deadline = NO;
     for (size_t index = 0; index < state->command_count; index++)
       if (state->commands[index].deadline_ms > 0 &&
           state->commands[index].deadline_ms <= current)
-        deadline = YES;
-    pthread_mutex_unlock(&state->lock);
-    if (deadline) {
-      NSString *reason = @"wall";
-      send_object(state, @{
-        @"event" : @"plugin.resource",
-        @"params" : @{
-          @"reason" : reason,
-          @"rssBytes" : @0,
-          @"rssLimitBytes" : @(RSS_LIMIT_BYTES),
-          @"commandLimitMs" : @(COMMAND_LIMIT_MS)
-        }
-      });
-      pthread_mutex_lock(&state->lock);
-      if (state->generation == thread->generation && state->worker_pid == thread->pid)
-        kill_worker_locked(state, reason);
+        command_deadline = YES;
+    if (startup_deadline || command_deadline) {
+      NSString *reason = startup_deadline ? @"startup-wall" : @"wall";
+      send_resource(state, reason, 0);
+      kill_worker_locked(state, reason);
       pthread_mutex_unlock(&state->lock);
       break;
     }
+    pthread_mutex_unlock(&state->lock);
   }
   free(thread);
   return NULL;
@@ -184,6 +200,28 @@ static void forward_worker_line(WorkerThread *thread, NSData *line) {
   NSDictionary *object = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
   NSNumber *identifier = [object isKindOfClass:NSDictionary.class] ? object[@"id"] : nil;
   NSString *control = [object isKindOfClass:NSDictionary.class] ? object[@"control"] : nil;
+  NSString *event = [object isKindOfClass:NSDictionary.class] ? object[@"event"] : nil;
+  if ([event isEqualToString:@"plugin.started"]) {
+    BOOL valid = [object[@"params"] isKindOfClass:NSDictionary.class];
+    pthread_mutex_lock(&state->lock);
+    valid = valid && state->generation == thread->generation &&
+            state->worker_pid == thread->pid && !state->ready;
+    if (valid) {
+      state->ready = YES;
+      state->startup_deadline_ms = 0;
+    } else if (state->generation == thread->generation && state->worker_pid == thread->pid) {
+      kill_worker_locked(state, @"protocol");
+    }
+    pthread_mutex_unlock(&state->lock);
+    if (valid) send_data(state, line);
+    return;
+  }
+  pthread_mutex_lock(&state->lock);
+  BOOL before_ready = state->generation == thread->generation &&
+                      state->worker_pid == thread->pid && !state->ready;
+  if (before_ready) kill_worker_locked(state, @"protocol");
+  pthread_mutex_unlock(&state->lock);
+  if (before_ready) return;
   if ([control isEqualToString:@"command.wait"] && positive_integer(identifier)) {
     pthread_mutex_lock(&state->lock);
     if (state->generation == thread->generation)
@@ -229,12 +267,23 @@ static void *read_worker(void *opaque) {
     }
   }
   close(thread->output);
+  siginfo_t exit_info = {0};
+  BOOL inspected = inspect_worker_exit(thread->pid, &exit_info);
+  BOOL cpu_exit = inspected && exit_info.si_code == CLD_KILLED &&
+                  exit_info.si_status == SIGPROF;
+  BOOL accounting_exit = inspected && exit_info.si_code == CLD_EXITED &&
+                         exit_info.si_status == CPU_ACCOUNTING_EXIT;
+  if (cpu_exit || accounting_exit) kill(-thread->pid, SIGKILL);
   int status = 0;
-  waitpid(thread->pid, &status, 0);
+  while (waitpid(thread->pid, &status, 0) < 0 && errno == EINTR) {}
+  if (!inspected) {
+    cpu_exit = WIFSIGNALED(status) && WTERMSIG(status) == SIGPROF;
+    accounting_exit = WIFEXITED(status) && WEXITSTATUS(status) == CPU_ACCOUNTING_EXIT;
+  }
 
   int64_t failed[MAX_COMMANDS] = {0};
   size_t failed_count = 0;
-  BOOL expected = NO, resource = NO, current = NO;
+  BOOL expected = NO, resource = NO, current = NO, report_resource = NO;
   char reason[16] = {0};
   pthread_mutex_lock(&state->lock);
   current = state->generation == thread->generation && state->worker_pid == thread->pid;
@@ -246,16 +295,29 @@ static void *read_worker(void *opaque) {
     expected = state->expected_stop;
     resource = state->resource_kill;
     snprintf(reason, sizeof(reason), "%s", state->resource_reason);
+    if (!resource && cpu_exit) {
+      resource = YES;
+      report_resource = YES;
+      snprintf(reason, sizeof(reason), "%s", "cpu");
+    } else if (!resource && accounting_exit) {
+      resource = YES;
+      report_resource = YES;
+      snprintf(reason, sizeof(reason), "%s", "cpu-accounting");
+    }
     failed_count = state->command_count;
     for (size_t index = 0; index < failed_count; index++)
       failed[index] = state->commands[index].identifier;
     state->command_count = 0;
+    state->ready = NO;
+    state->startup_deadline_ms = 0;
     state->expected_stop = NO;
     state->resource_kill = NO;
     state->resource_reason[0] = 0;
   }
   pthread_mutex_unlock(&state->lock);
   if (current) {
+    if (report_resource)
+      send_resource(state, [NSString stringWithUTF8String:reason], 0);
     for (size_t index = 0; index < failed_count; index++)
       send_object(state, error_reply(@(failed[index]), @"worker_exited", @"Plugin worker exited"));
     if (!expected)
@@ -313,6 +375,8 @@ static BOOL spawn_worker_locked(BrokerState *state, NSString **message) {
   state->worker_pid = pid;
   state->worker_input = input[1];
   state->generation++;
+  state->ready = NO;
+  state->startup_deadline_ms = now_ms() + WORKER_STARTUP_LIMIT_MS;
   state->expected_stop = NO;
   state->resource_kill = NO;
   state->command_count = 0;
@@ -335,15 +399,7 @@ static void handle_resource_kill(BrokerState *state, xpc_object_t event) {
   pthread_mutex_lock(&state->lock);
   BOOL current = state->worker_pid > 0 && state->generation == generation;
   if (current) {
-    send_object(state, @{
-      @"event" : @"plugin.resource",
-      @"params" : @{
-        @"reason" : @"rss",
-        @"rssBytes" : @(rss),
-        @"rssLimitBytes" : @(RSS_LIMIT_BYTES),
-        @"commandLimitMs" : @(COMMAND_LIMIT_MS)
-      }
-    });
+    send_resource(state, @"rss", rss);
     kill_worker_locked(state, @"rss");
   }
   pthread_mutex_unlock(&state->lock);
@@ -416,6 +472,12 @@ static void handle_line(BrokerState *state, const void *bytes, size_t length) {
     if (state->worker_pid == 0) {
       pthread_mutex_unlock(&state->lock);
       send_object(state, error_reply(identifier, @"not_active", @"Plugin worker is not active"));
+      return;
+    }
+    if (!state->ready &&
+        (![method isEqualToString:@"activate"] || state->command_count > 0)) {
+      pthread_mutex_unlock(&state->lock);
+      send_object(state, error_reply(identifier, @"starting", @"Plugin worker is starting"));
       return;
     }
     if (!add_command_locked(state, identifier.longLongValue)) {

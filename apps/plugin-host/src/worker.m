@@ -4,12 +4,17 @@
 #include <errno.h>
 #include <math.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 static const NSUInteger MAX_LINE_BYTES = 1024 * 1024;
 static const NSUInteger MAX_CODE_BYTES = 512 * 1024;
 static const NSUInteger MAX_CALLS = 32;
+static const suseconds_t COMMAND_CPU_LIMIT_US = 500000;
+enum { CPU_ACCOUNTING_EXIT = 76 };
 
 typedef struct PendingCall {
   int64_t identifier;
@@ -32,6 +37,23 @@ typedef struct {
 } WorkerState;
 
 static NSString *exception_message(JSContextRef context, JSValueRef exception);
+
+static BOOL configure_cpu_timer(void) {
+  struct sigaction action = {0};
+  action.sa_handler = SIG_DFL;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGPROF, &action, NULL) != 0) return NO;
+  sigset_t signals;
+  sigemptyset(&signals);
+  sigaddset(&signals, SIGPROF);
+  return pthread_sigmask(SIG_UNBLOCK, &signals, NULL) == 0;
+}
+
+static void set_cpu_timer(BOOL armed) {
+  struct itimerval timer = {0};
+  if (armed) timer.it_value.tv_usec = COMMAND_CPU_LIMIT_US;
+  if (setitimer(ITIMER_PROF, &timer, NULL) != 0) _exit(CPU_ACCOUNTING_EXIT);
+}
 
 static BOOL positive_integer(id value) {
   if (![value isKindOfClass:NSNumber.class] ||
@@ -330,6 +352,12 @@ static void emit_isolation_probe(void) {
 
 int main(void) {
   @autoreleasepool {
+#if PLUGIN_HOST_TEST_STARTUP_DELAY
+    usleep(650000);
+#endif
+#if PLUGIN_HOST_TEST_STARTUP_HANG
+    for (;;) pause();
+#endif
     WorkerState state = {0};
     state.context = JSGlobalContextCreate(NULL);
     JSClassDefinition definition = kJSClassDefinitionEmpty;
@@ -377,6 +405,7 @@ int main(void) {
     if (!state.api || !state.settle) return 70;
     JSValueProtect(state.context, state.api);
     JSValueProtect(state.context, state.settle);
+    if (!configure_cpu_timer()) return CPU_ACCOUNTING_EXIT;
     emit_object(@{ @"event" : @"plugin.started", @"params" : @{} });
 #if PLUGIN_HOST_TESTING
     emit_isolation_probe();
@@ -398,6 +427,12 @@ int main(void) {
           emit_object(failure(@0, @"invalid_request", @"Invalid request"));
           continue;
         }
+        BOOL cpu_timed =
+          ([method isEqualToString:@"activate"] && [params[@"code"] isKindOfClass:NSString.class]) ||
+          ([method isEqualToString:@"event"] && state.active &&
+           [params[@"event"] isKindOfClass:NSString.class] && params[@"payload"] != nil) ||
+          ([method isEqualToString:@"resolve"] && positive_integer(params[@"callId"]));
+        if (cpu_timed) set_cpu_timer(YES);
         if ([method isEqualToString:@"activate"] && [params[@"code"] isKindOfClass:NSString.class]) {
           NSString *message = nil;
           if (!activate(&state, params[@"code"], &message) ||
@@ -421,6 +456,7 @@ int main(void) {
         } else {
           emit_object(failure(identifier, @"invalid_request", @"Invalid method or parameters"));
         }
+        if (cpu_timed) set_cpu_timer(NO);
       }
     }
     while (state.pending) {

@@ -15,6 +15,21 @@ const executable = resolve(
   "work/plugin-host/build/PluginHost.app/Contents/MacOS/plugin-host",
 );
 const fixture = "/tmp/hitchhiker-plugin-host-deny-fixture";
+const delay = (milliseconds) =>
+  new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+
+const buildNative = ({ testing = false, startupTest } = {}) => {
+  const env = { ...process.env };
+  delete env.HITCHHIKER_PLUGIN_HOST_TESTING;
+  delete env.HITCHHIKER_PLUGIN_HOST_STARTUP_TEST;
+  if (testing) env.HITCHHIKER_PLUGIN_HOST_TESTING = "1";
+  if (startupTest !== undefined) env.HITCHHIKER_PLUGIN_HOST_STARTUP_TEST = startupTest;
+  return spawnSync(process.execPath, [resolve(app, "scripts/build.mjs")], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+  });
+};
 
 const signedEntitlements = (path) => {
   const signature = spawnSync("codesign", ["-d", "--entitlements", ":-", path], {
@@ -81,13 +96,14 @@ class Host {
     return this.next((message) => message.id === identifier);
   }
 
-  event(name) {
-    return this.next((message) => message.event === name);
+  event(name, timeoutMs) {
+    return this.next((message) => message.event === name, timeoutMs);
   }
 
-  call(method) {
+  call(method, timeoutMs) {
     return this.next(
       (message) => message.event === "plugin.call" && message.params.method === method,
+      timeoutMs,
     );
   }
 
@@ -131,11 +147,61 @@ const pluginCode = `
 `;
 
 test("native plugin host isolates workers and recovers from resource violations", async (t) => {
-  const build = spawnSync(process.execPath, [resolve(app, "scripts/build.mjs")], {
-    cwd: root,
-    env: { ...process.env, HITCHHIKER_PLUGIN_HOST_TESTING: "1" },
-    encoding: "utf8",
+  t.after(() => {
+    const production = buildNative();
+    assert.equal(production.status, 0, `${production.stdout}\n${production.stderr}`);
   });
+
+  await t.test("cold startup has a separate trusted readiness budget", async (startup) => {
+    const delayedBuild = buildNative({ testing: true, startupTest: "delay" });
+    assert.equal(delayedBuild.status, 0, `${delayedBuild.stdout}\n${delayedBuild.stderr}`);
+    const delayed = new Host();
+    startup.after(() => delayed.kill());
+    const began = Date.now();
+    await delayed.send({
+      id: 1,
+      method: "activate",
+      params: { code: "globalThis.HitchhikerPlugin={activate(){}}" },
+    });
+    await delayed.event("plugin.started");
+    assert.ok(Date.now() - began >= 600, "test worker did not exercise a >500 ms cold start");
+    await delayed.event("plugin.ready");
+    assert.equal((await delayed.reply(1)).result, null);
+    await delayed.stop();
+
+    const hangingBuild = buildNative({ testing: true, startupTest: "hang" });
+    assert.equal(hangingBuild.status, 0, `${hangingBuild.stdout}\n${hangingBuild.stderr}`);
+    const hanging = new Host();
+    startup.after(() => hanging.kill());
+    await hanging.send({
+      id: 1,
+      method: "activate",
+      params: { code: "globalThis.HitchhikerPlugin={activate(){}}" },
+    });
+    const resource = await hanging.event("plugin.resource", 6000);
+    assert.equal(resource.params.reason, "startup-wall");
+    assert.equal(resource.params.startupLimitMs, 4000);
+    assert.equal(resource.params.cpuLimitMs, 500);
+    assert.equal((await hanging.event("plugin.crash")).params.reason, "startup-wall");
+    assert.equal(
+      hanging.messages.some((message) => message.event === "plugin.started"),
+      false,
+    );
+
+    const recoveryBuild = buildNative({ testing: true });
+    assert.equal(recoveryBuild.status, 0, `${recoveryBuild.stdout}\n${recoveryBuild.stderr}`);
+    await hanging.send({
+      id: 2,
+      method: "activate",
+      params: { code: "globalThis.HitchhikerPlugin={activate(){}}" },
+    });
+    await hanging.event("plugin.started");
+    await hanging.event("plugin.ready");
+    assert.equal((await hanging.reply(2)).result, null);
+    await hanging.stop();
+  });
+
+  const build = buildNative({ testing: true });
   assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
   const serviceRoot = resolve(
     root,
@@ -249,7 +315,118 @@ test("native plugin host isolates workers and recovers from resource violations"
     await Promise.all([first.stop(), second.stop()]);
   });
 
-  await t.test("malformed input is contained and wall/RSS kills restart cleanly", async () => {
+  await t.test(
+    "CPU slices pause for host waits and rearm for nested continuations",
+    async (slice) => {
+      const waiting = new Host();
+      slice.after(() => waiting.kill());
+      await waiting.send({
+        id: 1,
+        method: "activate",
+        params: {
+          code: 'globalThis.HitchhikerPlugin={async activate(h){await h.call("slow",{})}}',
+        },
+      });
+      await waiting.event("plugin.started");
+      const slow = await waiting.call("slow");
+      await delay(700);
+      await waiting.send({
+        id: 2,
+        method: "resolve",
+        params: { callId: slow.params.callId, result: null },
+      });
+      assert.equal((await waiting.reply(2)).result, null);
+      await waiting.event("plugin.ready");
+      assert.equal((await waiting.reply(1)).result, null);
+      await waiting.stop();
+
+      const continuation = new Host();
+      slice.after(() => continuation.kill());
+      await continuation.send({
+        id: 1,
+        method: "activate",
+        params: {
+          code:
+            'globalThis.HitchhikerPlugin={async activate(h){await h.call("first",{});' +
+            'await h.call("second",{});await Promise.resolve();while(true){}}}',
+        },
+      });
+      await continuation.event("plugin.started");
+      const first = await continuation.call("first");
+      await continuation.send({
+        id: 2,
+        method: "resolve",
+        params: { callId: first.params.callId, result: null },
+      });
+      const second = await continuation.call("second");
+      assert.equal((await continuation.reply(2)).result, null);
+      await continuation.send({
+        id: 3,
+        method: "resolve",
+        params: { callId: second.params.callId, result: null },
+      });
+      const cpu = await continuation.event("plugin.resource");
+      assert.equal(cpu.params.reason, "cpu");
+      assert.equal(cpu.params.cpuLimitMs, 500);
+      assert.equal((await continuation.event("plugin.crash")).params.reason, "cpu");
+    },
+  );
+
+  await t.test("hostile Promise assimilation remains inside the CPU slice", async (hostile) => {
+    const host = new Host();
+    hostile.after(() => host.kill());
+    for (const [identifier, code] of [
+      [
+        1,
+        "globalThis.HitchhikerPlugin={activate(){return Object.defineProperty({},'then',{get(){while(true){}}})}}",
+      ],
+      [
+        2,
+        "globalThis.HitchhikerPlugin={activate(){return Promise.reject({toString(){while(true){}}})}}",
+      ],
+    ]) {
+      await host.send({ id: identifier, method: "activate", params: { code } });
+      await host.event("plugin.started");
+      assert.equal((await host.event("plugin.resource")).params.reason, "cpu");
+      assert.equal((await host.event("plugin.crash")).params.reason, "cpu");
+    }
+  });
+
+  await t.test("cheap asynchronous yielding remains bounded by total wall time", async (wall) => {
+    const host = new Host();
+    wall.after(() => host.kill());
+    await host.send({
+      id: 1,
+      method: "activate",
+      params: {
+        code: 'globalThis.HitchhikerPlugin={async activate(h){for(;;){await h.call("again",{})}}}',
+      },
+    });
+    await host.event("plugin.started");
+    let resolving = true;
+    const drive = (async () => {
+      let identifier = 2;
+      while (resolving) {
+        const call = await host.call("again", 1000);
+        await delay(250);
+        if (!resolving) return;
+        await host.send({
+          id: identifier,
+          method: "resolve",
+          params: { callId: call.params.callId, result: null },
+        });
+        identifier += 1;
+      }
+    })().catch(() => {});
+    const resource = await host.event("plugin.resource", 7000);
+    resolving = false;
+    assert.equal(resource.params.reason, "wall");
+    assert.equal(resource.params.commandWallLimitMs, 5000);
+    assert.equal((await host.event("plugin.crash")).params.reason, "wall");
+    await drive;
+  });
+
+  await t.test("malformed input and CPU/RSS kills restart cleanly", async () => {
     const host = new Host();
     t.after(() => host.kill());
     await host.sendRaw("{bad json}\n");
@@ -298,8 +475,8 @@ test("native plugin host isolates workers and recovers from resource violations"
       params: { code: "globalThis.HitchhikerPlugin={activate(){while(true){}}}" },
     });
     await host.event("plugin.started");
-    assert.equal((await host.event("plugin.resource", 5000)).params.reason, "wall");
-    await host.event("plugin.crash");
+    assert.equal((await host.event("plugin.resource", 5000)).params.reason, "cpu");
+    assert.equal((await host.event("plugin.crash")).params.reason, "cpu");
 
     await host.send({
       id: 11,
@@ -317,7 +494,7 @@ test("native plugin host isolates workers and recovers from resource violations"
       id: 13,
       method: "activate",
       params: {
-        code: "globalThis.HitchhikerPlugin={activate(){const held=[];for(let i=0;i<20;i++){held.push(new Uint8Array(10*1024*1024).fill(7))}while(true){}}}",
+        code: "globalThis.HitchhikerPlugin={activate(){const held=[];for(let i=0;i<20;i++){held.push(new Uint8Array(10*1024*1024).fill(7))}return new Promise(()=>{})}}",
       },
     });
     await host.event("plugin.started");

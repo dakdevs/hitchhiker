@@ -7,26 +7,27 @@ and its streaming path handles input independently of slower output. These are u
 not dependencies or a claim that Hitchhiker has implemented every agent-browser command.
 
 Hitchhiker already separates bounded engine replies, events, and raw CDP traffic. Its local MCP tools
-control pages, configuration, and installed plugins. A separate revocable CDP grant can expose a
+control pages, configuration, installed plugins, and top-document snapshot/click/fill. A separate revocable CDP grant can expose a
 browser-level WebSocket endpoint. Playwright attachment is verified; agent-browser attachment still
 needs its own integration test. The UI uses [Vercel Native](https://github.com/vercel-labs/native)
 inside a CEF-owned window and is not a Chromium-rendered browser toolbar.
 
-## Next implementation boundary
+## Scoped DOM boundary
 
-The following is Hitchhiker's proposed scoped DOM API, not shipped functionality:
+The development browser supplies three scoped tools, described in
+[the scoped DOM contract](SCOPED-DOM-PLAN.md):
 
-- `pages.snapshot` produces a bounded accessibility tree and opaque element references tied to a
+- `hitchhiker_page_snapshot` produces a bounded accessibility tree and opaque element references tied to a
   specific page, frame, and document generation.
 - Read and action commands verify the current `pages.read` or `pages.write` origin grant and reject
   references invalidated by navigation. Page output remains untrusted data.
-- Click/fill/press use the checked reference and verify frame identity at execution. Frame navigation,
+- Semantic click/fill use the checked reference and verify document identity at execution. Navigation,
   overlays, and detached elements must fail without retargeting an unrelated page or element.
-- Screenshot and text output have explicit size limits. Backpressure on output cannot block input
-  cancellation, grant revocation, or engine shutdown.
+- Snapshot output has an explicit size limit, including the MCP envelope. References expire and are
+  local to the connection. Password values and child-document content are excluded.
 - These scoped operations do not silently expose raw CDP. Raw attachment remains separately granted.
 
-Before claiming completion, test real same-origin and cross-origin frames, navigation races, stale
-references, obscured controls, cancellation, output limits, and revocation with both an official MCP
-client and an independent CDP client. Hosted ChatGPT access additionally requires a remote MCP
+General keyboard input, screenshots and child-frame actions require further native identity and
+authorization work. The present tools do not accept selectors, JavaScript or raw CDP parameters.
+Hosted ChatGPT access additionally requires a remote MCP
 transport and its own connection authorization; local stdio alone does not provide it.

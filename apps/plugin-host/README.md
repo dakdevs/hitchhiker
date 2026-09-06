@@ -75,11 +75,14 @@ with this process, then returns `resolve`. Worker-supplied identity is never
 accepted. A worker may have at most 32 unresolved calls.
 
 JavaScriptCore receives no Node globals, environment, filesystem, network, timer,
-fetch, Objective-C object, raw XPC object, or generic native bridge. A synchronous
-command gets 500 ms and the worker gets a 150 MiB physical-footprint limit. The
-trusted outer app measures RSS because an App-Sandboxed broker cannot inspect it;
-the broker validates a private PID-generation control message and kills the worker
-process group. The broker stays alive so a later `activate` starts a fresh worker.
+fetch, Objective-C object, raw XPC object, or generic native bridge. Each physical
+entry into plugin JavaScript gets 500 ms of process CPU, including every
+`resolve`-driven Promise continuation. Host waits do not consume that CPU timer. A
+worker has a 4 s startup limit, each top-level command retains a 5 s wall limit
+across waits, and the physical-footprint limit is 150 MiB. The trusted outer app
+measures RSS because an App-Sandboxed broker cannot inspect it; the broker validates
+a private PID-generation control message and kills the worker process group. The
+broker stays alive so a later `activate` starts a fresh worker.
 
 TypeScript/esbuild compilation is outside this package. `activate.code` must
 already be a single compiled IIFE. See [the isolation design](../../docs/PLUGIN-ISOLATION.md)

@@ -126,6 +126,8 @@ export interface BrowserController {
   readonly openPage: (url: string) => Effect.Effect<string, EngineError>;
   readonly navigatePage: (pageId: string, url: string) => Effect.Effect<void, EngineError>;
   readonly closePage: (pageId: string) => Effect.Effect<void, EngineError>;
+  /** Records a conservative native-write lease before a scoped DOM mutation. */
+  readonly protectDomWrite: (pageId: string) => Effect.Effect<void, EngineError>;
   readonly configure: (configuration: BrowserConfiguration) => Effect.Effect<void, EngineError>;
   readonly configuration: Effect.Effect<BrowserConfiguration>;
   readonly updatePluginControls: (
@@ -344,6 +346,7 @@ export const makeBrowserController = (
     let pluginBindings: Surface["bindings"] = [];
     let pluginOwner: string | undefined;
     let knownResources: PageResourceKnowledge = new Map();
+    const pendingDomWrites = new Set<string>();
     let resourceSignalsAvailable = false;
     const pluginEvents = yield* PubSub.bounded<{
       readonly owner: string;
@@ -698,6 +701,25 @@ export const makeBrowserController = (
         }),
       );
     });
+    const protectDomWrite = Effect.fn("BrowserController.protectDomWrite")(function* (id: string) {
+      yield* lock.withPermit(
+        Effect.gen(function* () {
+          const page = state.browser.pages.find(
+            (entry) => entry.id === id && entry.lifecycle !== "closed",
+          );
+          if (page === undefined)
+            return yield* new EngineError({ code: "not-found", message: "Page is not open" });
+          if (page.lifecycle === "sleeping") {
+            yield* activatePage(engine, id);
+            state = {
+              ...state,
+              browser: replacePage(state.browser, id, { lifecycle: "loaded", lastUsedAt: now() }),
+            };
+          }
+          pendingDomWrites.add(id);
+        }),
+      );
+    });
     const configure = Effect.fn("BrowserController.configure")(function* (
       configuration: BrowserConfiguration,
     ) {
@@ -840,6 +862,7 @@ export const makeBrowserController = (
                   inputDirty: false,
                 };
               } else if (event.event === "pages.closed") {
+                pendingDomWrites.delete(id);
                 const remainingResources = new Map(knownResources);
                 remainingResources.delete(id);
                 knownResources = remainingResources;
@@ -987,7 +1010,14 @@ export const makeBrowserController = (
                   now(),
                   2,
                   resourceSignalsAvailable,
-                  knownResources,
+                  new Map(
+                    [...knownResources].map(([id, resources]) => [
+                      id,
+                      pendingDomWrites.has(id)
+                        ? Object.freeze({ ...resources, unsavedInput: true })
+                        : resources,
+                    ]),
+                  ),
                 );
           for (const id of ids) {
             yield* freezePage(engine, id);
@@ -1012,6 +1042,7 @@ export const makeBrowserController = (
       openPage: openTrusted,
       navigatePage: navigateTrusted,
       closePage: closeTrusted,
+      protectDomWrite,
       configure,
       configuration: Effect.sync(() => state.configuration),
       updatePluginControls: (plugins, action) =>

@@ -10,6 +10,7 @@ import {
   type SurfaceEvent,
 } from "@hitchhiker/runtime";
 import { Deferred, Effect, Layer, PubSub, Schema, Stream } from "effect";
+import { TestClock } from "effect/testing";
 import { makeBrowserController, normalizeAddressDraft } from "../src/controller.ts";
 
 test("normalizes addresses and keeps plain search text out of engine navigation", () => {
@@ -145,6 +146,100 @@ test("filters non-page engine feedback, selects a successor, and persists the cu
       ),
     );
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a pending scoped DOM write activates and protects only its stable page", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-browser-dom-protection-"));
+  const originalNow = Date.now;
+  let testNow = 0;
+  Date.now = () => testNow;
+  try {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const engineEvents = yield* PubSub.unbounded<EngineEvent>();
+          const surfaceEvents = yield* PubSub.unbounded<SurfaceEvent>();
+          const opened: string[] = [];
+          const lifecycle: Array<{ readonly pageId: string; readonly state: string }> = [];
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({
+              event: "host.ready",
+              params: { pageResourceSignals: true },
+            }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(engineEvents),
+            cdpEvents: Stream.empty,
+            request: (method, params = {}) =>
+              Effect.sync(() => {
+                if (method === "pages.open" && typeof params.id === "string")
+                  opened.push(params.id);
+                if (
+                  method === "cdp.send" &&
+                  typeof params.pageId === "string" &&
+                  params.method === "Page.setWebLifecycleState" &&
+                  params.params !== null &&
+                  typeof params.params === "object" &&
+                  !Array.isArray(params.params)
+                ) {
+                  const lifecycleParams = params.params as Record<string, unknown>;
+                  if (typeof lifecycleParams.state === "string")
+                    lifecycle.push({ pageId: params.pageId, state: lifecycleParams.state });
+                }
+                return {};
+              }),
+            sendCdp: () => Effect.void,
+          });
+          const surface = NativeSurface.of({
+            commit: () => Effect.succeed(1),
+            events: Stream.fromPubSub(surfaceEvents),
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(NativeSurface, surface),
+              ),
+            ),
+          );
+          yield* controller.start;
+          for (const url of ["https://one.test", "https://two.test", "https://three.test"])
+            yield* controller.openPage(url);
+          for (const id of opened) {
+            yield* PubSub.publish(engineEvents, { event: "pages.created", params: { pageId: id } });
+            yield* PubSub.publish(engineEvents, {
+              event: "pages.resourcesChanged",
+              params: {
+                pageId: id,
+                audio: false,
+                call: false,
+                download: false,
+                unsavedInput: false,
+              },
+            });
+          }
+          yield* Effect.yieldNow;
+          yield* controller.configure({
+            colorScheme: "system",
+            sleepAfterMs: 10_000,
+            alwaysAwakeOrigins: [],
+          });
+          testNow = 20_000;
+          yield* controller.protectDomWrite(opened[1]!);
+          yield* TestClock.adjust(1_000);
+          yield* Effect.yieldNow;
+          assert.deepEqual(lifecycle, [{ pageId: opened[2]!, state: "frozen" }]);
+          assert.equal(
+            (yield* controller.snapshot).pages.find((page) => page.id === opened[1])?.lifecycle,
+            "loaded",
+          );
+        }),
+      ).pipe(Effect.provide(TestClock.layer())),
+    );
+  } finally {
+    Date.now = originalNow;
     await rm(directory, { recursive: true, force: true });
   }
 });

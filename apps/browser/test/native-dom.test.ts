@@ -282,6 +282,14 @@ test(
             );
             assert.equal(markerResult.origin, securityOrigin);
             assert.equal(markerResult.href, originalUrl);
+            assert.equal(
+              yield* evaluate(
+                "dom-first",
+                `Object.hasOwn(globalThis, ${JSON.stringify(markerName)})`,
+              ),
+              false,
+              "the main world cannot enumerate the isolated-world document marker",
+            );
 
             yield* cdp("dom-first", "Accessibility.enable");
             const axReply = record(

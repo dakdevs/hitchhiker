@@ -88,6 +88,9 @@ the application-level lease/restart policy remains to be integrated.
 The local MCP launcher and isolated plugin runtime are described in [DEVELOPMENT.md](DEVELOPMENT.md).
 Persistent compiled plugin installation, updates, rollback and restart restoration are integrated.
 The optional plugin MCP tools delegate authority from the connection grant and cannot grant raw CDP.
+Scoped top-document snapshots and semantic click/fill use connection-local refs and repeated origin
+authorization. Child frames and general keyboard input remain unsupported; see
+[the scoped DOM contract](SCOPED-DOM-PLAN.md).
 Remote MCP, full extension installation/compatibility and release packaging remain unfinished. The
 relocatable developer app passes native plugin lifecycle tests; it is not a notarized release. Do not expose the
 private engine channel as a public MCP transport or describe this build as a production browser.

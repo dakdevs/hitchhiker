@@ -136,14 +136,28 @@ from the working runtime host.
 
 ## Resource enforcement
 
-The XPC broker owns the worker PID and 500 ms synchronous-command watchdog; the
-plugin cannot stop or reset either. Live testing found that the App-Sandboxed
-broker cannot obtain worker resource usage with `proc_pid_rusage`. The trusted
-outer app therefore samples the worker's physical footprint, while the broker
-keeps the authoritative PID generation. On crossing 150 MiB, the outer app sends a
-private generation-bound XPC control message. The broker rejects stale generations,
-emits `plugin.resource`, and sends `SIGKILL` to the worker process group. PID and
-kill controls are never forwarded to plugin JavaScript.
+The worker arms a one-shot 500 ms `ITIMER_PROF` around each physical entry into
+plugin JavaScript. The kernel timer counts user and system CPU while excluding
+descheduling, pipe blocking, and time spent awaiting a host capability. Default
+`SIGPROF` termination prevents a tight loop from disarming its own watchdog; the
+broker classifies that exit as `plugin.resource` with reason `cpu` and retains the
+authoritative PID generation and process-group cleanup. Each `resolve` entry gets a
+fresh CPU slice, so Promise continuations are covered.
+
+The broker separately enforces a 4 s trusted-worker startup deadline ending at the
+fixed pre-code `plugin.started` event. It keeps a 5 s total wall deadline for each
+top-level command from broker receipt, including startup and asynchronous waits;
+`command.wait` no longer erases that bound. This wall limit catches a stalled
+worker and an endless sequence of individually cheap host calls without presenting
+scheduler delay as plugin CPU.
+
+Live testing found that the App-Sandboxed broker cannot obtain worker resource
+usage with `proc_pid_rusage`. The trusted outer app therefore continues to sample
+the worker's physical footprint, while the broker keeps the authoritative PID
+generation. On crossing 150 MiB, the outer app sends a private generation-bound
+XPC control message. The broker rejects stale generations, emits
+`plugin.resource`, and sends `SIGKILL` to the worker process group. PID and kill
+controls are never forwarded to plugin JavaScript.
 
 The broker survives the worker exit, emits `plugin.crash`, fails outstanding
 commands, and starts a fresh worker on the next `activate`. Crash-loop backoff,
@@ -186,9 +200,15 @@ signed app bundle and runs the public source in `apps/plugin-host`. The test pas
 - `EPERM` for a task-created file and a live loopback listener from both inherited
   workers. The probe is compiled only into the integration-test build and is absent
   from the normal bundle.
-- A 500 ms synchronous infinite loop kill and a JavaScript allocation exceeding
-  the 150 MiB physical-footprint threshold, with `plugin.resource`, `plugin.crash`,
-  and successful fresh activation after each kill.
+- A cold worker delayed beyond 500 ms still activates, while a worker hung before
+  readiness hits the distinct 4 s startup limit and then recovers on the same outer
+  host. A synchronous loop, a nested Promise continuation loop, a hostile thenable
+  getter, and hostile rejection stringification hit the 500 ms CPU limit. A host
+  wait beyond 500 ms succeeds, and repeated cheap async yields hit the 5 s total
+  wall limit.
+- A JavaScript allocation exceeding the 150 MiB physical-footprint threshold still
+  reports the distinct RSS reason, with `plugin.resource`, `plugin.crash`, and
+  successful fresh activation after resource kills.
 - Rejection of malformed JSON and a frame larger than 1 MiB, followed by successful
   activation on the same outer connection.
 
@@ -206,6 +226,12 @@ an activation Promise completes two nested capability calls before readiness,
 revoking an idle UI grant ends its session and releases its UI lease, a resource
 kill also releases the UI lease, and scope exit leaves no outer `plugin-host`
 process.
+
+After the CPU-budget correction, `work/plugin-budget-runtime.log` records that
+runtime lifecycle test passing again. `work/plugin-budget-management.log` records
+both real CEF/MCP managed-plugin cases passing against the rebuilt production
+helper, including install, update, rollback, restart, revocation, and invalid-store
+safe-mode recovery.
 
 The earlier ignored experiment established the launch shape before it was promoted.
 The ignored experiment contains:

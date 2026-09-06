@@ -8,6 +8,7 @@ import { type McpOptions, registerBrowserMcp } from "./mcp.ts";
 export const mcpStdioInputLimit = 256 * 1024;
 export const mcpStdioOutputLimit = 4 * 1024 * 1024;
 export const mcpStdioMaxInFlight = 32;
+export const mcpStdioMaxStringIdBytes = 64;
 
 export class McpTransportError extends Schema.TaggedError<McpTransportError>()(
   "McpTransportError",
@@ -73,7 +74,12 @@ const boundedStdio = (closed: Deferred.Deferred<void, McpTransportError>) =>
               );
             if (typeof message.method === "string" && "id" in message && message.id !== null) {
               const id = message.id;
-              if ((typeof id !== "string" && typeof id !== "number") || active.has(id))
+              if (
+                (typeof id !== "string" && typeof id !== "number") ||
+                (typeof id === "string" && Buffer.byteLength(id) > mcpStdioMaxStringIdBytes) ||
+                (typeof id === "number" && !Number.isSafeInteger(id)) ||
+                active.has(id)
+              )
                 return yield* halt<Uint8Array>(
                   transportError("MCP JSON-RPC request id is invalid or already active"),
                 );

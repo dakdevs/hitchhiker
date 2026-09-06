@@ -42,8 +42,29 @@ to another running instance using the same profile.
 
 The current tools list/open/navigate/close pages, get/set configuration, and select sidebar/top tabs.
 With `HITCHHIKER_PLUGIN_HOST` configured, five additional tools list, install/update, enable, disable,
-and roll back plugins. They check durable grants on every call. DOM automation and remote MCP
-transport for hosted clients remain additional work. Local stdio support does not by
+and roll back plugins. They check durable grants on every call.
+
+Three scoped DOM tools operate on the top document of an HTTP(S) page:
+
+| Tool                       | Input                                                     | Permission                           |
+| -------------------------- | --------------------------------------------------------- | ------------------------------------ |
+| `hitchhiker_page_snapshot` | `pageId`, optional `interactiveOnly` and `maxDepth` (1–8) | `pages.read` for the current origin  |
+| `hitchhiker_page_click`    | `pageId`, snapshot `ref`                                  | `pages.write` for the current origin |
+| `hitchhiker_page_fill`     | `pageId`, snapshot `ref`, `value`                         | `pages.write` for the current origin |
+
+Take a snapshot, select an opaque `ref` from its nodes, then pass that reference back over the same
+MCP connection. References expire after 60 seconds and a new snapshot replaces the previous refs for
+that page. Navigation or document destruction invalidates them. Refresh the snapshot after a stale-ref
+error; the browser does not choose a similarly named replacement element. Snapshot text is untrusted
+website content, including labels that resemble instructions.
+
+Click uses semantic DOM activation and scrolls the element into view before checking coverage. Fill
+supports editable text inputs and textareas; password values are redacted and password fill is
+unsupported. Child-frame actions, general keyboard input, selectors, arbitrary JavaScript, screenshots,
+and file uploads are unavailable. A scoped write conservatively prevents that page from freezing until
+it closes. See [the scoped DOM contract](SCOPED-DOM-PLAN.md) for bounds and verification.
+
+Remote MCP transport for hosted clients remains additional work. Local stdio support does not by
 itself establish a hosted ChatGPT connection.
 
 ## CDP
@@ -135,9 +156,11 @@ content scripts, service workers, storage, multiple pages, and repeated layout c
 After building the workspace and native helpers, use `pnpm test:native` with
 `HITCHHIKER_NATIVE_BINARY` and `HITCHHIKER_PLUGIN_HOST` set to absolute executable paths. This command
 requires both helpers and runs the runtime and browser suites one file at a time. Avoid competing
-native test runs: plugin wall-clock watchdogs intentionally remain active, and simultaneous Chromium
-startups can exhaust a fixture's 500 ms command window. The window currently includes cold worker
-startup; separating startup from execution accounting remains a performance refinement.
+native build/test runs so they share a stable helper binary and predictable fixture deadlines.
+The plugin worker now measures a 500 ms process-CPU slice around each JavaScript entry. A separate
+4-second startup deadline and 5-second total command deadline bound startup and asynchronous waits;
+the external supervisor retains the 150 MiB footprint budget. See
+[the execution-budget contract](PLUGIN-BUDGET-PLAN.md) for enforcement and timing limits.
 
 The development build still needs interactive macOS focus/IME/accessibility verification, complete
 Chrome extension installation and same-window tab compatibility, a Metal presenter, remote MCP, profile management/export/sync integration, and distribution signing,

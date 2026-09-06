@@ -11,6 +11,14 @@ const service = resolve(contents, "XPCServices/PluginBroker.xpc");
 const serviceMacOS = resolve(service, "Contents/MacOS");
 const identity = process.env.HITCHHIKER_CODESIGN_IDENTITY ?? "-";
 const testing = process.env.HITCHHIKER_PLUGIN_HOST_TESTING === "1";
+const startupTest = process.env.HITCHHIKER_PLUGIN_HOST_STARTUP_TEST;
+
+if (startupTest !== undefined && !["delay", "hang"].includes(startupTest)) {
+  throw new Error("HITCHHIKER_PLUGIN_HOST_STARTUP_TEST must be delay or hang");
+}
+if (startupTest !== undefined && !testing) {
+  throw new Error("Startup test mode requires HITCHHIKER_PLUGIN_HOST_TESTING=1");
+}
 
 const run = (command, args) => {
   const result = spawnSync(command, args, { cwd: root, encoding: "utf8", stdio: "inherit" });
@@ -48,19 +56,21 @@ const compile = (source, destination, frameworks = [], extra = []) =>
 
 compile("src/client.m", resolve(contents, "MacOS/plugin-host"), ["Foundation"]);
 compile("src/broker.m", resolve(serviceMacOS, "plugin-broker"), ["Foundation"]);
+const workerExtra = testing ? ["-DPLUGIN_HOST_TESTING=1"] : [];
+if (startupTest === "delay") workerExtra.push("-DPLUGIN_HOST_TEST_STARTUP_DELAY=1");
+if (startupTest === "hang") workerExtra.push("-DPLUGIN_HOST_TEST_STARTUP_HANG=1");
 compile(
   "src/worker.m",
   resolve(serviceMacOS, "plugin-worker"),
   ["Foundation", "JavaScriptCore"],
-  testing ? ["-DPLUGIN_HOST_TESTING=1"] : [],
+  workerExtra,
 );
-if (
-  !testing &&
-  readFileSync(resolve(serviceMacOS, "plugin-worker")).includes(
-    Buffer.from("hitchhiker-plugin-host-deny-fixture"),
-  )
-) {
-  throw new Error("Production worker contains the integration-test isolation probe");
+if (!testing) {
+  const worker = readFileSync(resolve(serviceMacOS, "plugin-worker"));
+  for (const marker of ["hitchhiker-plugin-host-deny-fixture", "plugin.testIsolation"]) {
+    if (worker.includes(Buffer.from(marker)))
+      throw new Error(`Production worker contains integration-test marker: ${marker}`);
+  }
 }
 
 const sign = (target, identifier, entitlements) => {

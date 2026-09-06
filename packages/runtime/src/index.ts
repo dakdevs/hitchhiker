@@ -13,7 +13,7 @@ export type {
 } from "./grants.ts";
 export { openCdpRelay, CdpRelayError } from "./cdp-relay.ts";
 export type { CdpRelay, CdpRelayOptions } from "./cdp-relay.ts";
-export { mcpStdioInputLimit, runMcpStdio } from "./mcp-stdio.ts";
+export { mcpStdioInputLimit, mcpStdioMaxStringIdBytes, runMcpStdio } from "./mcp-stdio.ts";
 export { McpActionError, registerBrowserMcp } from "./mcp.ts";
 export type { McpBrowserApi, McpOptions, McpPluginApi } from "./mcp.ts";
 export {
@@ -26,6 +26,23 @@ export {
   selectPageFreezes,
 } from "./page-resources.ts";
 export type { PageLifecycleTransport, PageResourceKnowledge } from "./page-resources.ts";
+export {
+  makeScopedDomSession,
+  scopedDomMcpResponseBytes,
+  scopedDomOutputLimit,
+  ScopedDomError,
+} from "./scoped-dom.ts";
+export type {
+  DomCapture,
+  DomCapturedNode,
+  DomDocumentHandle,
+  DomNodeKind,
+  PageSnapshot,
+  PageSnapshotNode,
+  ScopedDomCapability,
+  ScopedDomDriver,
+  ScopedDomSession,
+} from "./scoped-dom.ts";
 
 export { spawnPluginHost, PluginHostError } from "./plugin.ts";
 export type { PluginHostOptions } from "./plugin.ts";

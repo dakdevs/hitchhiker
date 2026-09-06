@@ -16,6 +16,7 @@ import { createPluginArtifactStore } from "./plugin-artifacts.ts";
 import { createPluginManager } from "./plugin-manager.ts";
 import { browserMcpApi } from "./mcp.ts";
 import { makeBrowserController } from "./controller.ts";
+import { makeBrowserDomDriver } from "./dom.ts";
 
 const argument = (name: string) => {
   const prefix = `${name}=`;
@@ -181,6 +182,7 @@ const program = Effect.gen(function* () {
     if (mcp) {
       const token = process.env.HITCHHIKER_MCP_TOKEN;
       if (!token) return yield* Effect.die("--mcp requires a pre-issued HITCHHIKER_MCP_TOKEN");
+      const dom = yield* makeBrowserDomDriver({ protectWrite: controller.protectDomWrite });
       yield* Effect.raceFirst(
         browserExit,
         runMcpStdio({
@@ -189,6 +191,7 @@ const program = Effect.gen(function* () {
           grants,
           browser: browserMcpApi(controller),
           plugins,
+          dom,
         }),
       );
     } else yield* browserExit;

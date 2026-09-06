@@ -191,6 +191,45 @@ test("duplicate and thirty-third active request close before excess dispatch", a
   }
 });
 
+test("oversized and unsafe JSON-RPC request IDs close before dispatch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-mcp-id-"));
+  try {
+    for (const [name, id] of [
+      ["string", "\u0000".repeat(65)],
+      ["number", Number.MAX_SAFE_INTEGER + 1],
+    ] as const) {
+      const dispatchMarker = join(directory, `${name}-dispatch`);
+      const cleanupMarker = join(directory, `${name}-cleanup`);
+      const child = spawn(process.execPath, ["--experimental-strip-types", fixture], {
+        env: {
+          ...process.env,
+          MCP_DISPATCH_MARKER: dispatchMarker,
+          MCP_FINALIZER_MARKER: cleanupMarker,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const exited = waitForExit(child);
+      const lines = await initializeRaw(child);
+      child.stdin?.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          method: "tools/call",
+          params: { name: "hitchhiker_pages_list", arguments: {} },
+        })}\n`,
+      );
+      const result = await exited;
+      lines.close();
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /request id is invalid/);
+      assert.equal(await readFile(dispatchMarker, "utf8").catch(() => ""), "");
+      assert.equal(await readFile(cleanupMarker, "utf8"), "cleaned\n");
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("thirty-two concurrent official SDK calls all progress", async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,

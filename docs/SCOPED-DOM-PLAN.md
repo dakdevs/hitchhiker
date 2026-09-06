@@ -1,7 +1,6 @@
-# Scoped DOM implementation plan
+# Scoped DOM first slice
 
-This document defines the smallest independently verifiable scoped DOM slice. It is a plan, not a
-claim that these tools are implemented. The first slice provides a bounded accessibility snapshot
+This document defines the implemented and independently verified scoped DOM slice. The first slice provides a bounded accessibility snapshot
 of the top document and opaque-reference `click` and `fill` actions. Child-frame content and general
 keyboard input remain unavailable until their target identity can be proved at the native boundary.
 
@@ -35,8 +34,7 @@ Every operation preserves these invariants:
   responses, and limit violations fail closed. A late reply cannot commit references or become the
   reply to a newer operation.
 - A write protects the page from background freezing before it can mutate the document. Protection
-  remains conservative until a later complete native resource snapshot, navigation, or close proves
-  it can be cleared.
+  remains conservative until close clears it.
 
 Chrome documents `ExecutionContextDescription.uniqueId` as system-unique across processes and
 specifically recommends `uniqueContextId` to avoid evaluating in a different context after a
@@ -48,7 +46,7 @@ document identity and origin.
 
 ## First public API
 
-Add these optional MCP tools only when the browser supplies a scoped DOM facade:
+The runtime registers these optional MCP tools only when the browser supplies a scoped DOM facade:
 
 ```text
 hitchhiker_page_snapshot { pageId, interactiveOnly?, maxDepth? }
@@ -156,13 +154,16 @@ foundation on the pinned host. It does not prove OOPIF traversal or page-global 
 The browser adapter serializes scoped DOM work per page while allowing different pages to progress.
 For a snapshot it:
 
-1. Confirms the stable page exists and activates it if sleeping. It subscribes to the page's CDP
-   events before enabling `Page`, `Runtime`, and `DOM`, so context creation or destruction cannot be
-   missed between setup calls.
+1. Confirms the stable page exists through page-scoped CDP. It subscribes synchronously to the page's
+   CDP events before enabling `Page`, `Runtime`, and `DOM`, so context creation or destruction cannot
+   be missed between setup calls.
 2. Reads `Page.getFrameTree` and captures the top frame's `frameId`, `loaderId`, and `securityOrigin`.
    It rejects an opaque or non-HTTP(S) security origin.
-3. Calls `Page.createIsolatedWorld` for the top frame with a random world name and
-   `grantUniveralAccess: false`. It accepts only the `Runtime.executionContextCreated` event whose
+3. Reuses one cached isolated world for the stable page/document, or calls
+   `Page.createIsolatedWorld` with one random driver-owned world name and
+   `grantUniveralAccess: false` when that document has no world. The 128-entry document cache is
+   bounded by the native host's page limit and clears entries on authoritative context, frame, and
+   page destruction. It accepts only the `Runtime.executionContextCreated` event whose
    numeric ID equals the command result, name equals the random name, and `auxData.frameId` equals
    the captured top frame. The event's browser-issued `uniqueId` is the authoritative context
    identity. Missing, duplicate, or contradictory events fail.
@@ -184,8 +185,8 @@ For a snapshot it:
 7. Reads `Page.getFrameTree` again, evaluates the document marker and origin through the captured
    `uniqueContextId`, checks that no relevant destruction/navigation event advanced the internal
    generation, and reauthorizes `pages.read`. Only then does it atomically replace the page's ref
-   table and publish the bounded result. One retry is allowed if the document changed; a second
-   change returns `stale_ref`/`browser_error` without partial output.
+   table and publish the bounded result. A document change returns `stale_ref`/`browser_error`
+   without partial output; callers may request a fresh snapshot.
 
 CDP's AX nodes optionally carry both `backendDOMNodeId` and `frameId`, and DOM can describe or resolve
 a backend node for automation ([Accessibility domain](https://chromedevtools.github.io/devtools-protocol/tot/Accessibility/),
@@ -212,8 +213,8 @@ checks the random marker in its own isolated global. A resolution into any repla
 that marker and fails before mutation. Every temporary object belongs to an operation-specific
 object group released in a finalizer.
 
-`click` accepts only a snapshot-created reference. Its single fixed isolated-world function checks
-that the node is connected, enabled, rendered with a nonempty box, in the captured top document, and
+`click` accepts only a snapshot-created reference. Its single fixed isolated-world function scrolls
+the exact element to the viewport center, then checks that the node is connected, enabled, rendered with a nonempty box, in the captured top document, and
 still under the center-point hit result through the composed parent/host chain. A covering node
 returns `covered`; the code never sends coordinates to a replacement document. It invokes the
 isolated realm's captured `HTMLElement.prototype.click` on that exact object in the same JavaScript
@@ -231,9 +232,10 @@ Before either fixed function runs, the controller records a bounded internal pen
 the page and activates it if necessary. The freeze selector treats that lease as protected in
 addition to native `audio`, `call`, `download`, and `unsavedInput` snapshots. A lease that reached the
 mutating call is cleared only by page close, cross-document navigation, or a complete native resource
-snapshot observed after the action. If no later signal arrives, retaining one boolean per existing
-page is a safe bounded false positive. It must not be cleared on timeout merely because the reply was
-lost.
+snapshot observed after the action. The first implementation conservatively retains that boolean
+until page close because the current native resource event has no causal sequence proving that a
+queued snapshot was produced after the mutation. It must not be cleared on timeout merely because
+the reply was lost.
 
 After the call, the adapter checks the captured generation and authorization again before returning
 website-derived details. A navigation or revocation during the request suppresses the result and
@@ -265,12 +267,10 @@ Its documented workflow refreshes refs after page changes and reports covered cl
 Hitchhiker should keep those useful behaviors while declining its stale-node retargeting and
 page-global key boundary.
 
-## Exact implementation files
+## Implementation files
 
-The first implementation packet should own these files:
+The first implementation packet is contained in these files:
 
-- `packages/core/src/index.ts`: export a canonical HTTP(S)-origin parser used by both grant parsing
-  and scoped DOM response validation. Do not change the existing full-control/CDP policy.
 - `packages/runtime/src/scoped-dom.ts` (new): exact schemas, limits, public result types,
   connection-local opaque-ref store, generation state, fixed CDP allowlist adapter interface, and
   snapshot/click/fill orchestration.
@@ -278,44 +278,62 @@ The first implementation packet should own these files:
 - `packages/runtime/src/mcp.ts`: add the three tools when `McpOptions.dom` is supplied. Create the
   session in the MCP scope and pass an origin authorizer that calls `GrantStoreApi.authorize` with
   the connection bearer for every start/final check.
+- `packages/runtime/src/mcp-stdio.ts`: bound echoed JSON-RPC string IDs to 64 UTF-8 bytes and number
+  IDs to safe integers, so an incoming ID cannot amplify a bounded snapshot response.
 - `apps/browser/src/dom.ts` (new): app-scoped adapter over `EngineConnection.request("cdp.send", ...)`
   containing only literal, fixed CDP methods and helper sources. It consumes page-specific CDP
   events, owns per-page locks/context generations, and exposes no generic send method.
 - `apps/browser/src/controller.ts`: expose trusted page existence/activation and pending-write lease
   operations under the existing controller semaphore; merge leases into freeze eligibility.
-- `apps/browser/src/mcp.ts` and `apps/browser/src/main.ts`: construct the adapter and supply it to MCP
+- `apps/browser/src/main.ts`: construct the adapter and supply it to MCP
   without exposing it to plugins or raw CDP clients.
 
 No native source is required for the top-document semantic click/fill slice if the probe below
 confirms isolated-world events and fixed methods work through current page-scoped `cdp.send`. Native
 changes for OOPIF routing or trusted key input are separate packets after their protocol is proven.
 
-## Verification files and gates
+## Verification evidence and remaining limits
 
-- `packages/runtime/test/scoped-dom.test.ts` uses a scripted narrow transport. Cover exact schemas,
-  opaque/session-local refs, one-snapshot replacement, TTL and capacity eviction, UTF-8 256 KiB
-  output, 512-node/depth/string bounds, malformed CDP values, virtual AX parents, child-frame
-  filtering, denied/non-HTTP origins, and uninterruptible Accessibility/object-group cleanup.
-- The same test injects navigation/context-destroy events before every asynchronous boundary in
-  snapshot, resolve, click, and fill. Assert no refs commit after a race, no stale fallback occurs,
-  no action reaches a replacement document, and late replies are ignored. Revoke between capture
-  and final check and assert no snapshot data or ref table is published.
-- `packages/runtime/test/mcp-dom.test.ts` and a new official-SDK fixture verify tools are absent when
-  the facade is absent; `pages.read` versus `pages.write`; exact normal-origin grants and current
-  `browser.full-control` behavior; excess-property rejection for selector/script/CDP/session fields;
-  fixed public errors; cancellation; and an encoded result no larger than 256 KiB.
-- `apps/browser/test/controller.test.ts` verifies a pending write is installed before the native
-  call, prevents freeze, survives a timeout, and clears only after a later complete native resource
-  snapshot, cross-document navigation, or close.
-- `apps/browser/test/native-dom.test.ts`, gated by `HITCHHIKER_NATIVE_BINARY`, serves two loopback
-  origins. It verifies a top-frame snapshot and semantic click/fill; hostile main-world overrides of
-  `HTMLElement.prototype.click`, input setters, and `document.elementFromPoint`; covered and detached
-  targets; navigation-stale refs leaving the new document untouched; same- and cross-origin iframe
-  content absent even when the grant lists the child origin; and page protection after fill.
-- The native test also records a diagnostic OOPIF probe: whether the current CEF observer reports an
-  independently addressable target/session and whether top-session Accessibility can query its frame.
-  Authorized child traversal remains disabled regardless of probe success until a separately reviewed
-  routing design and real same/cross-origin race suite pass.
+- `packages/runtime/test/scoped-dom.test.ts` verifies connection-local 128-bit refs, password subtree
+  redaction, parent-before-child graph ordering, virtual parents, frame-boundary filtering, duplicate/
+  cyclic/orphaned identity rejection, invalid backend IDs, TTL, page/ref capacity, conservative full
+  MCP-envelope sizing, eager invalidation, an invalidation in the final-check window, atomic failed
+  replacement, and interruption before a late capture can commit.
+- `packages/runtime/test/mcp-dom.test.ts` uses the official MCP SDK and a real persisted grant store.
+  It verifies optional tool registration, exact-object rejection of selector/backend/script inputs,
+  normal read/write and full-control grants, durable revocation at the action boundary, session-local
+  refs, password redaction, and an actual near-limit response. A raw request with a 64-byte maximally
+  escaped string ID remains within 256 KiB; 65-byte and unsafe-number IDs fail before dispatch in
+  `packages/runtime/test/mcp.test.ts`.
+- `apps/browser/test/dom.test.ts` proves an execution-context event published before the create-world
+  reply is observed by the synchronous subscription, a document reuses one world, a loader change
+  creates one replacement, transient invalid page IDs do not retain lock entries, non-HTTP origins
+  fail before AX capture, 513 ambiguous text controls fail before description or output, write
+  authorization brackets controller protection, and AX disable follows both cancellation and an
+  enable failure after dispatch.
+- `apps/browser/test/controller.test.ts` proves the write lease protects exactly its stable page from
+  freezing and leaves another eligible page freezable.
+- `packages/runtime/test/native-mcp.test.ts` runs the official MCP SDK through the real browser main
+  process and pinned CEF host. It verifies top-frame snapshot/click/fill, offscreen semantic scrolling,
+  disabled-fieldset and password rejection, password inputs with an alternate ARIA role, durable
+  revocation, 513-password fail-closed behavior, and stale refs across a 127.0.0.1 to localhost
+  cross-site navigation.
+- `apps/browser/test/native-dom.test.ts` proves page pinning, same/cross-origin child content absence,
+  isolated intrinsics under hostile main-world prototype overrides, marker invisibility from the main
+  world, and old unique-context/object rejection after navigation while a second page stays untouched.
+
+Focused verification on Node 24.19.0 passed 18 runtime unit/MCP tests and 8 browser
+controller/adapter tests. The real official-MCP native integration and pinned native isolation probe
+passed before the final race-hardening changes; a current-source native rerun remains an acceptance
+step. Child-frame
+traversal, physical pointer input, general keyboard input, contenteditable, file inputs, screenshots,
+and arbitrary selectors/JavaScript/CDP remain unavailable.
+
+Root `pnpm check` and the complete serial native lane pass after the review fixes: 74 runtime tests
+and 31 browser tests, with no native skips. The native log is `work/scoped-dom-native-final.log`.
+The rebuilt developer app also passes the official MCP DOM test after relocation outside the checkout
+to a path with spaces, alongside plugin lifecycle and safe-mode tests (3/3). Strict bundle verification
+passes. See `work/scoped-dom-bundle-native.log` and `work/scoped-dom-bundle-verify.log`.
 
 Acceptance requires unit/type/lint checks, the official MCP client suite, and the real native test on
 the packaged host. A test that proves only same-process iframes is insufficient evidence for

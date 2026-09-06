@@ -39,10 +39,10 @@ support persistent MCP installation, updates, rollback and grant revocation. Loc
 separately authorized loopback CDP relay are integrated. The relocatable arm64 developer app passes
 real plugin lifecycle and safe-mode checks. Detailed checkpoint evidence appears below.
 
-The browser is not release-ready. Scoped DOM automation, remote MCP, complete Chrome extension
+The browser is not release-ready. Full DOM automation, remote MCP, complete Chrome extension
 management/tab compatibility, profile management/export/sync, true renderer discard, Metal/motion,
 interactive accessibility/input verification, signing/notarization and updates remain. Native tests
-run serially because they enforce real wall-clock resource budgets. Codex sidebar registration remains a
+run serially for stable native helper builds and bounded fixture deadlines. Codex sidebar registration remains a
 manual app step because available project tools do not provide it.
 
 ## Starting environment (historical)
@@ -296,3 +296,31 @@ capability and component tables, event/recovery guidance, and searchable section
 TypeScript excerpts compile against the current workspace SDK. Desktop (1440 px), mobile (390 px),
 and narrow layout (720 px) checks show no document overflow or page errors; tables and code scroll
 within their own regions. A separate source/screenshot review returned `ship` with no material findings.
+
+### Scoped automation and CPU accounting integration
+
+Commit `b8ac145` publishes the expanded plugin/component docs; its GitHub Check run passed.
+This packet adds top-document MCP snapshots, semantic clicks and text filling, and
+corrects the isolated plugin watchdog to distinguish process CPU from startup/host-wait time.
+Review-driven DOM changes bound isolated-world and lock retention, fail closed on ambiguous password
+controls, validate accessibility graph identities, recheck authority immediately before mutation, and
+budget the complete MCP response including an escaped request ID. Final review also caught and fixed
+in-flight snapshot invalidation, pre-protection authorization, and accessibility cleanup after a
+dispatched enable request fails. Independent re-review accepted the resulting packet. Root
+`pnpm check` passes, and the native serial lane passes all 74 runtime and 31 browser tests with no
+skips (`work/scoped-dom-root-final.log`, `work/scoped-dom-native-final.log`). Focused evidence and
+the explicitly unsupported operations are recorded in `SCOPED-DOM-PLAN.md`.
+
+The native budget review accepted the enforcement path with no observed bypass. Seven native tests
+also cover hostile thenable/conversion and same-host startup recovery. Process-group cleanup keeps
+the worker PID reserved with `waitid(..., WNOWAIT)` until signaling finishes. The worker retains a
+500 ms process-CPU slice, the broker has separate 4-second startup and 5-second total-command bounds,
+and the existing external 150 MiB supervisor remains active. See `PLUGIN-BUDGET-PLAN.md`.
+The original-concurrency native runtime lane also passes all 74 tests without skips or a false
+startup kill (`work/plugin-budget-concurrent-final.log`, 11.4 seconds).
+The developer app was rebuilt from the finalized sources and copied to a path with spaces outside
+the checkout. Strict signature/import checks and all three actual MCP cases pass from that relocated
+bundle: scoped DOM, persistent plugin lifecycle, and corrupt-store safe mode. Evidence is in
+`work/scoped-dom-bundle-build.log`, `work/scoped-dom-bundle-verify.log`, and
+`work/scoped-dom-bundle-native.log`. It remains an ad hoc signed arm64 developer artifact; interactive
+macOS verification and release signing/notarization remain outstanding.
