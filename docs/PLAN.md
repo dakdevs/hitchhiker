@@ -150,3 +150,23 @@ plugins or MCP control. Keep raw CDP disabled until its separate grant boundary 
 
 - 2026-09-05: Verified Native input/navigation/events and multi-page persistence with a local MV3
   extension. Added reviewed close cancellation and popup draining; desktop checks remain pending.
+
+## Full implementation continuation
+
+The active user goal is to complete every accepted browser requirement and publish the repository
+to `dakdevs/hitchhiker`. Publishing the source is one deliverable and does not complete the browser.
+The public repository was created on 2026-09-05. The first remote clean check found typecheck ordering
+that local generated artifacts masked; typecheck now requires dependency builds.
+
+Current execution: introduce a private bounded JSON-lines connection between a per-profile native
+engine process and the TypeScript runtime. Web pages cannot access this connection. The runtime will
+own persistent state/grants, isolated plugin execution, public interface composition and authenticated
+MCP/CDP. Keep the host experiment runnable as a behavioral regression while promoting these paths.
+Native runtime component composition and GPU/input integration are being researched against the pinned
+source; do not replace the requested Native interface with web chrome.
+
+Completion must include: a usable default native browser; replaceable sidebar/top/custom interfaces;
+Chrome extension install/use; live plugin installation, permissions and rollback; MCP plus separately
+granted standard CDP; profile persistence/isolation; protected-page resource conservation; shared motion,
+Lucide and accessible design; accurate complete public docs; reproducible macOS packaging; and verified
+remote source/CI. Untested or proposal-only behavior does not satisfy these requirements.

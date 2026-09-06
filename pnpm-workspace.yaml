@@ -3,3 +3,4 @@ packages:
   - packages/*
 allowBuilds:
   scriptc: false
+  msgpackr-extract: false

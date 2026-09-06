@@ -10,3 +10,9 @@ native bridge to arbitrary web pages. Do not describe mock or unverified integra
 
 For cross-component or uncertain changes, update the living plan before and during execution.
 Keep checked progress grounded in behavioral verification, with unresolved work explicit.
+
+## Learning more about Effect
+
+This repository uses Effect for effectful runtime services. Before writing Effect code, read
+`node_modules/effect/AGENTS.md` completely and follow its relevant links. Search
+`node_modules/effect/src` for APIs not covered by the guide. Keep pure domain policies ordinary TypeScript.
