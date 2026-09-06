@@ -2,7 +2,21 @@ import { NodeServices } from "@effect/platform-node";
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { Context, Deferred, Effect, Layer, Option, PubSub, Queue, Schema, Stream } from "effect";
+import {
+  Context,
+  Cause,
+  Channel,
+  Deferred,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  PubSub,
+  Queue,
+  Schema,
+  Stream,
+  Take,
+} from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { FrameDecoder } from "./framing.ts";
 
@@ -65,6 +79,8 @@ export interface EngineOptions {
   readonly profileRoot: string;
   readonly extensionManagement: boolean;
   readonly requestTimeoutMs?: number;
+  /** Bounds delivery of already parsed host events when the engine exits. */
+  readonly eventDrainTimeoutMs?: number;
 }
 
 /** Trusted runtime service. Never hand this unrestricted connection to plugins. */
@@ -91,24 +107,32 @@ export class EngineConnection extends Context.Service<
       EngineConnection,
       Effect.gen(function* () {
         const requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
+        const eventDrainTimeoutMs = options.eventDrainTimeoutMs ?? 5_000;
         if (
           !isAbsolute(options.executable) ||
           !isAbsolute(options.profileRoot) ||
           typeof options.extensionManagement !== "boolean" ||
           !Number.isSafeInteger(requestTimeoutMs) ||
-          requestTimeoutMs <= 0
+          requestTimeoutMs <= 0 ||
+          !Number.isSafeInteger(eventDrainTimeoutMs) ||
+          eventDrainTimeoutMs < 50 ||
+          eventDrainTimeoutMs > 60_000
         ) {
           return yield* failure(
             "configuration",
-            "Engine paths must be absolute and timeout must be positive",
+            "Engine paths must be absolute and timeouts must be valid",
           );
         }
         const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         const outgoing = yield* Queue.bounded<Uint8Array>(64);
         const rawOutgoing = yield* Queue.bounded<Uint8Array>(4);
         const rawIncoming = yield* Queue.bounded<JsonObject>(4);
-        const events = yield* PubSub.bounded<EngineEvent>({ capacity: 16 });
-        const eventDelivery = yield* Queue.bounded<{ event: EngineEvent; bytes: number }>(64);
+        type QueuedEvent = { readonly event: EngineEvent; readonly bytes: number };
+        const eventTakes = yield* PubSub.bounded<Take.Take<EngineEvent>>({
+          capacity: 16,
+        });
+        // Queue.end closes this queue at EOF without discarding its FIFO contents.
+        const eventDelivery = yield* Queue.bounded<QueuedEvent, Cause.Done>(64);
         let eventDeliveryBytes = 0;
         const ready = yield* Deferred.make<EngineEvent, EngineError>();
         const pending = new Map<number, Deferred.Deferred<Schema.Json, EngineError>>();
@@ -118,6 +142,19 @@ export class EngineConnection extends Context.Service<
         let cdpOwner: "management" | "uncertain" | "raw" = "management";
         let extensionOperations = 0;
         let stopped: EngineError | undefined;
+        let childExitCode: number | undefined;
+        let hostFinished = false;
+        let acceptingEventSubscribers = true;
+        let eventTerminalError: EngineError | undefined;
+        let eventConsumerError: EngineError | undefined;
+        let drainCoordinatorStarted = false;
+        let nextEventSubscriber = 0;
+        const preterminalSubscribers = new Set<number>();
+        const eventDeliveryDone = yield* Deferred.make<void, EngineError>();
+        const subscribersDrained = yield* Deferred.make<void, never>();
+        const childExitObserved = yield* Deferred.make<void, never>();
+        const hostEofObserved = yield* Deferred.make<void, never>();
+        const logicalExit = yield* Deferred.make<number, EngineError>();
         const stoppedError = () => stopped;
         const environment = Object.fromEntries(
           ["HOME", "PATH", "TMPDIR", "LANG", "LC_ALL"].flatMap((name) =>
@@ -146,22 +183,137 @@ export class EngineConnection extends Context.Service<
           )
           .pipe(Effect.mapError((cause) => failure("spawn", cause)));
 
-        const stop = Effect.fn("EngineConnection.stop")(function* (error: EngineError) {
+        const stopOperations = Effect.fn("EngineConnection.stopOperations")(function* (
+          error: EngineError,
+        ) {
           if (stopped) return;
           stopped = error;
           yield* Queue.shutdown(outgoing);
           yield* Queue.shutdown(rawOutgoing);
           yield* Queue.shutdown(rawIncoming);
-          yield* Queue.shutdown(eventDelivery);
           yield* Deferred.fail(ready, error);
           for (const deferred of pending.values()) yield* Deferred.fail(deferred, error);
           pending.clear();
           for (const deferred of pendingExtension.values()) yield* Deferred.fail(deferred, error);
           pendingExtension.clear();
-          yield* PubSub.shutdown(events);
+        });
+        const completeSubscribersIfDrained = () => {
+          if (!acceptingEventSubscribers && preterminalSubscribers.size === 0)
+            return Deferred.succeed(subscribersDrained, undefined);
+          return Effect.void;
+        };
+        const onEventSubscriberExit = (subscriber: number, exit: Exit.Exit<unknown, unknown>) =>
+          Effect.sync(() => {
+            const participated = preterminalSubscribers.delete(subscriber);
+            if (
+              participated &&
+              !acceptingEventSubscribers &&
+              eventTerminalError === undefined &&
+              !Exit.isSuccess(exit) &&
+              eventConsumerError === undefined
+            )
+              eventConsumerError = failure(
+                "event-consumer-failed",
+                "An engine event consumer did not finish after the event stream ended",
+              );
+          }).pipe(Effect.andThen(() => completeSubscribersIfDrained()));
+        const trackedEvents = Stream.unwrap(
+          Effect.gen(function* () {
+            // Register a stream-scope finalizer before subscribing. The finalizer
+            // observes the consumer's outer completion (including mapEffect work),
+            // rather than merely an upstream PubSub pull completing.
+            if (!acceptingEventSubscribers) return Stream.empty;
+            const subscriber = ++nextEventSubscriber;
+            // Register before PubSub.subscribe. PubSub's own unsubscribe finalizer
+            // is registered afterwards, so scope finalization runs it first (LIFO)
+            // and only then releases this drain participant.
+            yield* Effect.addFinalizer((exit) => onEventSubscriberExit(subscriber, exit));
+            if (!acceptingEventSubscribers) return Stream.empty;
+            const subscription = yield* PubSub.subscribe(eventTakes);
+            if (!acceptingEventSubscribers) return Stream.empty;
+            // There is no effect boundary between this cutoff check and the
+            // registration, so a participant cannot miss its terminal Take.
+            preterminalSubscribers.add(subscriber);
+            return Stream.fromChannel(Channel.fromEffectTake(PubSub.take(subscription)));
+          }),
+        );
+        const startDrainCoordinator = Effect.fn("EngineConnection.startDrainCoordinator")(
+          function* () {
+            if (drainCoordinatorStarted) return;
+            drainCoordinatorStarted = true;
+            yield* Effect.gen(function* () {
+              yield* Effect.all([
+                Deferred.await(childExitObserved),
+                Deferred.await(hostEofObserved),
+              ]).pipe(
+                Effect.andThen(Deferred.await(eventDeliveryDone)),
+                Effect.andThen(Deferred.await(subscribersDrained)),
+                Effect.timeoutOrElse({
+                  duration: eventDrainTimeoutMs,
+                  orElse: () =>
+                    Effect.fail(
+                      failure(
+                        "event-drain-timeout",
+                        "Engine event delivery did not finish before the drain deadline",
+                      ),
+                    ),
+                }),
+              );
+              const code = childExitCode ?? -1;
+              if (eventTerminalError) return yield* Deferred.fail(logicalExit, eventTerminalError);
+              if (eventConsumerError) return yield* Deferred.fail(logicalExit, eventConsumerError);
+              if (code !== 0)
+                return yield* Deferred.fail(
+                  logicalExit,
+                  failure("exit", `Engine exited with code ${code}`),
+                );
+              return yield* Deferred.succeed(logicalExit, code);
+            }).pipe(
+              Effect.catch((error) =>
+                Effect.all([
+                  stopOperations(error as EngineError),
+                  Queue.shutdown(eventDelivery),
+                  PubSub.shutdown(eventTakes),
+                  child
+                    .kill({ killSignal: "SIGTERM", forceKillAfter: 100 })
+                    .pipe(Effect.catch(() => Effect.void)),
+                ]).pipe(
+                  Effect.asVoid,
+                  Effect.andThen(Deferred.fail(logicalExit, error as EngineError)),
+                ),
+              ),
+              // The scoped finalizer only stops queues. It never waits for a drain
+              // coordinator which may itself be waiting on an interrupted consumer.
+              Effect.forkScoped,
+            );
+          },
+        );
+        const finishHost = Effect.fn("EngineConnection.finishHost")(function* (
+          terminalError?: EngineError,
+        ) {
+          if (hostFinished) return;
+          hostFinished = true;
+          acceptingEventSubscribers = false;
+          if (terminalError) eventTerminalError ??= terminalError;
+          yield* completeSubscribersIfDrained();
+          if (terminalError) yield* stopOperations(terminalError);
+          else yield* stopOperations(failure("host-read-closed", "Engine host output closed"));
+          // Queue.end is FIFO and never waits for capacity. The drain deadline
+          // starts at the first child/EOF terminal observation and includes this
+          // graceful publication path.
+          yield* startDrainCoordinator();
+          yield* Deferred.succeed(hostEofObserved, undefined);
+          yield* Queue.end(eventDelivery);
         });
         yield* Effect.addFinalizer(() =>
-          Effect.uninterruptible(stop(failure("closed", "Engine connection closed"))),
+          Effect.gen(function* () {
+            const closed = failure("closed", "Engine connection closed");
+            acceptingEventSubscribers = false;
+            yield* stopOperations(closed);
+            yield* Queue.shutdown(eventDelivery);
+            yield* PubSub.shutdown(eventTakes);
+            yield* Deferred.fail(logicalExit, closed);
+          }).pipe(Effect.uninterruptible),
         );
 
         const readFrames = <E>(
@@ -191,9 +343,16 @@ export class EngineConnection extends Context.Service<
         };
         // A subscriber may await a host command while consuming an event. Keep
         // delivery separate so that subscriber cannot block the command's reply.
+        // Queue.end drains every parsed event before this worker publishes the
+        // terminal Take to current subscribers.
         yield* Stream.fromQueue(eventDelivery).pipe(
           Stream.runForEach(({ event, bytes }) =>
-            PubSub.publish(events, event).pipe(
+            PubSub.publish(eventTakes, [event]).pipe(
+              Effect.flatMap((accepted) =>
+                accepted
+                  ? Effect.void
+                  : Effect.fail(failure("event-delivery", "Engine event stream was closed")),
+              ),
               Effect.ensuring(
                 Effect.sync(() => {
                   eventDeliveryBytes -= bytes;
@@ -201,6 +360,14 @@ export class EngineConnection extends Context.Service<
               ),
             ),
           ),
+          Effect.andThen(PubSub.publish(eventTakes, Exit.succeed(undefined))),
+          Effect.andThen(
+            Effect.void.pipe(
+              Effect.andThen(completeSubscribersIfDrained()),
+              Effect.andThen(Deferred.succeed(eventDeliveryDone, undefined)),
+            ),
+          ),
+          Effect.catch((error) => Deferred.fail(eventDeliveryDone, error)),
           Effect.forkScoped,
         );
         yield* readFrames(child.stdout, 10, 8 * 1024 * 1024).pipe(
@@ -218,11 +385,9 @@ export class EngineConnection extends Context.Service<
                   eventDeliveryBytes + bytes > 8 * 1024 * 1024 ||
                   !Queue.offerUnsafe(eventDelivery, { event: message, bytes })
                 ) {
-                  return yield* stop(
-                    failure(
-                      "event-capacity",
-                      "Engine event consumer exceeded its bounded delivery queue",
-                    ),
+                  return yield* failure(
+                    "event-capacity",
+                    "Engine event consumer exceeded its bounded delivery queue",
                   );
                 }
                 eventDeliveryBytes += bytes;
@@ -241,15 +406,15 @@ export class EngineConnection extends Context.Service<
               else yield* Deferred.succeed(deferred, message.result);
             }),
           ),
-          Effect.catch(stop),
-          Effect.ensuring(stop(failure("host-read-closed", "Engine host output closed"))),
+          Effect.tap(() => finishHost()),
+          Effect.catch((error) => finishHost(error)),
           Effect.forkScoped,
         );
         yield* Stream.fromQueue(rawOutgoing).pipe(
           Stream.run(child.getInputFd(3)),
           Effect.mapError((cause) => failure("cdp-write", cause)),
-          Effect.catch(stop),
-          Effect.ensuring(stop(failure("cdp-write-closed", "CDP input pipe closed"))),
+          Effect.catch(stopOperations),
+          Effect.ensuring(stopOperations(failure("cdp-write-closed", "CDP input pipe closed"))),
           Effect.forkScoped,
         );
         yield* readFrames(child.getOutputFd(4), 0, 32 * 1024 * 1024).pipe(
@@ -272,14 +437,35 @@ export class EngineConnection extends Context.Service<
               if (cdpOwner === "raw") yield* Queue.offer(rawIncoming, message);
             }),
           ),
-          Effect.catch(stop),
-          Effect.ensuring(stop(failure("cdp-read-closed", "CDP output pipe closed"))),
+          Effect.catch(stopOperations),
+          // CDP can close before stdout. Keep parsing the host pipe so its
+          // already-buffered events can still reach existing subscribers.
+          Effect.ensuring(stopOperations(failure("cdp-read-closed", "CDP output pipe closed"))),
           Effect.forkScoped,
         );
-        const exit = child.exitCode.pipe(Effect.mapError((cause) => failure("exit", cause)));
-        yield* exit.pipe(
-          Effect.flatMap((code) => stop(failure("exit", `Engine exited with code ${code}`))),
-          Effect.catch(stop),
+        const childExit = child.exitCode.pipe(Effect.mapError((cause) => failure("exit", cause)));
+        yield* childExit.pipe(
+          Effect.tap((code) =>
+            Effect.gen(function* () {
+              childExitCode = code;
+              acceptingEventSubscribers = false;
+              yield* completeSubscribersIfDrained();
+              yield* Deferred.succeed(childExitObserved, undefined);
+              yield* stopOperations(failure("exit", `Engine exited with code ${code}`));
+              yield* startDrainCoordinator();
+            }),
+          ),
+          Effect.catch((error) =>
+            Effect.gen(function* () {
+              childExitCode = -1;
+              acceptingEventSubscribers = false;
+              eventTerminalError ??= error;
+              yield* completeSubscribersIfDrained();
+              yield* Deferred.succeed(childExitObserved, undefined);
+              yield* stopOperations(error);
+              yield* startDrainCoordinator();
+            }),
+          ),
           Effect.forkScoped,
         );
 
@@ -527,8 +713,8 @@ export class EngineConnection extends Context.Service<
               orElse: () => Effect.fail(failure("startup", "Engine did not become ready")),
             }),
           ),
-          exit,
-          events: Stream.fromPubSub(events),
+          exit: Deferred.await(logicalExit),
+          events: trackedEvents,
           request,
           loadUnpacked,
           uninstall,

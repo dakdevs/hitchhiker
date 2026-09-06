@@ -357,3 +357,26 @@ queued tail events under adverse scheduling, despite normal native restart tests
 the real Chromium discard experiment in `DISCARD-PLAN.md`; a Chrome-runtime extension route is plausible
 but not verified. Do not describe reversible freezing as actual RAM discard or substitute URL-only
 recreation for Chromium session-preserving discard without a product decision.
+
+Commit `6385f23` publishes the extension/session checkpoint; GitHub Check `34050783603` passed.
+Current work follows `ENGINE-DRAIN-PLAN.md` to close the buffered-tail delivery gap, while a separate
+disposable native experiment evaluates the Chrome `tabs.discard` route from `DISCARD-PLAN.md`.
+
+The corrected discard experiment now passes three repeated disposable native runs. Chromium replaces
+its tab/CDP identities while retaining the Hitchhiker page ID and releasing one renderer; measured
+renderer RSS falls by about 322 MiB in the synthetic fixture. Explicit reload preserves the tested
+history URLs/index, cookie and extension storage. Selection alone remains blank, so automatic discard
+is not yet integrated. `DISCARD-PLAN.md` records the evidence and limitations; host lifecycle mapping
+is the next step while runtime shutdown draining is implemented independently.
+
+### Ordered engine shutdown
+
+`EngineConnection` now rejects operations promptly while draining parsed host events in FIFO order.
+Logical exit waits for direct consumer scopes, including controller session writes, under one bounded
+deadline. Failed/interrupted handlers prevent success; timeout cleanup terminates the owned child,
+and forced layer closure settles a captured exit effect. Independent re-review accepted the change.
+Root `pnpm check` and all 153 native tests (89 runtime, 64 browser, no skips) pass. The contract and
+asynchronous-stream handoff limits are recorded in `ENGINE-DRAIN-PLAN.md`. The developer app was
+rebuilt and relocated outside the checkout; strict signature/import checks and all four actual bundle
+integration cases pass. Evidence is in `work/engine-drain-bundle-{build,verify,native}.log`. Release
+signing/notarization and interactive macOS checks remain outstanding.

@@ -36,8 +36,16 @@ stdin/stdout; browser-root CDP uses NUL-delimited JSON on inherited descriptors 
 opens no TCP debugging port. Web pages receive neither channel.
 
 Input frames, outstanding requests and queues are bounded. Malformed data, a critical pipe ending or
-engine exit stops the logical connection, fails pending requests and ends its event streams. Scope
-teardown closes the child resources. Keep this unrestricted service inside the trusted broker.
+engine exit rejects new operations and fails pending requests immediately. Host stdout drains through
+a FIFO queue before its event stream ends. Logical `engine.exit` waits for child exit, host EOF,
+queued delivery and active direct consumer scopes. Its default five-second drain deadline is
+configurable with `eventDrainTimeoutMs` (50–60,000 ms); an unfinished drain fails explicitly.
+
+Keep shutdown-critical persistence in a direct sequential `engine.events` consumer. Work after an
+asynchronous `merge` or buffering handoff, and detached fibers, is outside the upstream consumer-scope
+guarantee. A direct handler that fails or is interrupted after shutdown begins prevents successful
+logical exit. Scope teardown closes child resources. Keep this unrestricted service inside the trusted
+broker. See [the shutdown contract and verification plan](ENGINE-DRAIN-PLAN.md).
 
 ## Native composition
 

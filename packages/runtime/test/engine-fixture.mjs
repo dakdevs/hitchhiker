@@ -21,6 +21,23 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     for (let index = 0; index < 40; index++) send({ event: "fixture.event", params: { index } });
     return send({ id, result: {} });
   }
+  if (method === "burst-exit") {
+    for (let index = 0; index < 40; index++) send({ event: "fixture.event", params: { index } });
+    return process.stdout.write("", () => process.exit(0));
+  }
+  if (method === "close-cdp-burst-exit") {
+    closeSync(4);
+    for (let index = 0; index < 4; index++) send({ event: "fixture.event", params: { index } });
+    return process.stdout.write("", () => process.exit(0));
+  }
+  if (method === "exit-one") return process.exit(1);
+  if (method === "partial-exit")
+    return process.stdout.write('{"event":"fixture.partial"', () => process.exit(0));
+  if (method === "close-stdout-hang") {
+    process.on("SIGTERM", () => {});
+    closeSync(1);
+    return setInterval(() => {}, 1_000);
+  }
   if (method === "malformed") return process.stdout.write("{broken}\n");
   if (method === "close-cdp") {
     send({ id, result: {} });

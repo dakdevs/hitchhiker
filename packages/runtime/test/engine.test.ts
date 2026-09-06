@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { Effect, Fiber, Schema, Scope, Stream } from "effect";
+import { Deferred, Effect, Fiber, Schema, Scope, Stream } from "effect";
 import { EngineConnection } from "../src/engine.ts";
 import { FrameDecoder } from "../src/framing.ts";
 
@@ -217,6 +217,299 @@ test("event consumers can await host replies during a burst without blocking the
       yield* engine.request("burst");
       assert.equal((yield* Fiber.join(consumer).pipe(Effect.timeout(2000))).length, 40);
     }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+const withDrainEngine = async (
+  eventDrainTimeoutMs: number,
+  run: (engine: EngineConnection["Service"]) => Effect.Effect<void, unknown, Scope.Scope>,
+): Promise<void> => {
+  const program = Effect.gen(function* () {
+    const engine = yield* EngineConnection;
+    yield* engine.ready;
+    yield* run(engine);
+  }).pipe(
+    Effect.provide(
+      EngineConnection.layer({
+        executable: fixture,
+        profileRoot: "/tmp/hitchhiker-event-drain-fixture",
+        extensionManagement: false,
+        requestTimeoutMs: 150,
+        eventDrainTimeoutMs,
+      }),
+    ),
+    Effect.scoped,
+  );
+  return Effect.runPromise(program);
+};
+
+const awaitChildProcessExit = (pid: number) =>
+  Effect.tryPromise({
+    try: async () => {
+      const deadline = Date.now() + 2_000;
+      for (;;) {
+        try {
+          process.kill(pid, 0);
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code === "ESRCH") return;
+          throw cause;
+        }
+        if (Date.now() >= deadline) throw new Error("fixture child did not exit");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    },
+    catch: (cause) => cause,
+  });
+
+test("logical exit waits for ordered delivery and the final awaited handler", async () => {
+  await withDrainEngine(1_000, (engine) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const finalEntered = yield* Deferred.make<void>();
+      const finalRelease = yield* Deferred.make<void>();
+      const received: number[] = [];
+      let finalWriteFinished = false;
+      const consumer = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "fixture.event"),
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            const index = event.params.index;
+            assert.ok(typeof index === "number");
+            if (index === 0) {
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+            }
+            received.push(index);
+            if (index === 39) {
+              yield* Deferred.succeed(finalEntered, undefined);
+              yield* Deferred.await(finalRelease);
+              finalWriteFinished = true;
+            }
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      yield* engine.request("burst-exit").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(entered);
+      yield* awaitChildProcessExit(engine.pid);
+      const exiting = yield* engine.exit.pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      assert.equal(exiting.pollUnsafe(), undefined);
+      yield* Deferred.succeed(release, undefined);
+      yield* Deferred.await(finalEntered);
+      assert.deepEqual(
+        received,
+        Array.from({ length: 40 }, (_, index) => index),
+      );
+      assert.equal(exiting.pollUnsafe(), undefined);
+      assert.equal(finalWriteFinished, false);
+      yield* Deferred.succeed(finalRelease, undefined);
+      assert.equal(yield* Fiber.join(exiting), 0);
+      assert.equal(finalWriteFinished, true);
+      yield* Fiber.join(consumer);
+    }),
+  );
+});
+
+test("closing the layer settles a captured logical exit and terminates the child", async () => {
+  const engine = await Effect.runPromise(
+    Effect.gen(function* () {
+      const connection = yield* EngineConnection;
+      yield* connection.ready;
+      return connection;
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  const error = await Effect.runPromise(engine.exit.pipe(Effect.flip, Effect.timeout(1_000)));
+  assert.equal(error.code, "closed");
+  await Effect.runPromise(awaitChildProcessExit(engine.pid));
+  assert.deepEqual(
+    await Effect.runPromise(engine.events.pipe(Stream.runCollect, Effect.timeout(1_000))),
+    [],
+  );
+});
+
+test("early and late event subscriptions do not hold graceful shutdown", async () => {
+  await withDrainEngine(1_000, (engine) =>
+    Effect.gen(function* () {
+      const early = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "fixture.event"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      yield* engine.request("burst-exit").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      assert.equal((yield* Fiber.join(early)).length, 1);
+      assert.equal(yield* engine.exit, 0);
+      assert.deepEqual(yield* engine.events.pipe(Stream.runCollect), []);
+    }),
+  );
+});
+
+test("a stuck direct subscriber after child exit is bounded", async () => {
+  await withDrainEngine(50, (engine) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const never = yield* Deferred.make<void>();
+      yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "fixture.event"),
+        Stream.mapEffect((event) =>
+          event.params.index === 0
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(never)))
+            : Effect.void,
+        ),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      yield* engine.request("burst-exit").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(entered);
+      yield* awaitChildProcessExit(engine.pid);
+      assert.equal((yield* engine.exit.pipe(Effect.flip)).code, "event-drain-timeout");
+    }),
+  );
+});
+
+test("a failed direct subscriber after child exit is reported", async () => {
+  await withDrainEngine(1_000, (engine) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const consumer = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "fixture.event"),
+        Stream.runForEach((event) =>
+          event.params.index === 0
+            ? Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(Effect.fail(new Error("consumer failed"))),
+              )
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      yield* engine.request("burst-exit").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(entered);
+      yield* awaitChildProcessExit(engine.pid);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.await(consumer);
+      assert.equal((yield* engine.exit.pipe(Effect.flip)).code, "event-consumer-failed");
+    }),
+  );
+});
+
+test("an interrupted direct subscriber after child exit is reported", async () => {
+  await withDrainEngine(1_000, (engine) =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const never = yield* Deferred.make<void>();
+      const consumer = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "fixture.event"),
+        Stream.runForEach((event) =>
+          event.params.index === 0
+            ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(never)))
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      yield* engine.request("burst-exit").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(entered);
+      yield* awaitChildProcessExit(engine.pid);
+      yield* Fiber.interrupt(consumer);
+      assert.equal((yield* engine.exit.pipe(Effect.flip)).code, "event-consumer-failed");
+    }),
+  );
+});
+
+test("an unrelated merged branch does not keep the finished engine branch registered", async () => {
+  await withDrainEngine(1_000, (engine) =>
+    Effect.gen(function* () {
+      const merged = yield* Stream.merge(
+        engine.events.pipe(Stream.filter((event) => event.event === "fixture.event")),
+        Stream.never,
+      ).pipe(Stream.runDrain, Effect.forkScoped);
+      yield* Effect.yieldNow;
+      yield* engine.request("burst-exit").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      assert.equal(yield* engine.exit, 0);
+      yield* Fiber.interrupt(merged);
+    }),
+  );
+});
+
+test("CDP EOF does not drop host events which are already draining to a subscriber", async () => {
+  await withDrainEngine(1_000, (engine) =>
+    Effect.gen(function* () {
+      const received = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "fixture.event"),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      yield* engine.request("close-cdp-burst-exit").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      assert.deepEqual(
+        (yield* Fiber.join(received)).map((event) => event.params.index),
+        [0, 1, 2, 3],
+      );
+      assert.equal(yield* engine.exit, 0);
+    }),
+  );
+});
+
+test("nonzero child exits and incomplete host frames cannot report successful logical exit", async () => {
+  await withDrainEngine(1_000, (engine) =>
+    Effect.gen(function* () {
+      yield* engine.request("exit-one").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      assert.equal((yield* engine.exit.pipe(Effect.flip)).code, "exit");
+    }),
+  );
+  await withDrainEngine(1_000, (engine) =>
+    Effect.gen(function* () {
+      yield* engine.request("partial-exit").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      assert.equal((yield* engine.exit.pipe(Effect.flip)).code, "framing");
+    }),
+  );
+});
+
+test("a child that keeps running after host stdout closes is terminated after the drain deadline", async () => {
+  await withDrainEngine(50, (engine) =>
+    Effect.gen(function* () {
+      yield* engine.request("close-stdout-hang").pipe(
+        Effect.catch(() => Effect.void),
+        Effect.forkScoped,
+      );
+      assert.equal((yield* engine.exit.pipe(Effect.flip)).code, "event-drain-timeout");
+      yield* awaitChildProcessExit(engine.pid);
+    }),
   );
 });
 
