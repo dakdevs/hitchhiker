@@ -25,7 +25,7 @@ const PluginList = Schema.Array(
 );
 
 test(
-  "real MCP installs, updates, rolls back and restores a native plugin without losing pages",
+  "real MCP installs, updates, restores and removes a native plugin without losing pages",
   {
     skip: !binary || !pluginHost,
     timeout: 60_000,
@@ -150,6 +150,26 @@ test(
         { id: "canvas-example", version: "1.0.0", enabled: true, running: true },
       ]);
       assert(JSON.stringify(await session.call("hitchhiker_pages_list")).includes(String(pageId)));
+      assert.deepEqual(await session.call("hitchhiker_plugin_uninstall", { id: manifest.id }), {
+        uninstalled: true,
+        artifactsRetained: true,
+      });
+      assert.deepEqual(await session.list(), []);
+      const revisionGrants = await Effect.runPromise(
+        Effect.gen(function* () {
+          const grants = yield* create({ directory: join(profile, "hitchhiker-grants") });
+          return (yield* grants.list()).filter((grant) => grant.principal === manifest.id);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+      assert.equal(revisionGrants.length, 2);
+      assert(revisionGrants.every((grant) => grant.revokedAt !== undefined));
+      await session.transport.close();
+      session = undefined;
+      session = await connect();
+      assert.deepEqual(await session.list(), []);
+      assert(JSON.stringify(await session.call("hitchhiker_pages_list")).includes(String(pageId)));
+      await session.call("hitchhiker_plugin_install", { manifest, code });
+      assert.equal((await session.list())[0]?.running, true);
       await Effect.runPromise(
         Effect.gen(function* () {
           const grants = yield* create({ directory: join(profile, "hitchhiker-grants") });

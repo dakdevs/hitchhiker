@@ -106,6 +106,7 @@ test("plugin tools are optional and every action requires plugins.install", asyn
         "hitchhiker_plugin_enable",
         "hitchhiker_plugin_disable",
         "hitchhiker_plugin_rollback",
+        "hitchhiker_plugin_uninstall",
       ])
         assert.ok(
           tools.tools.some((tool) => tool.name === name),
@@ -116,6 +117,7 @@ test("plugin tools are optional and every action requires plugins.install", asyn
         ["hitchhiker_plugin_enable", { id: "managed-plugin" }],
         ["hitchhiker_plugin_disable", { id: "managed-plugin" }],
         ["hitchhiker_plugin_rollback", { id: "managed-plugin" }],
+        ["hitchhiker_plugin_uninstall", { id: "managed-plugin" }],
         [
           "hitchhiker_plugin_install",
           { manifest: manifest(), code: "globalThis.HitchhikerPlugin={activate(){}}" },
@@ -300,3 +302,53 @@ for (const mode of ["fail", "never"] as const) {
     }
   });
 }
+
+test("uninstall validates its ID, dispatches once, and observes durable grant revocation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hitchhiker-mcp-uninstall-"));
+  try {
+    const directory = join(root, "grants");
+    const marker = join(root, "marker");
+    const issued = await provision(directory, ["plugins.install"]);
+    const connection = await connect(directory, issued.token, marker);
+    try {
+      for (const args of [
+        { id: "../escape" },
+        { id: "managed-plugin", grantId: issued.grant.id },
+        { id: "managed-plugin", path: "/tmp/plugin" },
+      ]) {
+        await expectToolError(
+          connection.client.callTool({ name: "hitchhiker_plugin_uninstall", arguments: args }),
+        );
+      }
+      assert.deepEqual(await readRecords(marker), []);
+      const result = await connection.client.callTool({
+        name: "hitchhiker_plugin_uninstall",
+        arguments: { id: "managed-plugin" },
+      });
+      assert.equal(result.isError, false);
+      assert.deepEqual(result.structuredContent, {
+        result: { uninstalled: true, artifactsRetained: true },
+      });
+      assert.deepEqual(await readRecords(marker), [
+        { operation: "uninstall", id: "managed-plugin" },
+      ]);
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const grants = yield* create({ directory });
+          yield* grants.revoke(issued.grant.id);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+      await expectToolError(
+        connection.client.callTool({
+          name: "hitchhiker_plugin_uninstall",
+          arguments: { id: "managed-plugin" },
+        }),
+      );
+      assert.equal((await readRecords(marker)).length, 1);
+    } finally {
+      await connection.transport.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

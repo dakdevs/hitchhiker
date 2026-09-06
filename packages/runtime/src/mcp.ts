@@ -58,6 +58,7 @@ export interface McpPluginApi {
   readonly list: () => Effect.Effect<unknown, unknown>;
   readonly enable: (id: string) => Effect.Effect<void, unknown>;
   readonly disable: (id: string) => Effect.Effect<void, unknown>;
+  readonly uninstall: (id: string) => Effect.Effect<void, unknown>;
   readonly rollback: (id: string) => Effect.Effect<void, unknown>;
   readonly requirements?: () => Effect.Effect<CustomizationRecipe["plugins"], unknown>;
 }
@@ -167,6 +168,15 @@ const pluginTools = Toolkit.make(
       failure: McpActionError,
     }),
   ),
+  Tool.make("hitchhiker_plugin_uninstall", {
+    description:
+      "Stop and remove an installed Hitchhiker plugin and revoke its current and rollback grants. Pages remain open. Compiled artifacts remain cached; this does not revoke historical grants no longer referenced by the installation.",
+    parameters: Schema.Struct({ id: PluginId }).annotate({
+      parseOptions: { onExcessProperty: "error" },
+    }),
+    success: Result,
+    failure: McpActionError,
+  }),
 );
 
 const Ref = Schema.String.check(Schema.isMaxLength(64));
@@ -382,6 +392,10 @@ export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (opt
         installed(plugins.enable(id).pipe(Effect.as({ enabled: true }))),
       hitchhiker_plugin_disable: ({ id }) =>
         installed(plugins.disable(id).pipe(Effect.as({ enabled: false }))),
+      hitchhiker_plugin_uninstall: ({ id }) =>
+        installed(
+          plugins.uninstall(id).pipe(Effect.as({ uninstalled: true, artifactsRetained: true })),
+        ),
       hitchhiker_plugin_rollback: ({ id }) =>
         installed(plugins.rollback(id).pipe(Effect.as({ restored: true }))),
     });

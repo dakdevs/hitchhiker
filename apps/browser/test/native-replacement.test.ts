@@ -315,9 +315,13 @@ test(
                 const selected = (yield* engine
                   .request("pages.list")
                   .pipe(Effect.flatMap(decodePages))).find((page) => page.id === target);
-                assert.equal(selected?.mainDocumentCommitted, false);
-                // Portable controller tests assert no reload command is issued by
-                // selection. Here an explicit command restores the real history.
+                assert.equal(selected?.generation, cycle + 1);
+                assert.equal(selected?.url, urls[2]);
+                assert.equal((yield* controller.snapshot).viewports[0]?.pageId, target);
+                // Showing a discarded Chrome window may start restoration before
+                // this query. The portable controller test checks that Hitchhiker
+                // does not itself issue a reload merely because it was replaced.
+                // Explicit reload must still preserve the retained history.
                 yield* controller.dispatch("browser.reload");
                 yield* waitUntil(
                   "explicit reload restores original document",

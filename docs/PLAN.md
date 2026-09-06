@@ -503,3 +503,24 @@ debugger protection after freezing or inspection. The source draft now includes 
 operation for CEF's own client rather than weakening that protection. Native pending-call drainage,
 observer/cache reset, rejection recovery and external-debugger preservation must be verified before
 automatic discard is enabled.
+
+The source draft is published as `e8df6ae`; GitHub Check `34066931763` passed. Full Chromium build
+storage remains pending. Independent application work continues with trusted plugin removal through
+MCP and native recovery controls. See [PLUGIN-REMOVAL-PLAN.md](PLUGIN-REMOVAL-PLAN.md) for durability,
+grant boundaries, retained artifact cache and required behavioral checks.
+
+Plugin removal is implemented and independently reviewed. Portable checks and all 188 native-enabled
+runtime/browser tests pass without skips. Real MCP removes a compiled canvas plugin, revokes both
+revision grants, preserves the page across restart, and accepts an explicit reinstall with fresh
+authority. Eleven new manager regressions cover grant ownership, cancellation and partial failure.
+All eleven relocated developer-bundle checks pass without skips, with strict signature/import
+verification. The first bundle run exposed a replacement-fixture assumption that a shown discarded
+page could not yet have restored; Chromium can restore it on visibility/focus. The corrected test
+checks identity/history instead, while portable tests still prohibit a Hitchhiker reload caused only
+by replacement. Production replacement behavior is unchanged. Evidence is recorded in the removal plan.
+
+The user requested a compact macOS window header matching the supplied Codex screenshot: native
+traffic lights followed by sidebar, back and forward icons, with content reaching the top edge and no
+separate titlebar strip. Preserve standard window controls, dragging, resizing and fullscreen, and
+keep the header/layout replaceable through public framework building blocks. This is the next native
+interface change; it must not alter Chromium's page renderer or extension runtime.

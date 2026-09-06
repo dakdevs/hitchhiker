@@ -72,6 +72,7 @@ export interface PluginManager {
   readonly install: (hash: string, grantId: string) => Effect.Effect<void, PluginManagerError>;
   readonly enable: (id: string) => Effect.Effect<void, PluginManagerError>;
   readonly disable: (id: string) => Effect.Effect<void, PluginManagerError>;
+  readonly uninstall: (id: string) => Effect.Effect<void, PluginManagerError>;
   readonly rollback: (id: string) => Effect.Effect<void, PluginManagerError>;
   readonly restore: () => Effect.Effect<void, PluginManagerError>;
 }
@@ -691,6 +692,40 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         );
       }),
     );
+  const uninstall = (id: string) =>
+    withMutationLock(
+      Effect.gen(function* () {
+        const registry = yield* load();
+        const plugin = registry.plugins.find((entry) => entry.id === id);
+        if (!plugin) return yield* failure("Plugin is not installed");
+        const grantIds = new Set([
+          plugin.revision.grantId,
+          ...(plugin.previous ? [plugin.previous.grantId] : []),
+        ]);
+        const grants = yield* options.grants
+          .list()
+          .pipe(Effect.mapError(() => failure("Could not inspect plugin grants")));
+        const owned = grants.filter((grant) => grantIds.has(grant.id));
+        if (owned.some((grant) => grant.principal !== id || grant.profileId !== profileId))
+          return yield* failure("Plugin revision grant does not belong to this plugin and profile");
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            yield* stop(id);
+            // Retain revision grant IDs in disabled state until revocation succeeds.
+            yield* put(registry, { ...plugin, enabled: false, starting: false });
+            for (const grant of owned) {
+              yield* options.grants
+                .revoke(grant.id)
+                .pipe(Effect.mapError(() => failure("Could not revoke removed plugin grants")));
+            }
+            yield* save({
+              version: 1,
+              plugins: registry.plugins.filter((entry) => entry.id !== id),
+            });
+          }).pipe(Effect.tapError(() => poisonMutation)),
+        );
+      }),
+    );
   const rollback = (id: string) =>
     withMutationLock(
       Effect.gen(function* () {
@@ -721,5 +756,5 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         );
       }),
     );
-  return { list, install, enable, disable, rollback, restore } satisfies PluginManager;
+  return { list, install, enable, disable, uninstall, rollback, restore } satisfies PluginManager;
 });

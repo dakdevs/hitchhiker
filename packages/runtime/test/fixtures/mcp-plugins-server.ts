@@ -44,6 +44,7 @@ const program = Effect.gen(function* () {
             ),
           enable: (id: string) => record({ operation: "enable", id }),
           disable: (id: string) => record({ operation: "disable", id }),
+          uninstall: (id: string) => record({ operation: "uninstall", id }),
           rollback: (id: string) => record({ operation: "rollback", id }),
         };
   yield* runMcpStdio({

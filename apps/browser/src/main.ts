@@ -153,6 +153,7 @@ const program = Effect.gen(function* () {
         list: manager.list,
         enable: manager.enable,
         disable: manager.disable,
+        uninstall: manager.uninstall,
         rollback: manager.rollback,
         requirements: () =>
           manager.list().pipe(

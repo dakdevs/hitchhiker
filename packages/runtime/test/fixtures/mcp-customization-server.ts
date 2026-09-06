@@ -60,6 +60,7 @@ const program = Effect.gen(function* () {
       list: () => record("list").pipe(Effect.as([])),
       enable: () => record("enable"),
       disable: () => record("disable"),
+      uninstall: () => record("uninstall"),
       rollback: () => record("rollback"),
       ...(process.env.MCP_CUSTOMIZATION_REQUIREMENTS === "none"
         ? {}

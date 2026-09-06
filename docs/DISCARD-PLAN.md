@@ -80,7 +80,10 @@ resource protections remain unverified by this experiment.
 Generic browser replacement is now implemented in [REPLACEMENT-PLAN.md](REPLACEMENT-PLAN.md): stable
 logical pages, cached display metadata, generation-fenced CEF/CDP work, conservative resource state
 and stale DOM reference rejection. Explicit Reload restores Chromium's retained navigation controller.
-Replacement does not itself prove discard, so selection does not automatically reload a replacement.
+Replacement does not itself prove discard, so Hitchhiker does not issue a reload command merely
+because a replacement is selected. Chromium may independently restore a discarded page when its
+window becomes visible or focused. The native fixture therefore checks preserved identity and history
+after selection, not that the document remains uncommitted at the next asynchronous query.
 
 Next, positively classify a discarded page against its current generation before adding automatic
 restoration. Automatic discard additionally requires protection checks at the native mutation point:

@@ -131,8 +131,12 @@ its installed descendants. Delegation never includes raw CDP. The private plugin
 artifact hashes and grant IDs, not bearer tokens, and is separate from portable configuration.
 
 `hitchhiker_plugins_list` returns installation and running status. Use `hitchhiker_plugin_enable`,
-`hitchhiker_plugin_disable`, or `hitchhiker_plugin_rollback` with an `id`. The default interface's
-Plugins screen exposes the same enable/disable/rollback controls. Permission grants are still issued
+`hitchhiker_plugin_disable`, `hitchhiker_plugin_rollback`, or `hitchhiker_plugin_uninstall` with an `id`.
+The default interface's Plugins screen exposes the same controls, including **Remove**. Removal stops
+the worker, revokes its current and rollback grants, and forgets its installation. Pages stay open;
+compiled artifacts remain in the bounded cache. Historical grants no longer referenced by an
+installation are not revoked. A failed removal may leave a disabled entry; restart before retrying
+if the manager reports a persistence or revocation failure. Permission grants are still issued
 through the trusted CLI; a graphical permission editor remains unfinished.
 
 Each update starts a fresh isolated worker, waits for activation and a short health interval, and

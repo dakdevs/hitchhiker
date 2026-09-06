@@ -230,20 +230,23 @@ test("filters non-page engine feedback, selects a successor, and persists the cu
                 running: false,
               },
             ],
-            () =>
+            (operation, id) =>
               Effect.sync(() => {
+                assert.equal(operation, "uninstall");
+                assert.equal(id, "pending-plugin");
                 pluginCalls++;
               }).pipe(Effect.andThen(Deferred.await(releaseActivation))),
           );
           yield* controller.dispatch("interface.plugins");
-          yield* controller.dispatch("plugins.enable.pending-plugin").pipe(Effect.timeout(500));
+          assert(JSON.stringify(committed.at(-1)).includes("plugins.uninstall.pending-plugin"));
+          yield* controller.dispatch("plugins.uninstall.pending-plugin").pipe(Effect.timeout(500));
           yield* Effect.yieldNow;
-          yield* controller.dispatch("plugins.enable.pending-plugin");
-          assert.equal(pluginCalls, 1, "duplicate clicks must not enqueue additional activations");
+          yield* controller.dispatch("plugins.uninstall.pending-plugin");
+          assert.equal(pluginCalls, 1, "duplicate clicks must not enqueue additional removals");
           yield* controller.dispatch("screen.browser").pipe(Effect.timeout(500));
           assert(
             JSON.stringify(committed.at(-1)).includes("main-page"),
-            "browsing remains responsive while a plugin starts",
+            "browsing remains responsive while a plugin stops",
           );
           yield* Deferred.succeed(releaseActivation, undefined);
         }),

@@ -120,7 +120,11 @@ failure closes the relay. A new principal must not inherit an old client's retai
 the application-level lease/restart policy remains to be integrated.
 
 The local MCP launcher and isolated plugin runtime are described in [DEVELOPMENT.md](DEVELOPMENT.md).
-Persistent compiled plugin installation, updates, rollback and restart restoration are integrated.
+Persistent compiled plugin installation, updates, rollback, removal and restart restoration are integrated.
+`hitchhiker_plugin_uninstall` requires `plugins.install`, stops the worker, revokes the current and
+rollback revision grants, and removes its registry entry. Removal retains pages and cached artifacts.
+The native Plugins screen exposes the same operation as **Remove**. See
+[PLUGIN-REMOVAL-PLAN.md](PLUGIN-REMOVAL-PLAN.md) for partial-failure and cancellation behavior.
 The optional plugin MCP tools delegate authority from the connection grant and cannot grant raw CDP.
 Portable customization recipes combine engine settings, default tab placement and optional plugin
 requirements. `hitchhiker_customization_export` takes optional `includePlugins` (default false) and

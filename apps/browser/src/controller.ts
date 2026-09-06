@@ -139,7 +139,7 @@ export interface BrowserPluginSummary {
   readonly previousVersion?: string;
   readonly lastFailure?: string;
 }
-export type PluginManagementAction = "enable" | "disable" | "rollback";
+export type PluginManagementAction = "enable" | "disable" | "rollback" | "uninstall";
 
 export interface BrowserController {
   readonly start: Effect.Effect<void, EngineError>;
@@ -303,6 +303,7 @@ const renderPlugins = (plugins: readonly BrowserPluginSummary[], status?: string
                     ),
                   ]
                 : []),
+              button(`plugin-${plugin.id}-uninstall`, "Remove", `plugins.uninstall.${plugin.id}`),
             ],
             { gap: 8 },
           ),
@@ -828,11 +829,17 @@ export const makeBrowserController = (
         );
         return;
       }
-      const operation = /^plugins\.(enable|disable|rollback)\.([a-z][a-z0-9-]{1,62})$/.exec(action);
+      const operation =
+        /^plugins\.(enable|disable|rollback|uninstall)\.([a-z][a-z0-9-]{1,62})$/.exec(action);
       if (operation && pluginAction) {
         if (managingPlugin) return;
         const name = operation[1];
-        if (name === "enable" || name === "disable" || name === "rollback") {
+        if (
+          name === "enable" ||
+          name === "disable" ||
+          name === "rollback" ||
+          name === "uninstall"
+        ) {
           managingPlugin = true;
           pluginStatus = "Applying plugin change…";
           if (state.screen === "plugins" && pluginOwner === undefined)
@@ -846,7 +853,9 @@ export const makeBrowserController = (
               },
               onFailure: () => {
                 pluginStatus =
-                  "The plugin change could not be completed. Check its permissions or try a previous version.";
+                  name === "uninstall"
+                    ? "Removal could not be completed. Restart the browser before retrying."
+                    : "The plugin change could not be completed. Check its permissions or try a previous version.";
               },
             }),
             Effect.ensuring(
