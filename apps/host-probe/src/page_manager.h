@@ -29,12 +29,20 @@ struct PageEvent {
     kClosed,
     kCloseCancelled,
     kTitleChanged,
+    kNavigationChanged,
+    // Native, page-scoped activity signals. These are advisory protection
+    // inputs for the trusted runtime; they never cause a page to be closed.
+    kResourcesChanged,
   };
 
   Type type;
   std::string page_id;
   CefRefPtr<CefBrowser> browser;
   CefString title;
+  bool audio = false;
+  bool call = false;
+  bool download = false;
+  bool unsaved_input = false;
   // Valid for kClosed. A value of zero means that all requested page windows
   // and browsers have finished tearing down.
   size_t remaining_pages = 0;
@@ -95,6 +103,13 @@ class PageManager : public CefBaseRefCounted {
   // The shared CefDisplayHandler should forward title changes here.
   void NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
                           const CefString& title);
+  void NotifyNavigationChanged(CefRefPtr<CefBrowser> browser);
+  void NotifyAudioChanged(CefRefPtr<CefBrowser> browser, bool active);
+  void NotifyCallChanged(CefRefPtr<CefBrowser> browser, bool active);
+  void NotifyDownloadChanged(CefRefPtr<CefBrowser> browser, bool active);
+  // This is deliberately conservative: keyboard edits protect a page until
+  // its main frame navigates. It does not claim to know application save state.
+  void NotifyContentEdited(CefRefPtr<CefBrowser> browser);
 
   bool empty() const;
   bool closing_all() const;

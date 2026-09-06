@@ -1,140 +1,336 @@
 #import <Cocoa/Cocoa.h>
-#include "src/native_sidebar.h"
-#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <vector>
+#include "src/native_sidebar.h"
+
 extern "C" {
 struct NativePixels { uintptr_t width, height, byte_len; };
-void* native_sdk_app_create();
-void native_sdk_app_destroy(void*);
-void native_sdk_app_start(void*);
-void native_sdk_app_stop(void*);
-void native_sdk_app_frame(void*);
+struct NativePixelsDamage {
+  uintptr_t width, height, byte_len;
+  uintptr_t damage_x, damage_y, damage_width, damage_height;
+  uint64_t revision;
+};
+struct NativeGpuFrameState {
+  uint64_t surface_id, window_id;
+  float width, height, scale;
+  uint64_t frame_index, timestamp_ns, frame_interval_ns;
+  uint64_t input_timestamp_ns, input_latency_ns, input_latency_budget_ns;
+  uintptr_t input_latency_budget_exceeded_count;
+  int input_latency_budget_ok;
+  uint64_t first_frame_latency_ns, first_frame_latency_budget_ns;
+  uintptr_t first_frame_latency_budget_exceeded_count;
+  int first_frame_latency_budget_ok, nonblank;
+  uint32_t sample_color;
+  int status, vsync;
+  uint64_t canvas_revision;
+  uintptr_t canvas_command_count;
+  int canvas_frame_requires_render, canvas_frame_full_repaint;
+  uintptr_t canvas_frame_batch_count, canvas_frame_budget_exceeded_count;
+  int canvas_frame_budget_ok;
+  uint64_t widget_revision;
+  uintptr_t widget_node_count, widget_semantics_count;
+};
+struct NativeInput { int active; uint64_t id; float x, y, width, height; };
+struct NativeGeometry { uint64_t id; int caret; float x, y, width, height; };
+struct NativeSemantics { uint64_t id, parent; int role; uint32_t flags, actions; float x,y,width,height,value; int has_value; const char* label; uintptr_t label_len; const char* text; uintptr_t text_len; const char* placeholder; uintptr_t placeholder_len; intptr_t selection_start, selection_end, composition_start, composition_end; };
+void* native_sdk_app_create(); void native_sdk_app_destroy(void*); void native_sdk_app_start(void*); void native_sdk_app_stop(void*); void native_sdk_app_frame(void*);
 void native_sdk_app_viewport(void*,float,float,float,void*,float,float,float,float,float,float,float,float);
+int native_sdk_app_gpu_frame_state(void*,NativeGpuFrameState*);
 int native_sdk_app_render_pixel_size(void*,float,NativePixels*);
 int native_sdk_app_render_pixels(void*,float,uint8_t*,uintptr_t,NativePixels*);
-void native_sdk_app_touch(void*,uint64_t,int,float,float,float);
+int native_sdk_app_render_pixels_damage(void*,float,uint8_t*,uintptr_t,NativePixelsDamage*);
+void native_sdk_app_touch(void*,uint64_t,int,float,float,float); void native_sdk_app_scroll(void*,uint64_t,float,float,float,float);
+void native_sdk_app_key(void*,int,const char*,uintptr_t,const char*,uintptr_t,uint32_t); void native_sdk_app_text(void*,const char*,uintptr_t); void native_sdk_app_ime(void*,int,const char*,uintptr_t,intptr_t);
 void native_sdk_app_command(void*,const char*,uintptr_t);
-const char* native_sdk_app_last_error_name(void*);
-int hitchhiker_next_command();
+int native_sdk_app_text_input_state(void*,NativeInput*); int native_sdk_app_widget_semantics_by_id(void*,uint64_t,NativeSemantics*); int native_sdk_app_widget_text_geometry(void*,uint64_t,NativeGeometry*);
+int hitchhiker_next_command(); int hitchhiker_commit_tree(void*,const uint8_t*,size_t,uint64_t); size_t hitchhiker_next_event(uint8_t*,size_t); size_t hitchhiker_sync_viewports(void*); void hitchhiker_after_frame();
 }
-@interface HHNativeSidebar : NSView {
+namespace {
+constexpr size_t kMaxEventsPerTick = 32 * 1024;
+constexpr size_t kMaxRasterBytes = 256 * 1024 * 1024;
+NSUInteger Utf16ForUtf8(NSString* text, uintptr_t offset) { NSUInteger i=0; uintptr_t total=0; while(i<text.length) { NSRange r=[text rangeOfComposedCharacterSequenceAtIndex:i]; uintptr_t n=[[text substringWithRange:r] lengthOfBytesUsingEncoding:NSUTF8StringEncoding]; if(total+n>offset) return i; total+=n; i=NSMaxRange(r); } return text.length; }
+uintptr_t Utf8ForUtf16(NSString* text, NSUInteger index) { return [[text substringToIndex:std::min(index,text.length)] lengthOfBytesUsingEncoding:NSUTF8StringEncoding]; }
+uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModifierFlagShift)?1:0)|((f&NSEventModifierFlagControl)?2:0)|((f&NSEventModifierFlagOption)?4:0)|((f&NSEventModifierFlagCommand)?8:0); }
+}
+
+@interface HHNativeSidebar : NSView<NSTextInputClient> {
   void* app_;
-  NativeCommandSink command_sink_;
+  NativeCommandSink commands_;
+  NativeEventSink events_;
   NSTimer* timer_;
-  id input_monitor_;
-  BOOL pointer_captured_;
+  id monitor_;
+  BOOL captured_;
+  BOOL committed_;
+  NSString* marked_;
+  uint64_t focused_;
+
+  uint8_t* raster_;
+  size_t raster_capacity_;
+  NSUInteger raster_width_;
+  NSUInteger raster_height_;
+  CGFloat raster_scale_;
+  BOOL raster_ready_;
+  NSBitmapImageRep* bitmap_;
+  BOOL has_presented_revision_;
+  uint64_t last_canvas_revision_;
+  uint64_t raster_ticks_;
+  uint64_t raster_calls_;
+  uint64_t raster_updates_;
+  uint64_t raster_idle_;
+  uint64_t raster_updated_bytes_;
 }
-- (instancetype)initWithSink:(NativeCommandSink)sink;
+- (instancetype)initWithSink:(NativeCommandSink)sink events:(NativeEventSink)events;
 - (void)tick;
 - (void)stop;
 - (void)receiveCommand:(const char*)command;
+- (BOOL)commit:(const char*)json length:(size_t)length revision:(uint64_t)revision;
 @end
 
 @implementation HHNativeSidebar
-- (BOOL)isFlipped { return YES; }
-- (instancetype)initWithSink:(NativeCommandSink)sink {
-  self = [super initWithFrame:NSMakeRect(0,0,260,600)];
-  if (self) {
-    command_sink_ = std::move(sink);
-    app_ = native_sdk_app_create();
-    if (!app_) return nil;
-    native_sdk_app_start(app_);
-    __weak HHNativeSidebar* weakSelf = self;
-    input_monitor_ = [NSEvent addLocalMonitorForEventsMatchingMask:
-        (NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp | NSEventMaskLeftMouseDragged)
-        handler:^NSEvent*(NSEvent* event) {
-      HHNativeSidebar* sidebar = weakSelf;
-      if (!sidebar || !sidebar->app_ || event.window != sidebar.window) return event;
-      NSPoint point = [sidebar convertPoint:event.locationInWindow fromView:nil];
-      BOOL inside = NSPointInRect(point, sidebar.bounds);
-      if (event.type == NSEventTypeLeftMouseDown) {
-        if (!inside) return event;
-        sidebar->pointer_captured_ = YES;
-        [sidebar mouseDown:event];
-      } else {
-        if (!sidebar->pointer_captured_) return event;
-        if (event.type == NSEventTypeLeftMouseUp) {
-          sidebar->pointer_captured_ = NO;
-          [sidebar mouseUp:event];
-        } else {
-          native_sdk_app_touch(sidebar->app_,1,2,point.x,point.y,1);
-          [sidebar tick];
-        }
-      }
-      return nil;
-    }];
-    timer_ = [NSTimer scheduledTimerWithTimeInterval:1.0/30.0 repeats:YES block:^(NSTimer*) { [weakSelf tick]; }];
-    [self tick];
-  }
-  return self;
+- (BOOL)isFlipped { return YES; } - (BOOL)acceptsFirstResponder { return YES; } - (BOOL)acceptsFirstMouse:(NSEvent*)event { return YES; }
+- (BOOL)isAccessibilityElement { return YES; } - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityGroupRole; } - (NSString*)accessibilityLabel { return @"Hitchhiker native interface"; }
+- (instancetype)initWithSink:(NativeCommandSink)sink events:(NativeEventSink)events {
+  if (!(self=[super initWithFrame:NSMakeRect(0,0,260,600)])) return nil; commands_=std::move(sink); events_=std::move(events); marked_=@"";
+  app_=native_sdk_app_create(); if(!app_) return nil; native_sdk_app_start(app_); __weak HHNativeSidebar* weak=self;
+  monitor_=[NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown|NSEventMaskLeftMouseUp|NSEventMaskLeftMouseDragged) handler:^NSEvent*(NSEvent* e) { HHNativeSidebar* s=weak; if(!s||!s->app_||e.window!=s.window) return e; NSPoint p=[s convertPoint:e.locationInWindow fromView:nil]; if(e.type==NSEventTypeLeftMouseDown) { if(!NSPointInRect(p,s.bounds)) return e; s->captured_=YES; [s mouseDown:e]; return nil; } if(!s->captured_) return e; if(e.type==NSEventTypeLeftMouseUp) { s->captured_=NO; [s mouseUp:e]; } else { native_sdk_app_touch(s->app_,1,2,p.x,p.y,1); [s tick]; } return nil; }];
+  timer_=[NSTimer scheduledTimerWithTimeInterval:1.0/30.0 repeats:YES block:^(NSTimer*) { [weak tick]; }]; [self tick]; return self;
 }
 - (void)stop {
-  if (input_monitor_) { [NSEvent removeMonitor:input_monitor_]; input_monitor_ = nil; }
-  [timer_ invalidate]; timer_ = nil;
-  if (app_) { native_sdk_app_stop(app_); native_sdk_app_destroy(app_); app_ = nullptr; }
-  command_sink_ = {};
+  if (monitor_) {
+    [NSEvent removeMonitor:monitor_];
+    monitor_ = nil;
+  }
+  [timer_ invalidate];
+  timer_ = nil;
+  if (app_) {
+    native_sdk_app_stop(app_);
+    native_sdk_app_destroy(app_);
+    app_ = nullptr;
+  }
+  if (raster_ticks_) {
+    fprintf(stderr,
+            "HITCHHIKER_NATIVE_RASTER ticks=%llu calls=%llu updates=%llu idle=%llu updated_bytes=%llu\n",
+            static_cast<unsigned long long>(raster_ticks_),
+            static_cast<unsigned long long>(raster_calls_),
+            static_cast<unsigned long long>(raster_updates_),
+            static_cast<unsigned long long>(raster_idle_),
+            static_cast<unsigned long long>(raster_updated_bytes_));
+  }
+  bitmap_ = nil;
+  std::free(raster_);
+  raster_ = nullptr;
+  raster_capacity_ = 0;
+  commands_ = {};
+  events_ = {};
 }
+- (void)drainEvents { if(!committed_||!events_) return; size_t remaining=kMaxEventsPerTick; while(remaining) { size_t n=hitchhiker_next_event(nullptr,0); if(!n||n>remaining||n>kMaxEventsPerTick) break; std::vector<uint8_t> bytes(n); if(hitchhiker_next_event(bytes.data(),bytes.size())!=n) break; events_(std::string(reinterpret_cast<const char*>(bytes.data()),n)); remaining-=n; } }
+- (void)syncText { NativeInput input{}; if(!app_||!native_sdk_app_text_input_state(app_,&input)) return; if(input.active) { focused_=input.id; if(self.window.firstResponder!=self) [self.window makeFirstResponder:self]; } else { focused_=0; marked_=@""; } }
+- (CGFloat)backingScale {
+  CGFloat scale = self.window.backingScaleFactor;
+  if (!(scale > 0) || !std::isfinite(scale)) scale = self.window.screen.backingScaleFactor;
+  if (!(scale > 0) || !std::isfinite(scale)) scale = NSScreen.mainScreen.backingScaleFactor;
+  return scale > 0 && std::isfinite(scale) ? scale : 1;
+}
+
+- (void)clearRasterCache {
+  bitmap_ = nil;
+  std::free(raster_);
+  raster_ = nullptr;
+  raster_capacity_ = 0;
+  raster_width_ = 0;
+  raster_height_ = 0;
+  raster_scale_ = 0;
+  raster_ready_ = NO;
+  has_presented_revision_ = NO;
+}
+
+- (BOOL)ensureRasterFor:(const NativePixels&)info scale:(CGFloat)scale fresh:(BOOL*)fresh {
+  *fresh = NO;
+  if (!info.width || !info.height ||
+      info.width > std::numeric_limits<size_t>::max() / 4 ||
+      info.height > std::numeric_limits<size_t>::max() / (info.width * 4)) {
+    return NO;
+  }
+  const size_t expected = info.width * info.height * 4;
+  if (info.byte_len != expected || expected > kMaxRasterBytes) return NO;
+
+  if (raster_ && raster_width_ == info.width && raster_height_ == info.height &&
+      raster_scale_ == scale && raster_capacity_ == expected && bitmap_) {
+    return YES;
+  }
+
+  bitmap_ = nil;
+  void* next = std::realloc(raster_, expected);
+  if (!next) return NO;
+  raster_ = static_cast<uint8_t*>(next);
+  raster_capacity_ = expected;
+  raster_width_ = info.width;
+  raster_height_ = info.height;
+  raster_scale_ = scale;
+  raster_ready_ = NO;
+
+  unsigned char* planes[5] = {raster_, nullptr, nullptr, nullptr, nullptr};
+  bitmap_ = [[NSBitmapImageRep alloc]
+      initWithBitmapDataPlanes:planes
+                    pixelsWide:raster_width_
+                    pixelsHigh:raster_height_
+                 bitsPerSample:8
+               samplesPerPixel:4
+                      hasAlpha:YES
+                      isPlanar:NO
+                colorSpaceName:NSDeviceRGBColorSpace
+                   bytesPerRow:raster_width_ * 4
+                  bitsPerPixel:32];
+  if (!bitmap_) {
+    [self clearRasterCache];
+    return NO;
+  }
+  *fresh = YES;
+  return YES;
+}
+
+- (void)updateRasterAtScale:(CGFloat)scale {
+  NativePixels info{};
+  if (!native_sdk_app_render_pixel_size(app_, static_cast<float>(scale), &info)) return;
+
+  BOOL fresh = NO;
+  if (![self ensureRasterFor:info scale:scale fresh:&fresh]) return;
+
+  NativePixelsDamage rendered{};
+  if (!native_sdk_app_render_pixels_damage(app_, static_cast<float>(scale), raster_,
+                                            raster_capacity_, &rendered)) {
+    return;
+  }
+  ++raster_calls_;
+  if (rendered.width != raster_width_ || rendered.height != raster_height_ ||
+      rendered.byte_len != raster_capacity_) {
+    return;
+  }
+
+  size_t damage_x = rendered.damage_x;
+  size_t damage_y = rendered.damage_y;
+  size_t damage_width = rendered.damage_width;
+  size_t damage_height = rendered.damage_height;
+  if (damage_x > raster_width_ || damage_y > raster_height_ ||
+      damage_width > raster_width_ - damage_x ||
+      damage_height > raster_height_ - damage_y) {
+    return;
+  }
+
+  // Replacing the retained buffer is only expected on size or scale changes,
+  // for which Native reports full damage. Fall back to a full render if that
+  // invariant is ever broken so an uninitialized bitmap cannot reach AppKit.
+  if (fresh &&
+      (damage_x != 0 || damage_y != 0 || damage_width != raster_width_ ||
+       damage_height != raster_height_)) {
+    NativePixels full{};
+    if (!native_sdk_app_render_pixels(app_, static_cast<float>(scale), raster_,
+                                      raster_capacity_, &full) ||
+        full.width != raster_width_ || full.height != raster_height_ ||
+        full.byte_len != raster_capacity_) {
+      return;
+    }
+    damage_x = 0;
+    damage_y = 0;
+    damage_width = raster_width_;
+    damage_height = raster_height_;
+  }
+
+  raster_ready_ = YES;
+  has_presented_revision_ = YES;
+  last_canvas_revision_ = rendered.revision;
+  if (!damage_width || !damage_height) {
+    ++raster_idle_;
+    return;
+  }
+
+  ++raster_updates_;
+  raster_updated_bytes_ += damage_width * damage_height * 4;
+  NSRect damage = NSMakeRect(damage_x / scale, damage_y / scale,
+                             damage_width / scale, damage_height / scale);
+  damage = NSIntersectionRect(damage, self.bounds);
+  if (!NSIsEmptyRect(damage)) [self setNeedsDisplayInRect:damage];
+}
+
 - (void)tick {
   if (!app_) return;
-  native_sdk_app_viewport(app_,260,self.bounds.size.height,1,nullptr,0,0,0,0,0,0,0,0);
+  const CGFloat scale = [self backingScale];
+  native_sdk_app_viewport(app_, self.bounds.size.width, self.bounds.size.height,
+                          static_cast<float>(scale), nullptr, 0, 0, 0, 0, 0, 0, 0, 0);
   native_sdk_app_frame(app_);
+  hitchhiker_after_frame();
+  ++raster_ticks_;
   while (int command = hitchhiker_next_command()) {
-    if (command_sink_) command_sink_(static_cast<NativeCommand>(command));
+    if (commands_) commands_(static_cast<NativeCommand>(command));
   }
-  [self setNeedsDisplay:YES];
+  if (committed_) hitchhiker_sync_viewports(app_);
+  [self drainEvents];
+  [self syncText];
+  NativeGpuFrameState state{};
+  if (raster_ready_ && has_presented_revision_ && raster_scale_ == scale &&
+      native_sdk_app_gpu_frame_state(app_, &state) &&
+      state.canvas_revision == last_canvas_revision_) {
+    ++raster_idle_;
+  } else {
+    [self updateRasterAtScale:scale];
+  }
 }
-- (void)receiveCommand:(const char*)command {
-  if (!app_) return;
-  native_sdk_app_command(app_,command,strlen(command));
-  [self tick];
+- (BOOL)commit:(const char*)json length:(size_t)length revision:(uint64_t)revision { if(!app_||!json||!length||!revision||!hitchhiker_commit_tree(app_,reinterpret_cast<const uint8_t*>(json),length,revision)) return NO; committed_=YES; [self tick]; return YES; }
+- (void)receiveCommand:(const char*)command { if(app_) { native_sdk_app_command(app_,command,strlen(command)); [self tick]; } }
+- (void)drawRect:(NSRect)dirty {
+  if (!raster_ready_ || !bitmap_) return;
+  [bitmap_ drawInRect:self.bounds
+             fromRect:NSZeroRect
+            operation:NSCompositingOperationCopy
+             fraction:1
+       respectFlipped:YES
+                hints:nil];
 }
-- (void)drawRect:(NSRect)dirtyRect {
-  if (!app_) return;
-  NativePixels size{};
-  if (!native_sdk_app_render_pixel_size(app_,1,&size) || !size.byte_len) return;
-  std::vector<uint8_t> pixels(size.byte_len);
-  if (!native_sdk_app_render_pixels(app_,1,pixels.data(),pixels.size(),&size)) return;
-  NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:size.width pixelsHigh:size.height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:size.width*4 bitsPerPixel:32];
-  memcpy(rep.bitmapData,pixels.data(),size.byte_len);
-  [rep drawInRect:self.bounds fromRect:NSZeroRect
-       operation:NSCompositingOperationCopy fraction:1
-       respectFlipped:YES hints:nil];
-}
-- (void)mouseDown:(NSEvent*)event {
-  NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
-  native_sdk_app_touch(app_,1,0,point.x,point.y,1);
 
-  [self tick];
+- (void)setFrameSize:(NSSize)newSize {
+  const BOOL changed = !NSEqualSizes(self.frame.size, newSize);
+  [super setFrameSize:newSize];
+  if (changed) {
+    [self clearRasterCache];
+    [self tick];
+  }
 }
-- (void)mouseUp:(NSEvent*)event {
-  NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
-  native_sdk_app_touch(app_,1,1,point.x,point.y,0);
 
+- (void)viewDidMoveToWindow {
+  [super viewDidMoveToWindow];
   [self tick];
 }
+
+- (void)viewDidChangeBackingProperties {
+  [super viewDidChangeBackingProperties];
+  [self clearRasterCache];
+  [self tick];
+}
+- (void)mouseDown:(NSEvent*)e { [self.window makeFirstResponder:self]; NSPoint p=[self convertPoint:e.locationInWindow fromView:nil]; native_sdk_app_touch(app_,1,0,p.x,p.y,1); [self tick]; }
+- (void)mouseUp:(NSEvent*)e { NSPoint p=[self convertPoint:e.locationInWindow fromView:nil]; native_sdk_app_touch(app_,1,1,p.x,p.y,0); [self tick]; }
+- (void)scrollWheel:(NSEvent*)e { NSPoint p=[self convertPoint:e.locationInWindow fromView:nil]; native_sdk_app_scroll(app_,1,p.x,p.y,e.scrollingDeltaX,e.scrollingDeltaY); [self tick]; }
+- (void)keyDown:(NSEvent*)e { if(e.modifierFlags&NSEventModifierFlagCommand) { [super keyDown:e]; return; } [self interpretKeyEvents:@[e]]; }
+- (void)emitKey:(NSString*)key event:(NSEvent*)event { const char* bytes=key.UTF8String?:""; uintptr_t len=[key lengthOfBytesUsingEncoding:NSUTF8StringEncoding]; native_sdk_app_key(app_,0,bytes,len,"",0,Modifiers(event)); native_sdk_app_key(app_,1,bytes,len,"",0,Modifiers(event)); }
+- (NSString*)focusedText { NativeSemantics n{}; if(!app_||!focused_||!native_sdk_app_widget_semantics_by_id(app_,focused_,&n)||!n.text) return @""; return [[NSString alloc] initWithBytes:n.text length:n.text_len encoding:NSUTF8StringEncoding]?:@""; }
+- (void)insertText:(id)value replacementRange:(NSRange)range { NSString* text=[value isKindOfClass:[NSAttributedString class]]?[value string]:value; if(!text.length) return; if(marked_.length) native_sdk_app_ime(app_,2,"",0,-1); marked_=@""; native_sdk_app_text(app_,text.UTF8String?:"",[text lengthOfBytesUsingEncoding:NSUTF8StringEncoding]); [self tick]; }
+- (void)setMarkedText:(id)value selectedRange:(NSRange)selection replacementRange:(NSRange)range { NSString* text=[value isKindOfClass:[NSAttributedString class]]?[value string]:value; marked_=text?:@""; if(!marked_.length) native_sdk_app_ime(app_,2,"",0,-1); else native_sdk_app_ime(app_,0,marked_.UTF8String?:"",[marked_ lengthOfBytesUsingEncoding:NSUTF8StringEncoding],Utf8ForUtf16(marked_,NSMaxRange(selection))); [self tick]; }
+- (void)unmarkText { if(marked_.length) native_sdk_app_ime(app_,1,"",0,-1); marked_=@""; [self tick]; }
+- (NSRange)selectedRange { NativeSemantics n{}; NSString* text=[self focusedText]; if(!app_||!focused_||!native_sdk_app_widget_semantics_by_id(app_,focused_,&n)) return NSMakeRange(NSNotFound,0); NSUInteger a=Utf16ForUtf8(text,std::max<intptr_t>(0,n.selection_start)),b=Utf16ForUtf8(text,std::max<intptr_t>(0,n.selection_end)); return NSMakeRange(std::min(a,b),a>b?a-b:b-a); }
+- (NSRange)markedRange { return marked_.length?NSMakeRange(0,marked_.length):NSMakeRange(NSNotFound,0); } - (BOOL)hasMarkedText { return marked_.length>0; }
+- (NSAttributedString*)attributedSubstringForProposedRange:(NSRange)range actualRange:(NSRangePointer)actual { NSString* text=[self focusedText]; NSRange safe=NSIntersectionRange(range,NSMakeRange(0,text.length)); if(actual) *actual=safe; return [[NSAttributedString alloc] initWithString:[text substringWithRange:safe]]; }
+- (NSArray<NSAttributedStringKey>*)validAttributesForMarkedText { return @[]; }
+- (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actual { if(actual) *actual=range; NativeGeometry g{}; if(app_&&focused_&&native_sdk_app_widget_text_geometry(app_,focused_,&g)&&g.caret) return [self.window convertRectToScreen:NSMakeRect(g.x,g.y,g.width,g.height)]; return [self.window convertRectToScreen:self.bounds]; }
+- (NSUInteger)characterIndexForPoint:(NSPoint)p { return self.selectedRange.location==NSNotFound?0:self.selectedRange.location; }
+- (void)doCommandBySelector:(SEL)selector { NSString* n=NSStringFromSelector(selector); if([n isEqualToString:@"deleteBackward:"]) [self emitKey:@"backspace" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveLeft:"]) [self emitKey:@"arrowleft" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveRight:"]) [self emitKey:@"arrowright" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveUp:"]) [self emitKey:@"arrowup" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveDown:"]) [self emitKey:@"arrowdown" event:NSApp.currentEvent]; else if([n isEqualToString:@"insertNewline:"]) [self emitKey:@"enter" event:NSApp.currentEvent]; else [super doCommandBySelector:selector]; [self tick]; }
 @end
-void* InstallNativeSidebar(CefRefPtr<CefWindow> window, NativeCommandSink sink) {
-  if (!window || !sink) return nullptr;
-  NSView* handle = (__bridge NSView*)window->GetWindowHandle();
-  if (!handle || !handle.window.contentView) return nullptr;
-  HHNativeSidebar* sidebar = [[HHNativeSidebar alloc] initWithSink:std::move(sink)];
-  if (!sidebar) return nullptr;
-  [handle.window.contentView addSubview:sidebar positioned:NSWindowAbove relativeTo:nil];
-  fprintf(stderr,"HITCHHIKER_NATIVE_MOUNT\n");
-  return (__bridge_retained void*)sidebar;
-}
-void ResizeNativeSidebar(void* ptr, int height) {
-  if (ptr) {
-    HHNativeSidebar* sidebar = (__bridge HHNativeSidebar*)ptr;
-    sidebar.frame = NSMakeRect(0,0,260,height);
-  }
-}
-void DestroyNativeSidebar(void* ptr) {
-  if (!ptr) return;
-  HHNativeSidebar* sidebar = (__bridge_transfer HHNativeSidebar*)ptr;
-  [sidebar stop];
-  [sidebar removeFromSuperview];
-}
-void NotifyNativeState(void* ptr, const char* command) {
-  if (ptr) [(__bridge HHNativeSidebar*)ptr receiveCommand:command];
-}
+
+void* InstallNativeSidebar(CefRefPtr<CefWindow> window, NativeCommandSink sink, NativeEventSink events) { if(!window||!sink) return nullptr; NSView* host=(__bridge NSView*)window->GetWindowHandle(); if(!host||!host.window.contentView) return nullptr; HHNativeSidebar* view=[[HHNativeSidebar alloc] initWithSink:std::move(sink) events:std::move(events)]; if(!view) return nullptr; [host.window.contentView addSubview:view positioned:NSWindowAbove relativeTo:nil]; fprintf(stderr,"HITCHHIKER_NATIVE_MOUNT\n"); return (__bridge_retained void*)view; }
+void ResizeNativeSurface(void* ptr,int width,int height) { if(ptr) [(__bridge HHNativeSidebar*)ptr setFrame:NSMakeRect(0,0,std::max(1,width),std::max(1,height))]; }
+void ResizeNativeSidebar(void* ptr,int height) { ResizeNativeSurface(ptr,260,height); }
+bool CommitNativeTree(void* ptr,const char* json,size_t length,uint64_t revision) { return ptr&&[(__bridge HHNativeSidebar*)ptr commit:json length:length revision:revision]; }
+void DestroyNativeSidebar(void* ptr) { if(!ptr) return; HHNativeSidebar* view=(__bridge_transfer HHNativeSidebar*)ptr; [view stop]; [view removeFromSuperview]; }
+void NotifyNativeState(void* ptr,const char* command) { if(ptr&&command) [(__bridge HHNativeSidebar*)ptr receiveCommand:command]; }

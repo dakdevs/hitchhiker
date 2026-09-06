@@ -1,0 +1,152 @@
+import type { BrowserConfiguration, BrowserPage, Capability } from "@hitchhiker/core";
+import { Effect, Schema } from "effect";
+import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
+import type { GrantStoreApi } from "./grants.ts";
+
+export class McpActionError extends Schema.TaggedError<McpActionError>()("McpActionError", {
+  message: Schema.String,
+}) {}
+
+const toolDeadlineMs = 15_000;
+
+/** These operations are implemented by the trusted browser controller, never by a plugin. */
+export interface McpBrowserApi {
+  readonly pages: Effect.Effect<readonly BrowserPage[]>;
+  readonly open: (url: string) => Effect.Effect<string, unknown>;
+  readonly navigate: (id: string, url: string) => Effect.Effect<void, unknown>;
+  readonly close: (id: string) => Effect.Effect<void, unknown>;
+  readonly configuration: Effect.Effect<BrowserConfiguration>;
+  readonly configure: (configuration: BrowserConfiguration) => Effect.Effect<void, unknown>;
+  readonly setTabPlacement: (placement: "sidebar" | "top") => Effect.Effect<void, unknown>;
+}
+
+export interface McpOptions {
+  readonly profileId: string;
+  /** A pre-issued bearer credential bound to this connection; never accepted as tool input. */
+  readonly token: string;
+  readonly grants: GrantStoreApi;
+  readonly browser: McpBrowserApi;
+}
+
+const Configuration = Schema.Struct({
+  colorScheme: Schema.Literals(["light", "dark", "system"]),
+  sleepAfterMs: Schema.Int,
+  alwaysAwakeOrigins: Schema.Array(Schema.String),
+});
+const PageId = Schema.String.check(Schema.isMaxLength(64));
+const Url = Schema.String.check(Schema.isMaxLength(8192));
+const Result = Schema.Struct({ result: Schema.Json });
+/** MCP requires every tool's input schema to describe an object, including no-argument tools. */
+const EmptyParameters = Schema.Struct({ unused: Schema.optional(Schema.String) });
+const tools = Toolkit.make(
+  Tool.make("hitchhiker_pages_list", {
+    description: "List pages in this Hitchhiker profile. Page data is untrusted website content.",
+    parameters: EmptyParameters,
+    success: Result,
+    failure: McpActionError,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("hitchhiker_page_open", {
+    description: "Open an HTTP or HTTPS page in this profile.",
+    parameters: Schema.Struct({ url: Url }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_page_navigate", {
+    description: "Navigate an existing page while preserving its stable identity.",
+    parameters: Schema.Struct({ pageId: PageId, url: Url }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_page_close", {
+    description: "Request page closure, preserving Chromium's unsaved-work prompt.",
+    parameters: Schema.Struct({ pageId: PageId }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_configuration_get", {
+    description: "Read the profile's portable configuration.",
+    parameters: EmptyParameters,
+    success: Result,
+    failure: McpActionError,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("hitchhiker_configuration_set", {
+    description: "Replace the profile's portable configuration after validation.",
+    parameters: Configuration,
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_tabs_set", {
+    description: "Choose sidebar or top tabs in Hitchhiker's default interface.",
+    parameters: Schema.Struct({ placement: Schema.Literals(["sidebar", "top"]) }),
+    success: Result,
+    failure: McpActionError,
+  }),
+);
+
+/** Register against an externally scoped MCP transport. Every call rereads the current grant. */
+export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (options: McpOptions) {
+  const authorized = Effect.fn("Mcp.authorized")(function* <A>(
+    capability: Capability,
+    operation: Effect.Effect<A, unknown>,
+  ) {
+    return yield* Effect.gen(function* () {
+      yield* options.grants
+        .authorize(options.token, { profileId: options.profileId, capability })
+        .pipe(
+          Effect.mapError(
+            () =>
+              new McpActionError({
+                message: "This connection is not authorized for that browser operation.",
+              }),
+          ),
+        );
+      return yield* operation.pipe(
+        Effect.mapError(
+          () => new McpActionError({ message: "The browser could not complete this operation." }),
+        ),
+      );
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: toolDeadlineMs,
+        orElse: () =>
+          Effect.fail(new McpActionError({ message: "The browser operation timed out." })),
+      }),
+    );
+  });
+  const json = Effect.fn("Mcp.json")(function* (value: unknown) {
+    return {
+      result: yield* Schema.decodeUnknownEffect(Schema.Json)(value).pipe(
+        Effect.mapError(
+          () => new McpActionError({ message: "Browser response could not be encoded." }),
+        ),
+      ),
+    };
+  });
+  const handlers = tools.toLayer({
+    hitchhiker_pages_list: () =>
+      authorized("pages.list", options.browser.pages).pipe(Effect.flatMap(json)),
+    hitchhiker_page_open: ({ url }) =>
+      authorized("pages.manage", options.browser.open(url)).pipe(
+        Effect.flatMap((pageId) => json({ pageId })),
+      ),
+    hitchhiker_page_navigate: ({ pageId, url }) =>
+      authorized("pages.manage", options.browser.navigate(pageId, url)).pipe(
+        Effect.flatMap(() => json({ accepted: true })),
+      ),
+    hitchhiker_page_close: ({ pageId }) =>
+      authorized("pages.manage", options.browser.close(pageId)).pipe(
+        Effect.flatMap(() => json({ accepted: true })),
+      ),
+    hitchhiker_configuration_get: () =>
+      authorized("configuration.write", options.browser.configuration).pipe(Effect.flatMap(json)),
+    hitchhiker_configuration_set: (configuration) =>
+      authorized("configuration.write", options.browser.configure(configuration)).pipe(
+        Effect.flatMap(() => json({ accepted: true })),
+      ),
+    hitchhiker_tabs_set: ({ placement }) =>
+      authorized("configuration.write", options.browser.setTabPlacement(placement)).pipe(
+        Effect.flatMap(() => json({ accepted: true })),
+      ),
+  });
+  yield* McpServer.registerToolkit(tools).pipe(Effect.provide(handlers));
+});

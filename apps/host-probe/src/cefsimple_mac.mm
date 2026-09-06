@@ -11,6 +11,7 @@
 #include "include/wrapper/cef_library_loader.h"
 #include "src/simple_app.h"
 #include "src/simple_handler.h"
+#include <filesystem>
 
 // Receives notifications from the application.
 @interface SimpleAppDelegate : NSObject <NSApplicationDelegate>
@@ -87,6 +88,15 @@
 
 @implementation SimpleAppDelegate
 
+// Hitchhiker restores profile/page metadata through its trusted broker. Cocoa
+// must not restore stale native child windows or show a separate crash-restore UI.
+- (BOOL)applicationShouldSaveSecureApplicationState:(NSApplication*)app {
+  return NO;
+}
+- (BOOL)applicationShouldRestoreSecureApplicationState:(NSApplication*)app {
+  return NO;
+}
+
 // Create the application on the UI thread.
 - (void)createApplication:(id)object {
   [[NSBundle mainBundle] loadNibNamed:@"MainMenu"
@@ -157,8 +167,15 @@ int main(int argc, char* argv[]) {
 
     // Specify CEF global settings here.
     CefSettings settings;
-    CefString(&settings.root_cache_path) = HITCHHIKER_PROFILE_PATH;
-    CefString(&settings.cache_path) = HITCHHIKER_PROFILE_PATH "/Default";
+    const std::string profile_root = command_line->HasSwitch("profile-root")
+        ? command_line->GetSwitchValue("profile-root").ToString()
+        : HITCHHIKER_PROFILE_PATH;
+    if (!std::filesystem::path(profile_root).is_absolute()) {
+      fprintf(stderr, "Hitchhiker profile root must be an absolute path\n");
+      return 1;
+    }
+    CefString(&settings.root_cache_path) = profile_root;
+    CefString(&settings.cache_path) = profile_root + "/Default";
 
     // When generating projects with CMake the CEF_USE_SANDBOX value will be
     // defined automatically. Pass -DUSE_SANDBOX=OFF to the CMake command-line

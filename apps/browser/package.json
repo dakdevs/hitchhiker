@@ -1,0 +1,25 @@
+{
+  "name": "@hitchhiker/browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --experimental-strip-types src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "grants": "node --experimental-strip-types src/grants.ts"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0-beta.107",
+    "@hitchhiker/core": "workspace:0.1.0",
+    "@hitchhiker/default-interface": "workspace:0.1.0",
+    "@hitchhiker/runtime": "workspace:0.1.0",
+    "@hitchhiker/ui": "workspace:0.1.0",
+    "effect": "4.0.0-beta.107"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "7.0.2"
+  }
+}

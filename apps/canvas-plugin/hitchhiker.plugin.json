@@ -1,0 +1,6 @@
+{
+  "id": "canvas-example",
+  "name": "Canvas example",
+  "version": "0.1.0",
+  "capabilities": ["pages.list", "pages.manage", "ui.compose"]
+}

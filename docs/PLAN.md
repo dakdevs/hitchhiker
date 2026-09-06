@@ -170,3 +170,62 @@ Chrome extension install/use; live plugin installation, permissions and rollback
 granted standard CDP; profile persistence/isolation; protected-page resource conservation; shared motion,
 Lucide and accessible design; accurate complete public docs; reproducible macOS packaging; and verified
 remote source/CI. Untested or proposal-only behavior does not satisfy these requirements.
+
+### Runtime evidence, 2026-09-05
+
+- [x] Private per-profile host IPC and browser-root CDP inherited pipes, with bounded transport and
+      fail-closed pipe/engine shutdown.
+- [x] Live Native trees through a compiled adapter, measured viewport bindings and actual Lucide SVGs.
+- [x] Persistent scoped grant store and authenticated loopback CDP relay; real Playwright reads,
+      writes and persisted-grant revocation verified against Chromium.
+- [x] Two actual profile processes kept fixture cookies/local storage isolated and closed cleanly.
+- [x] Public default sidebar/top surface and Native Unicode/IME text reducer portable tests.
+- [x] Runnable browser controller integrated and verified, including restoration and event-loop safety.
+- [ ] Live isolated plugins, MCP, trusted recovery, performance enforcement, Metal/Retina/accessibility,
+      full extension compatibility and packaging.
+
+The first integrated relay test caught a WebSocket callback that treats a successful `null` error as
+failure; the callback now accepts both null and undefined. Native's first viewport semantics event
+can be zero-sized before layout; only positive measurements are applied. The generic Zig JSON
+decoder instantiated unsupported f128 helpers for numeric-array strings, fixed with strict string
+and finite-decimal wire decoders. See [RUNTIME.md](RUNTIME.md) for reproducible test commands and limits.
+
+### Browser/framework checkpoint, 2026-09-05
+
+- [x] Actual default browser restore, navigation, pin/order/selection persistence and clean close.
+- [x] Fixed a Native parsed-tree use-after-free found by the complete browser test. Retain one prior
+      generation through the following frame; 250 changing Native commits then exited cleanly.
+- [x] Retina CPU rendering, reused bounded pixel storage, damage updates and idle revision gating.
+- [x] Real isolated JavaScriptCore/XPC plugin host with nested Promise activation, sandbox denial,
+      wall/RSS termination, process cleanup and recovery tests. Production build excludes test probes.
+- [x] Public TypeScript plugin SDK and compiled canvas example composed real Native/Chromium views;
+      durable grant revocation returned the real app to its default interface.
+- [x] Official MCP client controlled the real browser through stdio, including page creation, tab
+      placement, configuration and durable revocation. Stdio framing/concurrency/EOF cleanup tests.
+- [x] Cross-process grant mutation locking; concurrent child issuance/revocation preserved state.
+- [x] Real default-controller inactivity freezing stopped a page timer, plugin presentation activated
+      it before display, and rejection of an invalid replacement retained the working interface.
+- [x] Actual download activity protects pages. Native audio/capture callbacks are implemented but
+      device/capture-permission verification remains outstanding while the Mac is locked.
+- [ ] Integrated package installation/updates/permissions/known-good rollback and full MCP/API coverage.
+- [ ] Chrome extension installation and same-window tab compatibility, profile management/export/sync.
+- [ ] Shared motion, full accessibility/IME/focus verification, Metal presentation and performance budgets.
+- [ ] Signed/notarized distribution and updates; saved-project registration in Codex.
+
+Integration review found two additional failures caught by expanded tests: a fabricated Effect
+schedule value silently broke the initial controller timer, replaced with real scoped sleep/forever;
+and the UI package instantiated DOM TextEncoder at module load, which JavaScriptCore does not supply.
+UTF-8 length handling is now pure ECMAScript and the compiled example passes in the isolated host.
+Plugin declarations also constrain forwarded events; UI events are scoped to their trusted owner.
+Plugin source reads use fixed regular files, no-follow descriptors and byte limits. Runtime package
+compilation and persistent installation remain separate future work.
+
+### Checkpoint verification, 2026-09-05
+
+Root `pnpm check` passes after the integration fixes above. With both native executables supplied,
+the runtime suite passes all 49 tests and the browser suite passes all five, with no skips. No native
+host or plugin processes remain after shutdown. These checks do not establish interactive focus,
+accessibility, device capture or release packaging, which remain open.
+
+Next work is persistent plugin installation/update/rollback and a relocatable developer macOS bundle.
+See [NATIVE-PRESENTER.md](NATIVE-PRESENTER.md) for the separate future Metal integration boundary.

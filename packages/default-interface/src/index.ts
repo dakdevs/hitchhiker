@@ -1,5 +1,12 @@
 import type { BrowserState, Result } from "@hitchhiker/core";
 
+export {
+  defaultSurfaceActions,
+  renderDefaultSurface,
+  type DefaultSurfaceAction,
+  type DefaultSurfaceRenderOptions,
+} from "./surface.ts";
+
 /** First-party presentation state. It intentionally has no browser-engine authority. */
 export type TabPlacement = "sidebar" | "top";
 export interface DefaultInterfaceConfiguration {

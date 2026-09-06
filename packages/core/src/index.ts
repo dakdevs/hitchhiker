@@ -273,6 +273,7 @@ export type Capability =
   | "pages.manage"
   | "pages.read"
   | "pages.write"
+  | "ui.compose"
   | "configuration.write"
   | "plugins.install"
   | "browser.full-control"
@@ -291,6 +292,7 @@ const capabilityNames: readonly Capability[] = [
   "pages.manage",
   "pages.read",
   "pages.write",
+  "ui.compose",
   "configuration.write",
   "plugins.install",
   "browser.full-control",

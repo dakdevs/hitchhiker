@@ -6,15 +6,16 @@ host-assigned viewports. Native buttons switch between page one, page two and a 
 layout retains each document. Chromium title events update the Native model.
 
 `PageManager` knows stable page IDs, lifecycle and rectangles. Sidebar buttons are one consumer;
-it imposes no tab order, pinning or selection model. This C++ experiment is not yet connected to
-the portable TypeScript core or a live plugin runtime.
+it imposes no tab order, pinning or selection model. With `--host-ipc`, the private TypeScript runtime
+owns page commands and live Native trees. See [runtime evidence](../../docs/RUNTIME.md).
 
 Each child contains one Chrome-style BrowserView, respecting stock CEF's limit. Chrome extensions
 see **one Chromium window per page**, so same-window tab/group behavior is not equivalent to Chrome.
 The local Manifest V3 fixture tests content scripts, worker messaging and storage only.
 
-The surface uses Native's CPU reference renderer, a 30 Hz timer and mouse input only. GPU rendering,
-Retina, keyboard/IME and accessibility integration remain prerequisites for a production shell.
+The surface uses Native's CPU reference renderer and a 30 Hz timer. AppKit forwards pointer, scroll,
+keyboard, text and IME input. GPU rendering, Retina, full accessibility and interactive input
+verification remain prerequisites for a production shell.
 Zig here is the toolkit embedding experiment; product interfaces remain TypeScript/Native markup.
 
 ## Build on Apple Silicon macOS

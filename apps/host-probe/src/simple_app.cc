@@ -5,7 +5,9 @@
 #include "src/simple_app.h"
 #include "src/native_sidebar.h"
 #include "src/host_smoke_test.h"
+#include "src/engine_bridge.h"
 #include "include/cef_command_line.h"
+#include "include/cef_parser.h"
 #include "src/page_manager.h"
 #include "src/simple_handler.h"
 #include "include/cef_app.h"
@@ -16,6 +18,7 @@
 #include "include/wrapper/cef_closure_task.h"
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 
 namespace {
 int smoke_exit_code = 0;
@@ -31,11 +34,18 @@ class ShellWindowDelegate : public CefWindowDelegate {
     manager_ = PageManager::Create(window, handler_, [this](const PageEvent& event) {
       OnPageEvent(event);
     });
+    if (CefCommandLine::GetGlobalCommandLine()->HasSwitch("host-ipc"))
+      bridge_ = EngineBridge::Create(manager_, window);
     handler_->SetShell(window.get(), manager_.get(), [this] { CancelClosing(); });
     sidebar_ = InstallNativeSidebar(window, [this](NativeCommand command) {
       if (closing_) return;
       presentation_ = command;
       ApplyLayout();
+    }, [this](const std::string& json) {
+      if (!bridge_ || closing_) return;
+      auto event = CefParseJSON(json, JSON_PARSER_RFC);
+      if (event && event->GetType() == VTYPE_DICTIONARY)
+        bridge_->SendEvent("ui.event", event->GetDictionary());
     });
     if (!sidebar_) {
       fprintf(stderr, "HITCHHIKER_NATIVE_MOUNT_FAILED\n");
@@ -43,6 +53,32 @@ class ShellWindowDelegate : public CefWindowDelegate {
       return;
     }
     window->Show();
+    if (bridge_) {
+      bridge_->SetUiCommitHandler([this](CefRefPtr<CefDictionaryValue> params,
+                                        std::string* error) {
+        const auto type = params->GetType("revision");
+        const double revision = type == VTYPE_INT ? params->GetInt("revision") :
+                                type == VTYPE_DOUBLE ? params->GetDouble("revision") : 0;
+        if (!std::isfinite(revision) || revision < 1 || revision > 9007199254740991.0 ||
+            std::floor(revision) != revision || params->GetType("root") != VTYPE_DICTIONARY) {
+          *error = "positive safe-integer revision and root object required";
+          return false;
+        }
+        auto value = CefValue::Create();
+        value->SetDictionary(params->GetDictionary("root"));
+        const std::string json = CefWriteJSON(value, JSON_WRITER_DEFAULT).ToString();
+        if (!CommitNativeTree(sidebar_, json.data(), json.size(), static_cast<uint64_t>(revision))) {
+          *error = "invalid or stale native tree";
+          return false;
+        }
+        runtime_ui_ = true;
+        const auto bounds = root_->GetClientAreaBoundsInScreen();
+        ResizeNativeSurface(sidebar_, bounds.width, bounds.height);
+        return true;
+      });
+      bridge_->Start();
+      return;
+    }
     if (!manager_->Open("one", "http://127.0.0.1:4319/one") ||
         !manager_->Open("two", "http://127.0.0.1:4319/two")) {
       fprintf(stderr, "HITCHHIKER_PAGE_CREATION_FAILED\n");
@@ -53,6 +89,7 @@ class ShellWindowDelegate : public CefWindowDelegate {
   }
 
   void OnPageEvent(const PageEvent& event) {
+    if (bridge_) bridge_->OnPageEvent(event);
     if (event.type == PageEvent::kCreated) {
       fprintf(stderr, "HITCHHIKER_PAGE_CREATED %s\n", event.page_id.c_str());
       ApplyLayout();
@@ -99,7 +136,16 @@ class ShellWindowDelegate : public CefWindowDelegate {
   void ApplyLayout() {
     if (!root_ || !manager_ || closing_) return;
     const CefRect client = root_->GetClientAreaBoundsInScreen();
-    ResizeNativeSidebar(sidebar_, client.height);
+    if (runtime_ui_) ResizeNativeSurface(sidebar_, client.width, client.height);
+    else ResizeNativeSidebar(sidebar_, client.height);
+    if (bridge_) {
+      manager_->Layout();
+      auto bounds = CefDictionaryValue::Create();
+      bounds->SetInt("width", client.width);
+      bounds->SetInt("height", client.height);
+      bridge_->SendEvent("window.boundsChanged", bounds);
+      return;
+    }
     const int width = std::max(2, client.width - 260);
     const int height = std::max(1, client.height);
     const bool have_one = !!manager_->BrowserForPage("one");
@@ -136,6 +182,7 @@ class ShellWindowDelegate : public CefWindowDelegate {
     return clients_drained && pages_drained;
   }
   void OnWindowDestroyed(CefRefPtr<CefWindow>) override {
+    if (bridge_) { bridge_->Stop(); bridge_ = nullptr; }
     DestroyNativeSidebar(sidebar_);
     sidebar_ = nullptr;
     handler_->OnShellDestroyed();
@@ -150,9 +197,11 @@ class ShellWindowDelegate : public CefWindowDelegate {
   CefRefPtr<SimpleHandler> handler_;
   CefRefPtr<CefWindow> root_;
   CefRefPtr<PageManager> manager_;
+  CefRefPtr<EngineBridge> bridge_;
   void* sidebar_ = nullptr;
   NativeCommand presentation_ = NativeCommand::kShowOne;
   bool closing_ = false;
+  bool runtime_ui_ = false;
   bool self_test_ = false;
   bool one_ready_ = false;
   bool two_ready_ = false;

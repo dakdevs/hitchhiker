@@ -24,7 +24,7 @@ set(PRODUCT_NAME "${CEF_TARGET}")
 set(PROBE_RESOURCES mac/English.lproj/MainMenu.xib mac/English.lproj/InfoPlist.strings mac/cefsimple.icns)
 add_executable(${CEF_TARGET} MACOSX_BUNDLE
   src/simple_app.cc src/simple_handler.cc src/simple_handler_mac.mm
-  src/cefsimple_mac.mm src/native_sidebar.mm src/before_unload_dialog.mm src/page_manager.cc src/host_smoke_test.cc ${PROBE_RESOURCES})
+  src/cefsimple_mac.mm src/native_sidebar.mm src/before_unload_dialog.mm src/page_manager.cc src/host_smoke_test.cc src/engine_bridge.cc ${PROBE_RESOURCES})
 SET_EXECUTABLE_TARGET_PROPERTIES(${CEF_TARGET})
 add_dependencies(${CEF_TARGET} libcef_dll_wrapper)
 target_link_libraries(${CEF_TARGET} libcef_dll_wrapper ${CEF_STANDARD_LIBS} "${NATIVE_SURFACE_LIBRARY}")

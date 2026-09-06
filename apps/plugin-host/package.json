@@ -1,0 +1,13 @@
+{
+  "name": "@hitchhiker/plugin-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/check-sources.mjs",
+    "build:native": "node scripts/build.mjs",
+    "typecheck": "node scripts/check-sources.mjs",
+    "test": "node scripts/check-sources.mjs",
+    "test:native": "node --test test/integration.test.mjs"
+  }
+}

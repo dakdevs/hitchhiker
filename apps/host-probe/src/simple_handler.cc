@@ -22,6 +22,25 @@ namespace {
 
 SimpleHandler* g_instance = nullptr;
 
+constexpr int kWindowsBackspace = 0x08;
+constexpr int kWindowsDelete = 0x2E;
+constexpr int kWindowsV = 0x56;
+
+bool IsEditableMutation(const CefKeyEvent& event) {
+  if (!event.focus_on_editable_field) return false;
+  if (event.type == KEYEVENT_CHAR) {
+    // CEF normalizes text insertion to KEYEVENT_CHAR. Control characters are
+    // navigation/commands, not content edits.
+    return event.character >= 0x20 && event.character != 0x7f;
+  }
+  if (event.type != KEYEVENT_RAWKEYDOWN) return false;
+  if (event.windows_key_code == kWindowsBackspace ||
+      event.windows_key_code == kWindowsDelete) return true;
+  const bool command = (event.modifiers & EVENTFLAG_COMMAND_DOWN) != 0;
+  const bool control = (event.modifiers & EVENTFLAG_CONTROL_DOWN) != 0;
+  return (command || control) && event.windows_key_code == kWindowsV;
+}
+
 // Returns a data: URI with the specified contents.
 std::string GetDataURI(const std::string& data, const std::string& mime_type) {
   return "data:" + mime_type + ";base64," +
@@ -91,6 +110,27 @@ void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser,
     // Set the title of the window using platform APIs.
     PlatformTitleChange(browser, title);
   }
+}
+
+void SimpleHandler::OnAddressChange(CefRefPtr<CefBrowser> browser,
+                                    CefRefPtr<CefFrame> frame, const CefString&) {
+  CEF_REQUIRE_UI_THREAD();
+  if (page_manager_ && frame->IsMain()) page_manager_->NotifyNavigationChanged(browser);
+}
+
+void SimpleHandler::OnMediaAccessChange(CefRefPtr<CefBrowser> browser,
+                                        bool has_video_access,
+                                        bool has_audio_access) {
+  CEF_REQUIRE_UI_THREAD();
+  // Active capture is conservatively treated as a call. The callback reports
+  // current access, unlike a permission request which can outlive a call.
+  if (page_manager_)
+    page_manager_->NotifyCallChanged(browser, has_video_access || has_audio_access);
+}
+
+void SimpleHandler::OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool, bool, bool) {
+  CEF_REQUIRE_UI_THREAD();
+  if (page_manager_) page_manager_->NotifyNavigationChanged(browser);
 }
 
 void SimpleHandler::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
@@ -168,8 +208,67 @@ void SimpleHandler::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   }
 
   unmanaged_close_requests_.erase(browser_id);
+  audio_streams_.erase(browser_id);
+  active_downloads_.erase(browser_id);
 
   MaybeFinishShellClose();
+}
+
+void SimpleHandler::OnAudioStreamStarted(CefRefPtr<CefBrowser> browser,
+                                         const CefAudioParameters&, int) {
+  // CEF invokes this on an audio capture thread. Retain both CEF objects until
+  // the state mutation has reached the UI thread.
+  CefRefPtr<SimpleHandler> self(this);
+  CefPostTask(TID_UI, base::BindOnce(
+      [](CefRefPtr<SimpleHandler> handler, CefRefPtr<CefBrowser> retained_browser) {
+        CEF_REQUIRE_UI_THREAD();
+        const int browser_id = retained_browser->GetIdentifier();
+        const size_t prior = handler->audio_streams_[browser_id]++;
+        if (prior == 0 && handler->page_manager_)
+          handler->page_manager_->NotifyAudioChanged(retained_browser, true);
+      },
+      self, browser));
+}
+
+void SimpleHandler::OnAudioStreamStopped(CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  const int browser_id = browser->GetIdentifier();
+  auto it = audio_streams_.find(browser_id);
+  if (it == audio_streams_.end()) return;
+  DCHECK_GT(it->second, 0U);
+  if (--it->second != 0) return;
+  audio_streams_.erase(it);
+  if (page_manager_) page_manager_->NotifyAudioChanged(browser, false);
+}
+
+void SimpleHandler::OnAudioStreamError(CefRefPtr<CefBrowser>, const CefString&) {
+  // CEF guarantees OnAudioStreamStopped after an error. Keep the existing
+  // protection until that definitive UI-thread transition arrives.
+}
+
+void SimpleHandler::OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                                      CefRefPtr<CefDownloadItem> item,
+                                      CefRefPtr<CefDownloadItemCallback>) {
+  CEF_REQUIRE_UI_THREAD();
+  if (!item || !item->IsValid()) return;
+  const int browser_id = browser->GetIdentifier();
+  auto& downloads = active_downloads_[browser_id];
+  const bool was_active = !downloads.empty();
+  if (item->IsInProgress()) downloads.insert(item->GetId());
+  else downloads.erase(item->GetId());
+  const bool is_active = !downloads.empty();
+  if (!is_active) active_downloads_.erase(browser_id);
+  if (was_active != is_active && page_manager_)
+    page_manager_->NotifyDownloadChanged(browser, is_active);
+}
+
+bool SimpleHandler::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
+                                  const CefKeyEvent& event, CefEventHandle,
+                                  bool*) {
+  CEF_REQUIRE_UI_THREAD();
+  if (IsEditableMutation(event) && page_manager_)
+    page_manager_->NotifyContentEdited(browser);
+  return false;
 }
 
 bool SimpleHandler::OnBeforeUnloadDialog(

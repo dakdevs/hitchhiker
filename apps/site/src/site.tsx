@@ -51,9 +51,9 @@ const docs: Doc[] = [
     description: "A small, stable host with replaceable surfaces.",
     icon: Boxes,
     body: [
-      "Hitchhiker separates a Chromium host, a neutral browser model, and presentation surfaces. The host owns profile isolation, permission decisions, extension compatibility, lifecycle, and performance policy. The core exposes typed pages and viewports: pages hold browser state, while viewports are independent visible bindings that can show multiple pages concurrently.",
-      "The default interface is a first-party surface, not a privileged exception. It owns tab ordering, pins, sidebar or top layout, and per-instance selection. A plugin can replace that model entirely with workspaces, canvases, splits, or command-driven UI while receiving the same capabilities and constraints.",
-      "This architecture is proposed and under active host integration. The initial target is macOS. The primary implementation challenge is a native CEF host; no published Hitchhiker release is available yet.",
+      "Hitchhiker separates a Chromium process, a trusted TypeScript broker, and Native presentation. The browser model exposes stable pages and independent viewport bindings. A page keeps its document state when an interface rearranges or replaces its viewports.",
+      "The default interface is built from public components and owns sidebar/top tabs, pins, ordering, and selection. Plugins can instead present page cards, canvases, splits, or another interaction model. The trusted broker enforces profile boundaries, grants, Native tree limits, and plugin isolation.",
+      "The macOS development build has real CEF content, Native UI, private IPC, CDP, and isolated JavaScriptCore plugins. It is public source under active development. Chrome same-window extension tab parity, release packaging, and several framework features remain unfinished.",
     ],
     code: "Host (Chromium + policy)\n        │\nBrowser model ── public capability boundary\n   ┌────┼────┐\nNative UI  Web panels  MCP / CDP",
   },
@@ -64,10 +64,11 @@ const docs: Doc[] = [
     description: "Set up a development workspace for the framework.",
     icon: Terminal,
     body: [
-      "Hitchhiker is currently developed from its source repository. Use Node 24.19.0 and pnpm 11.24.0; the commands below install the locked workspace, run its repository checks, and start this documentation site.",
-      "The portable core package is implemented and can be used for browser state, configuration, grants, and resource policy. A native Chromium host and runtime plugin loader are still under integration, so there is no released browser scaffold or runtime surface API.",
+      "Use Node 24.19.0 and pnpm 11.24.0. Install the locked Turborepo and run its portable checks. The source repository includes the native browser, public component and plugin packages, an example replacement interface, and this documentation site.",
+      "Build the native host using apps/host-probe/README.md, then set HITCHHIKER_NATIVE_BINARY to its absolute executable path and run pnpm --filter @hitchhiker/browser dev. Full launch, grant, MCP/CDP, and plugin commands are in docs/DEVELOPMENT.md. Use a dedicated --profile-root for experiments.",
+      "No signed browser release is available yet. Native tests explicitly skip when their executable environment variables are absent; a portable green check does not prove native behavior.",
     ],
-    code: "# Development from this source repository\npnpm install --frozen-lockfile\npnpm check\npnpm --filter @hitchhiker/site dev",
+    code: 'pnpm install --frozen-lockfile\npnpm check\n# After building the native host:\nexport HITCHHIKER_NATIVE_BINARY="$PWD/work/host-probe/build/Release/hitchhiker-probe.app/Contents/MacOS/hitchhiker-probe"\npnpm --filter @hitchhiker/browser dev',
   },
   {
     page: "configuration",
@@ -77,7 +78,7 @@ const docs: Doc[] = [
     icon: SlidersHorizontal,
     body: [
       "The implemented core configuration is local-first and contains only portable engine settings: colour scheme, inactivity sleep timing, and explicit always-awake origins. Its export/import helpers reject exports containing browser secrets such as cookies, history, passwords, tokens, sessions, and credentials. Page lifecycle and viewport bindings are separate from presentation state.",
-      "The first-party default interface owns sidebar or top-tab placement, ordering, pins, and selection in its own configuration and state. A native host must still observe live protections and apply sleep decisions to Chromium pages. Native UI and Chromium service integration remain in progress.",
+      "The first-party default interface owns sidebar or top-tab placement, ordering, pins, and selection in its own configuration and state. The native host supplies live resource signals for reversible freezing. Profile management, synchronization, and an integrated configuration export interface remain in progress.",
     ],
     code: 'import { defaultConfiguration, exportConfiguration } from "@hitchhiker/core";\nimport { defaultInterfaceConfiguration } from "@hitchhiker/default-interface";\n\nconst engineConfiguration = {\n  ...defaultConfiguration,\n  alwaysAwakeOrigins: ["https://meet.example"],\n};\nconst interfaceConfiguration = {\n  ...defaultInterfaceConfiguration,\n  tabPlacement: "top" as const,\n};\n\nconst exported = exportConfiguration(engineConfiguration);\nif (exported.ok) {\n  const portableJson = exported.value; // safe JSON string\n}',
   },
@@ -88,10 +89,11 @@ const docs: Doc[] = [
     description: "Build live-installable browser experiences.",
     icon: Puzzle,
     body: [
-      "The proposed runtime plugin system would let plugins contribute controls, pages, commands, configuration, and complete replacement interfaces. Runtime installation, disabling, and rollback are host work still in progress. A protected system surface would retain permission review and recovery controls.",
-      "The implemented core can parse a bounded, declarative plugin proposal; it does not execute plugins or grant host access. The intended host model gives plugin authors powerful browser building blocks without ambient access to every profile or site.",
+      "TypeScript plugins use @hitchhiker/plugin-sdk and @hitchhiker/ui. Bundle an entry point as an IIFE and include hitchhiker.plugin.json with an ID, name, version, and declared capabilities. The local developer launcher loads fixed, bounded regular files; it never runs a package’s npm scripts.",
+      "Each plugin revision executes in a separate JavaScriptCore worker behind an App-Sandboxed XPC broker. It has no Node, filesystem, network, timer, or generic native bridge. Host calls require both the manifest declaration and a current grant whose principal matches the installed plugin ID.",
+      "Activation may be asynchronous. A failed, over-budget, or revoked UI plugin returns control to the trusted interface. The canvas example replaces tabs with cards and two viewports. Persistent installation, live updates, known-good revision rollback, and MCP package management remain under development.",
     ],
-    code: '// Proposed plugin manifest\nexport default {\n  id: "com.example.focus",\n  capabilities: ["pages.list", "pages.manage"],\n  contributes: { sidebar: "./src/sidebar.tsx" }\n};',
+    code: 'import { definePlugin } from "@hitchhiker/plugin-sdk";\nimport { column, text } from "@hitchhiker/ui";\n\ndefinePlugin({\n  async activate(browser) {\n    await browser.ui.publish({\n      root: column("welcome", [text("title", "Your browser")], { flex: 1 }),\n      bindings: [],\n    });\n  },\n});',
   },
   {
     page: "native-ui",
@@ -100,10 +102,11 @@ const docs: Doc[] = [
     description: "Compose browser surfaces with a shared design language.",
     icon: PanelLeft,
     body: [
-      "The proposed component library is deliberately opinionated about typography, density, focus states, accessibility, and motion. Native browser chrome and isolated web panels both depend on the host integration, which is not released.",
-      "A framework surface is intended to replace the whole application shell. Native UI is the preferred path for browser controls; web panels must communicate through an explicit bridge and never become a way around permission or profile isolation.",
+      "@hitchhiker/ui provides real row, column, stack, scroll, text, button, input, icon, spacer, and viewport building blocks. TypeScript sends bounded component trees to a compiled Native adapter. Twenty-three embedded icons use actual Lucide SVG assets.",
+      "Viewport IDs describe positions in the interface; bindings associate them with stable Chromium page IDs. Native measures the rectangles. Replacing sidebar tabs with a canvas does not recreate page documents. The same package builds Hitchhiker’s default interface and the plugin example.",
+      "Invalid trees retain the previous interface. Input events carry revisions and trusted owner identity so stale controls or another plugin cannot consume them. Retina raster rendering and idle damage checks are implemented; Metal presentation, full accessibility, interactive IME verification, and polished shared motion remain release work.",
     ],
-    code: "// Illustrative component contract\nexport function Sidebar({ pages }: { pages: BrowserPage[] }) {\n  return <NavRail>{pages.map(PageRow)}</NavRail>;\n}",
+    code: 'import { column, viewport } from "@hitchhiker/ui";\n\nconst surface = {\n  root: column("layout", [\n    viewport("content", "main", { flex: 1 }),\n  ], { flex: 1 }),\n  bindings: [{ viewportId: "main", pageId: "page-one" }],\n};',
   },
   {
     page: "permissions",
@@ -112,10 +115,11 @@ const docs: Doc[] = [
     description: "Useful control without silent escalation.",
     icon: ShieldCheck,
     body: [
-      "Permission grants persist within their declared scope. A person can grant an automation client page control, selected-site access, browser configuration access, plugin installation, or full browser control. A request that expands scope must be reviewed.",
-      "The host keeps certain paths outside replacement UI: permission prompts, profile recovery, and Chromium security boundaries. Chrome extension compatibility is a goal under investigation, not a compatibility promise. Any integration must preserve Chromium’s extension and site isolation rules.",
+      "Local grants persist profile, capability, origin scope, expiry, and revocation. The trusted grant store generates random bearer credentials and persists their hashes in an atomically replaced private file. A cross-process mutation lock prevents concurrent grant writes from losing revocations.",
+      "Plugin declarations do not grant authority. Every host call and forwarded event checks the current grant and installed identity. Replacing the UI requires ui.compose. The local grants command is the current trusted issuance and recovery path; an integrated permission-review interface remains unfinished.",
+      "browser.full-control excludes raw CDP. A separate cdp.connect permission gives control over the whole Chromium profile and cannot be constrained to selected website origins. Ordinary website content never receives the private host pipes.",
     ],
-    code: '// Capability prompts are explicit and reviewable\nrequestCapability({\n  capability: "sites.read",\n  scope: ["https://docs.example.com/*"]\n});',
+    code: "pnpm --filter @hitchhiker/browser grants issue \\\n  --principal=my-agent \\\n  --capabilities=pages.list,pages.manage,configuration.write\npnpm --filter @hitchhiker/browser grants list\npnpm --filter @hitchhiker/browser grants revoke GRANT_ID",
   },
   {
     page: "automation",
@@ -124,10 +128,11 @@ const docs: Doc[] = [
     description: "Connect agents through scoped, inspectable control.",
     icon: Command,
     body: [
-      "MCP is the intended automation interface. It maps its tools onto the same capability model used by plugins and the default UI, so an agent’s authority is visible and revocable.",
-      "CDP is a separate developer-control feature. It is intended to be disabled by default, bound locally by default, and explicitly enabled per profile. Raw CDP can access sensitive browsing data, so it is not a substitute for scoped MCP tools. The MCP and CDP endpoints are proposed; neither is published.",
+      "The local stdio MCP server exposes page list/open/navigate/close, configuration get/set, and sidebar/top selection. Each call checks a pre-issued credential against durable grants. Tool results that contain page titles or URLs remain untrusted website content.",
+      "CDP uses private inherited Chromium pipes and an explicitly enabled authenticated loopback relay. Playwright has been verified against the real browser, including input changes, profile isolation, and disconnection after grant revocation. Raw CDP is disabled unless separately requested at launch.",
+      "Local stdio starts its own browser instance. Attaching to an already-running application, remote MCP for hosted ChatGPT clients, DOM-level MCP tools, and live plugin installation through MCP are still being implemented. See docs/DEVELOPMENT.md for current launch commands.",
     ],
-    code: '// Proposed MCP tool shape\nawait browser.pages.create({\n  url: "https://example.com",\n  profile: "work"\n});',
+    code: '# Supply a credential issued by the local grants command.\nexport HITCHHIKER_MCP_TOKEN="YOUR_TOKEN"\nnode --experimental-strip-types apps/browser/src/main.ts --mcp',
   },
   {
     page: "performance",
@@ -136,10 +141,11 @@ const docs: Doc[] = [
     description: "Responsive by policy, even after customization.",
     icon: Cpu,
     body: [
-      "Hitchhiker treats memory and responsiveness as host responsibilities. Inactive tabs may sleep, including pinned tabs. Audio, calls, downloads, and unsaved input are expected protection signals; people can also designate sites that should stay awake.",
-      "Plugins are part of the performance budget. The framework is designed to attribute sustained CPU work, memory growth, and UI stalls to a plugin, then warn, throttle background work, or suspend a persistent offender with a recovery path. Specific thresholds and measurements will be published only after host benchmarking.",
+      "The host owns performance policy. Native output-audio, media-capture, download, and conservative keyboard-edit signals protect pages. Missing resource information fails closed. Always-awake origins and visible viewport bindings also prevent freezing; pins alone do not.",
+      "Reversible Chromium freezing stops inactive JavaScript work while retaining the page. It is not tab discard or proof of lower renderer memory use. Raw CDP launch mode disables automatic freezing because unrestricted automation can mutate state outside the trusted input signals.",
+      "The isolated plugin host externally enforces a 500 ms synchronous execution slice and a 150 MiB worker footprint budget, plus bounded messages and pending calls. Wall/RSS violations kill that plugin process. Native raster uses Retina scale, retained buffers, damage checks, and idle revision gating. Audio/capture callbacks and interactive smoothness still need device verification.",
     ],
-    code: "Policy signals → observe → warn → throttle → suspend\n\nThe exact budgets are intentionally not specified yet.",
+    code: "Visible or protected → stay active\nInactive and eligible → reversible freeze\nSelected again → activate before display\nPlugin exceeds watchdog budget → stop plugin, restore controls",
   },
   {
     page: "distribution",
@@ -148,10 +154,10 @@ const docs: Doc[] = [
     description: "Ship your own browser, not just a theme.",
     icon: Sparkles,
     body: [
-      "Hitchhiker is planned as an open-source framework. Teams should be able to distribute a custom browser with their own surface, defaults, plugins, and optional sync provider while retaining the platform’s security and performance policies.",
-      "Distribution support is a design target, not a current release feature. Packaging, signing, updater behavior, and Chrome extension compatibility all depend on the native host integration. The initial platform is macOS.",
+      "Hitchhiker is an open-source browser framework with a macOS-first development build. Teams can build the public source and compose their own Native interface, defaults, and isolated plugins. The repository is published at github.com/dakdevs/hitchhiker.",
+      "The current native build and plugin helper are reproducible development artifacts. Developer ID signing, notarization, automatic updates, profile management, optional sync, and complete Chrome extension installation/compatibility are not finished. Do not distribute this build as a production browser.",
     ],
-    code: "Your browser\n  ├── surface package\n  ├── approved plugin bundle\n  ├── profile defaults\n  └── Hitchhiker host (macOS, proposed)",
+    code: "Your browser\n  ├── Native surface package\n  ├── scoped plugin bundles\n  ├── profile defaults\n  └── Hitchhiker Chromium host",
   },
 ];
 
@@ -249,8 +255,8 @@ function Header({
         >
           Documentation
         </button>
-        <a href="https://github.com/vercel-labs/native" target="_blank" rel="noreferrer">
-          Native source <ExternalLink size={13} />
+        <a href="https://github.com/dakdevs/hitchhiker" target="_blank" rel="noreferrer">
+          Source <ExternalLink size={13} />
         </a>
       </nav>
       <div className="header-actions">
@@ -259,11 +265,11 @@ function Header({
         </button>
         <a
           className="github-link"
-          href="https://github.com/vercel-labs/native"
+          href="https://github.com/dakdevs/hitchhiker"
           target="_blank"
           rel="noreferrer"
         >
-          <Code2 size={17} /> <span>Native source</span>
+          <Code2 size={17} /> <span>Source</span>
         </a>
         <button className="menu-button" aria-label="Open navigation" onClick={onMenu}>
           <Menu size={19} />

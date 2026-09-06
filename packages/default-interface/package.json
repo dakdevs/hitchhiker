@@ -14,6 +14,7 @@
     "test": "node --test --experimental-strip-types test/*.test.ts"
   },
   "dependencies": {
-    "@hitchhiker/core": "workspace:0.1.0"
+    "@hitchhiker/core": "workspace:0.1.0",
+    "@hitchhiker/ui": "workspace:0.1.0"
   }
 }

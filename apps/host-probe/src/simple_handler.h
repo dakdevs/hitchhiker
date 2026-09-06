@@ -11,7 +11,10 @@
 #include <set>
 
 #include "include/cef_client.h"
+#include "include/cef_audio_handler.h"
+#include "include/cef_download_handler.h"
 #include "include/cef_jsdialog_handler.h"
+#include "include/cef_keyboard_handler.h"
 
 class PageManager;
 class CefWindow;
@@ -20,7 +23,10 @@ class SimpleHandler : public CefClient,
                       public CefDisplayHandler,
                       public CefLifeSpanHandler,
                       public CefLoadHandler,
-                      public CefJSDialogHandler {
+                      public CefJSDialogHandler,
+                      public CefAudioHandler,
+                      public CefDownloadHandler,
+                      public CefKeyboardHandler {
  public:
   using ShellCloseCancelledCallback = std::function<void()>;
 
@@ -44,10 +50,17 @@ class SimpleHandler : public CefClient,
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefJSDialogHandler> GetJSDialogHandler() override { return this; }
+  CefRefPtr<CefAudioHandler> GetAudioHandler() override { return this; }
+  CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+  CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
 
   // CefDisplayHandler methods:
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
                      const CefString& title) override;
+  void OnAddressChange(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+                       const CefString& url) override;
+  void OnMediaAccessChange(CefRefPtr<CefBrowser> browser,
+                           bool has_video_access, bool has_audio_access) override;
 
   // CefLifeSpanHandler methods:
   bool OnBeforePopup(CefRefPtr<CefBrowser> browser,
@@ -70,11 +83,29 @@ class SimpleHandler : public CefClient,
   void OnBeforeClose(CefRefPtr<CefBrowser> browser) override;
 
   // CefLoadHandler methods:
+  void OnLoadingStateChange(CefRefPtr<CefBrowser> browser, bool is_loading,
+                            bool can_go_back, bool can_go_forward) override;
   void OnLoadError(CefRefPtr<CefBrowser> browser,
                    CefRefPtr<CefFrame> frame,
                    ErrorCode errorCode,
                    const CefString& errorText,
                    const CefString& failedUrl) override;
+
+  // CefAudioHandler callbacks report actual output activity. CEF invokes the
+  // start callback off the UI thread, so it only posts state back to the UI.
+  void OnAudioStreamStarted(CefRefPtr<CefBrowser> browser,
+                            const CefAudioParameters& params, int channels) override;
+  void OnAudioStreamPacket(CefRefPtr<CefBrowser> browser, const float** data,
+                           int frames, int64_t pts) override {}
+  void OnAudioStreamStopped(CefRefPtr<CefBrowser> browser) override;
+  void OnAudioStreamError(CefRefPtr<CefBrowser> browser,
+                          const CefString& message) override;
+
+  void OnDownloadUpdated(CefRefPtr<CefBrowser> browser,
+                         CefRefPtr<CefDownloadItem> download_item,
+                         CefRefPtr<CefDownloadItemCallback> callback) override;
+  bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser, const CefKeyEvent& event,
+                     CefEventHandle os_event, bool* is_keyboard_shortcut) override;
 
   // CefJSDialogHandler methods:
   bool OnBeforeUnloadDialog(CefRefPtr<CefBrowser> browser,
@@ -115,6 +146,10 @@ class SimpleHandler : public CefClient,
   bool shell_closing_ = false;
   bool shell_close_retry_posted_ = false;
   std::set<int> unmanaged_close_requests_;
+  // Per-browser reference counts avoid clearing protection when one of several
+  // output streams or downloads ends.
+  std::map<int, size_t> audio_streams_;
+  std::map<int, std::set<uint32_t>> active_downloads_;
   std::map<int, size_t> pending_popups_by_opener_;
   size_t pending_popup_count_ = 0;
 

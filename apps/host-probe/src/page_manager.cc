@@ -66,6 +66,11 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
       CefRefPtr<CefBrowser> browser) const;
   void NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
                           const CefString& title);
+  void NotifyNavigationChanged(CefRefPtr<CefBrowser> browser);
+  void NotifyAudioChanged(CefRefPtr<CefBrowser> browser, bool active);
+  void NotifyCallChanged(CefRefPtr<CefBrowser> browser, bool active);
+  void NotifyDownloadChanged(CefRefPtr<CefBrowser> browser, bool active);
+  void NotifyContentEdited(CefRefPtr<CefBrowser> browser);
 
   bool empty() const { return pages_.empty(); }
   bool closing_all() const { return closing_all_; }
@@ -93,6 +98,10 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
     bool browser_destroyed = false;
     bool window_destroyed = false;
     bool close_requested = false;
+    bool audio = false;
+    bool call = false;
+    bool download = false;
+    bool unsaved_input = false;
   };
 
   using PageMap = std::map<std::string, PageRecord>;
@@ -101,6 +110,8 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
   void ApplyPageLayout(const std::string& page_id, PageRecord& page);
   void TryFinalize(const std::string& page_id);
   void Emit(PageEvent event);
+  void EmitResources(const std::string& page_id, CefRefPtr<CefBrowser> browser,
+                     const PageRecord& page);
 
   CefRefPtr<CefWindow> root_window_;
   CefRefPtr<CefClient> shared_client_;
@@ -454,6 +465,77 @@ void PageManagerCore::NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
   Emit(std::move(event));
 }
 
+void PageManagerCore::NotifyNavigationChanged(CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  auto page_id = PageIdForBrowser(browser);
+  if (!page_id) return;
+  auto page = pages_.find(*page_id);
+  if (page == pages_.end()) return;
+  const bool clear_unsaved_input = page->second.unsaved_input;
+  page->second.unsaved_input = false;
+  PageEvent event{PageEvent::Type::kNavigationChanged, *page_id};
+  event.browser = browser;
+  Emit(std::move(event));
+  if (clear_unsaved_input) {
+    // Event callbacks can synchronously start teardown. Re-find the record
+    // before using it after the navigation event is delivered.
+    page = pages_.find(*page_id);
+    if (page != pages_.end()) EmitResources(*page_id, browser, page->second);
+  }
+}
+
+void PageManagerCore::NotifyAudioChanged(CefRefPtr<CefBrowser> browser, bool active) {
+  CEF_REQUIRE_UI_THREAD();
+  const auto page_id = PageIdForBrowser(browser);
+  if (!page_id) return;
+  PageRecord& page = pages_.at(*page_id);
+  if (page.audio == active) return;
+  page.audio = active;
+  EmitResources(*page_id, browser, page);
+}
+
+void PageManagerCore::NotifyCallChanged(CefRefPtr<CefBrowser> browser, bool active) {
+  CEF_REQUIRE_UI_THREAD();
+  const auto page_id = PageIdForBrowser(browser);
+  if (!page_id) return;
+  PageRecord& page = pages_.at(*page_id);
+  if (page.call == active) return;
+  page.call = active;
+  EmitResources(*page_id, browser, page);
+}
+
+void PageManagerCore::NotifyDownloadChanged(CefRefPtr<CefBrowser> browser, bool active) {
+  CEF_REQUIRE_UI_THREAD();
+  const auto page_id = PageIdForBrowser(browser);
+  if (!page_id) return;
+  PageRecord& page = pages_.at(*page_id);
+  if (page.download == active) return;
+  page.download = active;
+  EmitResources(*page_id, browser, page);
+}
+
+void PageManagerCore::NotifyContentEdited(CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  const auto page_id = PageIdForBrowser(browser);
+  if (!page_id) return;
+  PageRecord& page = pages_.at(*page_id);
+  if (page.unsaved_input) return;
+  page.unsaved_input = true;
+  EmitResources(*page_id, browser, page);
+}
+
+void PageManagerCore::EmitResources(const std::string& page_id,
+                                    CefRefPtr<CefBrowser> browser,
+                                    const PageRecord& page) {
+  PageEvent event{PageEvent::Type::kResourcesChanged, page_id};
+  event.browser = browser;
+  event.audio = page.audio;
+  event.call = page.call;
+  event.download = page.download;
+  event.unsaved_input = page.unsaved_input;
+  Emit(std::move(event));
+}
+
 CefRect PageManagerCore::InitialBounds() const {
   CEF_REQUIRE_UI_THREAD();
   if (root_window_) {
@@ -518,6 +600,9 @@ void PageManagerCore::OnBrowserCreated(const std::string& page_id,
   PageEvent event{PageEvent::Type::kCreated, page_id};
   event.browser = browser;
   Emit(std::move(event));
+  // A complete initial snapshot lets the trusted runtime distinguish an idle
+  // page from a page whose protection state is simply unknown.
+  EmitResources(page_id, browser, page);
 
   if (page.close_requested) {
     browser->GetHost()->CloseBrowser(false);
@@ -661,6 +746,26 @@ std::optional<std::string> PageManager::PageIdForBrowser(
 void PageManager::NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
                                      const CefString& title) {
   core_->NotifyTitleChanged(browser, title);
+}
+
+void PageManager::NotifyNavigationChanged(CefRefPtr<CefBrowser> browser) {
+  core_->NotifyNavigationChanged(browser);
+}
+
+void PageManager::NotifyAudioChanged(CefRefPtr<CefBrowser> browser, bool active) {
+  core_->NotifyAudioChanged(browser, active);
+}
+
+void PageManager::NotifyCallChanged(CefRefPtr<CefBrowser> browser, bool active) {
+  core_->NotifyCallChanged(browser, active);
+}
+
+void PageManager::NotifyDownloadChanged(CefRefPtr<CefBrowser> browser, bool active) {
+  core_->NotifyDownloadChanged(browser, active);
+}
+
+void PageManager::NotifyContentEdited(CefRefPtr<CefBrowser> browser) {
+  core_->NotifyContentEdited(browser);
 }
 
 bool PageManager::empty() const {
