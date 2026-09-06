@@ -281,3 +281,18 @@ side effects are not rolled back. Registry mutation uses a private directory loc
 while holding that lock can leave it stale. Stop all profile writers before manually removing
 `hitchhiker-plugins/.plugin-write-lock`. Safe mode bypasses registry restoration even when its data is
 invalid; a metadata failure does not terminate the default browser.
+
+### Next implementation packet
+
+Commit `fdfcc96` is published to `dakdevs/hitchhiker`; its GitHub Check run passed. The scoped DOM
+implementation now follows the verified top-document contract in `SCOPED-DOM-PLAN.md`: bounded
+snapshots, connection-local refs, semantic click/fill, repeated origin authorization, and conservative
+write protection. General keyboard input and child-frame actions remain excluded from this packet.
+In parallel, assess separating plugin startup and CPU execution accounting without weakening the
+external watchdog, sandbox, memory limit, or asynchronous activation recovery.
+
+The website's Plugin authoring and Native UI pages now include workspace/manifest/build examples,
+capability and component tables, event/recovery guidance, and searchable section navigation. The
+TypeScript excerpts compile against the current workspace SDK. Desktop (1440 px), mobile (390 px),
+and narrow layout (720 px) checks show no document overflow or page errors; tables and code scroll
+within their own regions. A separate source/screenshot review returned `ship` with no material findings.

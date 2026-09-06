@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { nativeUiGuide, pluginGuide, type GuideSection } from "./guides";
 import {
   ArrowRight,
   BookOpen,
@@ -41,6 +42,7 @@ type Doc = {
   icon: typeof BookOpen;
   body: string[];
   code?: string;
+  sections?: readonly GuideSection[];
 };
 
 const docs: Doc[] = [
@@ -86,6 +88,7 @@ const docs: Doc[] = [
     page: "plugins",
     group: "Build",
     title: "Plugin authoring",
+    sections: pluginGuide,
     description: "Build live-installable browser experiences.",
     icon: Puzzle,
     body: [
@@ -99,6 +102,7 @@ const docs: Doc[] = [
     page: "native-ui",
     group: "Build",
     title: "Native UI composition",
+    sections: nativeUiGuide,
     description: "Compose browser surfaces with a shared design language.",
     icon: PanelLeft,
     body: [
@@ -532,7 +536,18 @@ function Documentation({
   const filtered = useMemo(
     () =>
       docs.filter((doc) =>
-        `${doc.title} ${doc.description} ${doc.body.join(" ")}`
+        `${doc.title} ${doc.description} ${doc.body.join(" ")} ${
+          doc.sections
+            ?.map((section) =>
+              [
+                section.title,
+                ...section.paragraphs,
+                ...(section.table?.rows.flat() ?? []),
+                section.code ?? "",
+              ].join(" "),
+            )
+            .join(" ") ?? ""
+        }`
           .toLowerCase()
           .includes(query.toLowerCase()),
       ),
@@ -602,8 +617,9 @@ function Documentation({
         <div id="current-status" className="notice">
           <Sparkles size={17} />
           <p>
-            <strong>Design contract.</strong> Hitchhiker is under active development. APIs, package
-            names, and code shown here communicate intended architecture, not a published release.
+            <strong>Development documentation.</strong> These examples use the current workspace
+            packages. They are not published npm releases. Each page identifies remaining native
+            integration and release work.
           </p>
         </div>
         {active.body.map((paragraph) => (
@@ -616,6 +632,56 @@ function Documentation({
             <code>{active.code}</code>
           </pre>
         )}
+        {active.sections?.map((section) => (
+          <section className="doc-section" key={section.id} aria-labelledby={section.id}>
+            <h2 id={section.id}>{section.title}</h2>
+            {section.paragraphs.map((paragraph) => (
+              <p className="doc-paragraph" key={paragraph}>
+                {paragraph}
+              </p>
+            ))}
+            {section.code && (
+              <pre>
+                <code>{section.code}</code>
+              </pre>
+            )}
+            {section.table && (
+              <div
+                className="doc-table-scroll"
+                role="region"
+                aria-label={section.title}
+                tabIndex={0}
+              >
+                <table>
+                  <thead>
+                    <tr>
+                      {section.table.headings.map((heading) => (
+                        <th scope="col" key={heading}>
+                          {heading}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {section.table.rows.map((row) => (
+                      <tr key={row[0]}>
+                        {row.map((cell, index) =>
+                          index === 0 ? (
+                            <th scope="row" key={index}>
+                              <code>{cell}</code>
+                            </th>
+                          ) : (
+                            <td key={index}>{cell}</td>
+                          ),
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        ))}
         <div className="doc-footer">
           <button onClick={() => onNavigate(previous(active.page))}>
             ← {docs.find((doc) => doc.page === previous(active.page))?.title ?? "Overview"}
@@ -629,9 +695,14 @@ function Documentation({
         <p>On this page</p>
         <button onClick={() => scrollToSection("overview")}>Overview</button>
         <button onClick={() => scrollToSection("current-status")}>Current status</button>
-        <button onClick={() => scrollToSection("illustrative-contract")}>
-          Illustrative contract
-        </button>
+        {active.code && (
+          <button onClick={() => scrollToSection("illustrative-contract")}>Example</button>
+        )}
+        {active.sections?.map((section) => (
+          <button key={section.id} onClick={() => scrollToSection(section.id)}>
+            {section.title}
+          </button>
+        ))}
       </aside>
     </main>
   );
