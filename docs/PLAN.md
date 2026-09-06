@@ -449,3 +449,12 @@ and relocated outside the checkout. Strict signature/import verification and all
 checks pass, including held navigation, replacement, input protection, managed extensions, MCP DOM,
 plugin lifecycle and safe mode. Evidence is in `work/navigation-freeze-bundle-{build,verify,native}.log`.
 The artifact remains ad hoc signed arm64; release signing and interactive macOS checks are outstanding.
+
+Commit `fa87fb5` publishes navigation-aware freezing; GitHub Check `34056939676` passed.
+The next engine packet follows `GUARDED-DISCARD-PLAN.md`: a narrow CEF hook that checks browser-observed
+protections at mutation time while retaining Chromium's normal eligibility checks, with an explicit
+exception for the host's one-tab-per-window topology. Pinning remains an interface choice, not a
+native protection bit. A full Chromium checkout/build has not begun. In parallel, the next
+portable customization packet will export only validated engine settings, default tab placement and
+plugin identity/hash/capability metadata. It must exclude page/session data, executable bytes, grants
+and runtime storage; importing a recipe must not authorize or start a plugin.
