@@ -117,3 +117,40 @@ the original root before replacement, making the identity check deterministic. P
 not change. The accompanying runtime cancellation followed Turbo stopping remaining work after
 that failure; its focused ten-test suite passes. The corrected full local check passes 429 portable
 tests (`work/extension-owner-portable-fix-check.log`).
+
+## Owned jobs and native review adapter
+
+The manager now provides owner-required preparation, owner-filtered record discovery and a trusted
+exact-owner abandonment operation. A public record may retain its original 32-character operation ID;
+older V2 records without one remain readable. Duplicate operation IDs within one principal/grant
+are invalid, both at preparation and when loading persisted state. Discovery returns reviewed
+metadata and the operation ID, without the source identity or raw manager status.
+
+Abandonment is an internal cleanup primitive, deliberately separate from public cancellation. It
+requires exact principal, grant, installation ID and digest and accepts only `prepared` records.
+It must never interrupt or erase an installation that has entered durable intent. Startup reconciliation
+and the coordinator's revocation subscription remain to be connected.
+
+The trusted native review adapter subscribes before showing the prompt, binds decisions to a fresh
+private nonce and exact artifact, and rechecks authority before returning approval. During a prompt,
+it checks authority every 500 ms; stopping the caller, revocation or a failed decision cancels the
+exact native prompt. Failed cancellation invokes the application's supplied recovery callback.
+The adapter owns at most one active review, and its deadline is bounded independently of public RPC
+requests. It is not itself a public approval method.
+
+A real Native fixture now exercises approval through this adapter, including scrolling both permission
+pages and clicking the native button. It passes and closes cleanly with a disposable test Keychain
+(`work/extension-review-adapter-native.log`). This validates the adapter and prompt, not the pending
+full upload-to-install coordinator or production Keychain startup.
+
+Cancellation review found that marking a finalizer interruptible could inherit the caller's pending
+interruption and skip asynchronous cleanup. The adapter now starts a fresh bounded child for native
+cancellation and inspects its complete outcome from an uninterruptible finalizer. Delayed cancellation
+finishes before caller shutdown returns; stalled cancellation reaches its five-second deadline and
+invokes recovery. Portable tests exercise both paths. A real Native fixture also passes caller
+interruption, exact prompt denial and clean closure (`work/extension-review-adapter-cancel-native.log`).
+
+Explicit manager tests confirm abandonment preserves installing, enabled, error, removing and removed
+records byte-for-byte and never discards their artifacts. Owned discovery retains compatibility with
+older public records without operation IDs. This does not replace startup grant reconciliation,
+which still belongs to the pending coordinator.

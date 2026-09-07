@@ -769,3 +769,10 @@ removal regressions pass with disposable test Keychains and clean exits
 (`work/extension-owner-native-regression.log`). Independent review found no manager blocker; owner
 pending discovery, revoked-owner abandonment, operation recovery and public/default-plugin wiring
 remain in the [installation plan](EXTENSION-INSTALL-PLAN.md).
+
+Owner-required extension preparation, safe owned discovery, durable operation identity and trusted
+pre-admission abandonment are implemented internally. The native-review adapter matches early native
+decisions, handles revocation and caller interruption, and performs bounded asynchronous cleanup with
+recovery on failure. Real Native approval and scoped cancellation fixtures pass using disposable test
+Keychains. The full public installation coordinator, its SDK/MCP contracts, startup reconciliation,
+local picker and default extension plugin remain open; these helpers do not expose public approval.

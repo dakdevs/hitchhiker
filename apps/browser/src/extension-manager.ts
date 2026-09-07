@@ -52,9 +52,11 @@ const Artifact = Schema.Struct({
   ),
 });
 type StoredArtifact = typeof Artifact.Type;
+const OperationId = /^[a-f0-9]{32}$/;
 const PublicSource = Schema.Struct({
   principal: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
   grantId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+  operationId: Schema.optional(Schema.String.check(Schema.isPattern(OperationId))),
 });
 const Source = Schema.Union([Schema.Literal("legacy-local"), PublicSource]);
 const StoredV1 = Schema.Struct({
@@ -108,6 +110,9 @@ export interface ManagedExtension {
 }
 /** Immutable metadata shown in a native local permission review. No filesystem path is exposed. */
 export type ExtensionPreview = Omit<ExtensionArtifact, "directory">;
+export type OwnedManagedExtension = Omit<ManagedExtension, "status"> & {
+  readonly operationId?: string;
+};
 
 export interface ExtensionOwner {
   readonly principal: string;
@@ -120,6 +125,20 @@ export interface ExtensionManager {
     sourceDirectory: string,
     owner?: ExtensionOwner,
   ) => Effect.Effect<ExtensionPreview, ExtensionManagerError>;
+  readonly prepareOwned: (
+    sourceDirectory: string,
+    owner: ExtensionOwner,
+    operationId: string,
+  ) => Effect.Effect<ExtensionPreview, ExtensionManagerError>;
+  readonly listOwned: (
+    owner: ExtensionOwner,
+  ) => Effect.Effect<readonly OwnedManagedExtension[], ExtensionManagerError>;
+  /** Trusted coordinator cleanup only; no public adapter may expose this. */
+  readonly abandonPrepared: (
+    installationId: string,
+    digest: string,
+    identity: { readonly principal: string; readonly grantId: string },
+  ) => Effect.Effect<void, ExtensionManagerError>;
   /** Re-open a persisted, unsubmitted review without accepting a new local path. */
   readonly reviewPrepared: (
     installationId: string,
@@ -375,10 +394,23 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
             })),
           }
         : undefined;
+    const operationKeys =
+      registry?.extensions.flatMap((entry) =>
+        entry.source !== "legacy-local" && entry.source.operationId !== undefined
+          ? [
+              JSON.stringify([
+                entry.source.principal,
+                entry.source.grantId,
+                entry.source.operationId,
+              ]),
+            ]
+          : [],
+      ) ?? [];
     if (
       !registry ||
       new Set(registry.extensions.map((item) => item.artifact.installationId)).size !==
-        registry.extensions.length
+        registry.extensions.length ||
+      new Set(operationKeys).size !== operationKeys.length
     )
       return yield* failure("Extension registry is invalid");
     return registry;
@@ -505,7 +537,7 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
       ),
     );
 
-  const previewLocal = (sourceDirectory: string, owner?: ExtensionOwner) =>
+  const previewLocal = (sourceDirectory: string, owner?: ExtensionOwner, operationId?: string) =>
     command(
       Effect.gen(function* () {
         // Validate the durable registry before copying an untrusted tree.
@@ -513,8 +545,23 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
         if (registry.extensions.length >= MaxExtensions)
           return yield* failure("The extension registry is full");
         const source = ownerSource(owner);
-        if (owner !== undefined && Option.isNone(source))
+        if (
+          (owner !== undefined && Option.isNone(source)) ||
+          (operationId !== undefined && (!OperationId.test(operationId) || owner === undefined))
+        )
           return yield* failure("Invalid extension owner");
+        if (
+          Option.isSome(source) &&
+          operationId !== undefined &&
+          registry.extensions.some(
+            (entry) =>
+              entry.source !== "legacy-local" &&
+              entry.source.principal === source.value.principal &&
+              entry.source.grantId === source.value.grantId &&
+              entry.source.operationId === operationId,
+          )
+        )
+          return yield* failure("That extension operation already exists");
         yield* authorizeOwner(owner);
         const artifact = yield* options.artifacts
           .stage(sourceDirectory)
@@ -529,7 +576,9 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
         );
         const entry: StoredExtension = {
           artifact: storedArtifact(artifact),
-          source: Option.isSome(source) ? source.value : "legacy-local",
+          source: Option.isSome(source)
+            ? { ...source.value, ...(operationId === undefined ? {} : { operationId }) }
+            : "legacy-local",
           state: "prepared",
           recoveryAttempts: 0,
         };
@@ -546,6 +595,77 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
           ),
         );
         return preview(artifact);
+      }),
+    );
+  const prepareOwned = (sourceDirectory: string, owner: ExtensionOwner, operationId: string) => {
+    const source = ownerSource(owner);
+    if (Option.isNone(source) || typeof operationId !== "string" || !OperationId.test(operationId))
+      return Effect.fail(failure("Invalid extension owner"));
+    return previewLocal(sourceDirectory, owner, operationId);
+  };
+  const ownedDisplay = (entry: StoredExtension): OwnedManagedExtension => {
+    const { status: _status, ...safe } = display(entry);
+    return {
+      ...safe,
+      ...(entry.source !== "legacy-local" && entry.source.operationId !== undefined
+        ? { operationId: entry.source.operationId }
+        : {}),
+    };
+  };
+  const listOwned = (owner: ExtensionOwner) =>
+    leaseError(
+      Semaphore.withPermits(
+        serial,
+        1,
+      )(
+        options.lease.withWrite(
+          Effect.gen(function* () {
+            const source = ownerSource(owner);
+            if (Option.isNone(source)) return yield* failure("Invalid extension owner");
+            yield* authorizeOwner(owner);
+            const registry = yield* load();
+            yield* authorizeOwner(owner);
+            return registry.extensions
+              .filter(
+                (entry) =>
+                  entry.source !== "legacy-local" &&
+                  entry.source.principal === source.value.principal &&
+                  entry.source.grantId === source.value.grantId,
+              )
+              .map(ownedDisplay);
+          }),
+        ),
+      ),
+    );
+  // Trusted coordinator-only cleanup for a never-admitted prepared record. It intentionally
+  // accepts no live authorization effect: a revoked owner must still lose its pending artifact.
+  const abandonPrepared = (
+    installationId: string,
+    digest: string,
+    identity: { readonly principal: string; readonly grantId: string },
+  ) =>
+    command(
+      Effect.gen(function* () {
+        const source = decodePublicSource(identity);
+        if (!InstallationId.test(installationId) || !Digest.test(digest) || Option.isNone(source))
+          return yield* failure("Invalid extension identity");
+        const registry = yield* load();
+        const entry = lookup(registry, installationId, digest);
+        if (
+          !entry ||
+          entry.state !== "prepared" ||
+          entry.source === "legacy-local" ||
+          entry.source.principal !== source.value.principal ||
+          entry.source.grantId !== source.value.grantId
+        )
+          return yield* failure("Only the exact public prepared record may be abandoned");
+        yield* save({
+          version: 2,
+          extensions: registry.extensions.filter((item) => item !== entry),
+        });
+        yield* options.artifacts
+          .discardUnused(installationId, digest)
+          .pipe(Effect.mapError((error) => failure(error.message)));
       }),
     );
   const reviewPrepared = (installationId: string, digest: string, owner?: ExtensionOwner) =>
@@ -901,6 +1021,9 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
   const isReadOnly = () => Effect.sync(() => readOnly);
   return {
     previewLocal,
+    prepareOwned,
+    listOwned,
+    abandonPrepared,
     reviewPrepared,
     confirmInstall,
     cancelPreview,

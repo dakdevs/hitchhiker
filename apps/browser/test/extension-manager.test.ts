@@ -692,6 +692,7 @@ test("migrates legacy records and binds public reviews to their exact persisted 
       }),
     );
     await Effect.runPromise(first.previewLocal("/owner-selected", owner));
+    assert.equal((await Effect.runPromise(first.listOwned(owner)))[0]?.operationId, undefined);
     const persisted = JSON.parse(
       await readFile(join(profile, "hitchhiker-extensions", "extensions.json"), "utf8"),
     );
@@ -857,6 +858,147 @@ test("rejects V2 records without source metadata and V1 records carrying public 
       extensions: [{ ...record, source: { principal: "plugin-a", grantId: "grant-a" } }],
     });
     await assert.rejects(Effect.runPromise(manager.list()));
+  } finally {
+    await rm(profile, { recursive: true, force: true });
+  }
+});
+
+test("owner preparation persists operation discovery and trusted abandonment is exact", async () => {
+  const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-extension-owned-job-")));
+  try {
+    const item = artifact(profile);
+    let authorized = true;
+    const owner = {
+      principal: "plugin-a",
+      grantId: "grant-a",
+      authorize: Effect.suspend(() => (authorized ? Effect.void : Effect.fail("revoked"))),
+    };
+    let staged = 0;
+    let discarded = 0;
+    const artifacts = {
+      ...store(item),
+      stage: () =>
+        Effect.sync(() => {
+          staged += 1;
+          return item;
+        }),
+      discardUnused: () =>
+        Effect.sync(() => {
+          discarded += 1;
+        }),
+    } satisfies ExtensionArtifactStore;
+    const manager = await Effect.runPromise(
+      createExtensionManager({
+        profileRoot: profile,
+        lease: lease(profile),
+        artifacts,
+        engine: engine(),
+      }),
+    );
+    await assert.rejects(Effect.runPromise(manager.prepareOwned("/x", owner, "bad")));
+    await Effect.runPromise(manager.prepareOwned("/x", owner, "d".repeat(32)));
+    await assert.rejects(Effect.runPromise(manager.prepareOwned("/x", owner, "d".repeat(32))));
+    const unsafePrepare = manager.prepareOwned as unknown as (
+      sourceDirectory: string,
+      owner: unknown,
+      operationId: unknown,
+    ) => Effect.Effect<unknown, unknown>;
+    await assert.rejects(Effect.runPromise(unsafePrepare("/x", undefined, undefined)));
+    assert.equal(staged, 1);
+    const restarted = await Effect.runPromise(
+      createExtensionManager({
+        profileRoot: profile,
+        lease: lease(profile),
+        artifacts,
+        engine: engine(),
+      }),
+    );
+    const exact = await Effect.runPromise(restarted.listOwned(owner));
+    assert.equal(exact.length, 1);
+    assert.equal(exact[0]?.operationId, "d".repeat(32));
+    assert.equal("status" in exact[0]!, false);
+    assert.equal("grantId" in exact[0]!, false);
+    assert.equal("source" in exact[0]!, false);
+    authorized = false;
+    await assert.rejects(Effect.runPromise(restarted.listOwned(owner)));
+    authorized = true;
+    assert.deepEqual(
+      await Effect.runPromise(restarted.listOwned({ ...owner, principal: "plugin-b" })),
+      [],
+    );
+    await assert.rejects(
+      Effect.runPromise(
+        restarted.abandonPrepared(item.installationId, item.digest, {
+          principal: "plugin-b",
+          grantId: "grant-a",
+        }),
+      ),
+    );
+    authorized = false;
+    await Effect.runPromise(
+      restarted.abandonPrepared(item.installationId, item.digest, {
+        principal: owner.principal,
+        grantId: owner.grantId,
+      }),
+    );
+    assert.equal(discarded, 1);
+    authorized = true;
+    assert.deepEqual(await Effect.runPromise(restarted.listOwned(owner)), []);
+  } finally {
+    await rm(profile, { recursive: true, force: true });
+  }
+});
+
+test("trusted abandonment preserves admitted state and legacy owned records remain discoverable", async () => {
+  const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-extension-abandon-")));
+  try {
+    const item = artifact(profile);
+    const owner = { principal: "plugin-a", grantId: "grant-a", authorize: Effect.void };
+    let discarded = 0;
+    const manager = await Effect.runPromise(
+      createExtensionManager({
+        profileRoot: profile,
+        lease: lease(profile),
+        engine: engine(),
+        artifacts: {
+          ...store(item),
+          discardUnused: () =>
+            Effect.sync(() => {
+              discarded++;
+            }),
+        },
+      }),
+    );
+    await Effect.runPromise(manager.prepareOwned("/x", owner, "e".repeat(32)));
+    const path = join(profile, "hitchhiker-extensions", "extensions.json");
+    const registry = JSON.parse(await readFile(path, "utf8"));
+    for (const state of ["installing", "enabled", "error", "removing", "removed"]) {
+      registry.extensions[0].state = state;
+      const serialized = JSON.stringify(registry);
+      await writeFile(path, serialized);
+      await assert.rejects(
+        Effect.runPromise(
+          manager.abandonPrepared(item.installationId, item.digest, {
+            principal: owner.principal,
+            grantId: owner.grantId,
+          }),
+        ),
+      );
+      assert.equal(await readFile(path, "utf8"), serialized);
+      assert.equal(discarded, 0);
+    }
+    delete registry.extensions[0].source.operationId;
+    await writeFile(path, JSON.stringify(registry));
+    const old = await Effect.runPromise(manager.listOwned(owner));
+    assert.equal(old.length, 1);
+    assert.equal(old[0]?.operationId, undefined);
+    registry.extensions[0].source.operationId = "e".repeat(32);
+    registry.extensions.push({
+      ...registry.extensions[0],
+      artifact: { ...registry.extensions[0].artifact, installationId: "c".repeat(32) },
+    });
+    await writeFile(path, JSON.stringify(registry));
+    await assert.rejects(Effect.runPromise(manager.listOwned(owner)));
   } finally {
     await rm(profile, { recursive: true, force: true });
   }
