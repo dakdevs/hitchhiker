@@ -210,3 +210,23 @@ test("dark rendering uses public design tokens", () => {
   );
   assert.equal(surface.root.bg, "#212121");
 });
+
+test("pinned initials render without browser URL globals in the isolated host", () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "URL")!;
+  try {
+    Object.defineProperty(globalThis, "URL", { configurable: true, value: undefined });
+    const surface = renderDefaultSurface(
+      browser(1),
+      {
+        ...createDefaultInterface("main"),
+        selectedPageId: "page-0",
+        pageOrder: ["page-0"],
+        pinnedPageIds: ["page-0"],
+      },
+      defaultInterfaceConfiguration,
+    );
+    assert.equal(find(surface.root, "page-select-page-0")?.label, "E");
+  } finally {
+    Object.defineProperty(globalThis, "URL", descriptor);
+  }
+});

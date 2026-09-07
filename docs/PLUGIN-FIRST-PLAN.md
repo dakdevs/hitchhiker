@@ -307,3 +307,51 @@ coupling. The harness now waits for explicit stderr readiness and bounds initial
 then preserves the original two-/three-second operation shutdown deadlines. No product timeout was
 relaxed. `pnpm check` passed after that harness correction, including typechecking, lint, formatting, tests
 and production builds.
+
+## Default plugin artifacts in progress
+
+Build actual isolated SDK artifacts for tab model, pins, layout, sidebar and top presentation.
+Canonical service contract files determine manifest digests; feature schemas stay in the plugin
+package. The normal cohort uses four workers: layout/model/pins/one presenter. Both presenters ship.
+Use bounded snapshot restart and storage conflict reconciliation. Keep profile migration, live plan
+switching and functional Settings/Plugins routing as explicit cutover gates; do not remove the old
+interface or silently replace user profiles before those gates are implemented. This artifact stage
+is part of the migration, not a claim that the shipped browser is already fully plugin-based.
+
+The five artifact packages now build from public SDK entry points. Authored Effect schemas compile
+into standalone validators so isolated JavaScriptCore workers require no Web globals or runtime
+schema library; compiler parity tests cover strict objects, identifiers, uniqueness and UTF-16
+string bounds. Generated packages carry their validator dependency's MIT notice. All artifacts are
+under 32 KiB, which measures bundle size only, not process RAM or rendering performance.
+
+The native sidebar and top fixtures pass independently: four installed workers publish the selected
+Chromium page, optional pin-provider removal retains the presenter and removes pin controls, and
+worker-manager restoration preserves selection, pin storage and both documents' JavaScript markers.
+Evidence: `work/default-plugins-native-focused.log` (2 passed, no skips). Initial timeout diagnostics
+showed a 2.735-second worker startup delay under extreme machine load; the successful trace completed
+model activation in 4.187 seconds. No isolation timeout was relaxed. A follow-up transport issue is
+recorded: activation-time resource/crash monitoring currently starts after activation, so failures
+can surface as generic timeouts. Fixture assertions now inspect composed labels/icons because the
+host deliberately hashes plugin node/action IDs.
+
+The final artifact checkpoint passes `pnpm check` (typechecking, lint, formatting, portable tests and
+production builds). The strengthened native fixtures also verify pin controls return after provider
+re-enablement; both passed without skips before the review changes. Browser typechecking
+passes after that assertion change. This checkpoint does not claim a fresh full native-suite run,
+live UI interaction coverage, or a completed default-interface migration.
+
+Review found and corrected a presenter lifecycle issue: expected public API failures from UI commands
+now resolve the event instead of terminating the worker. Tests cover rejected `https://` navigation,
+retained draft and subsequent success, plus optional pin-provider loss between render and press.
+Unexpected errors still propagate. A delayed open's pending selection is cleared only after a newer
+selection/new-page/immediate-open commit succeeds, preventing stale intent from stealing selection.
+The default-plugin package now has 17 portable tests.
+
+Final review accepted the error boundary and selection-intent fixes. The post-review repository check
+passes in `work/default-plugins-check-final.log`; native evidence uses the rebuilt final artifacts.
+
+Post-review native rerun: sidebar passes, but top presentation times out during worker activation
+(`work/default-plugins-native-final.log`). A separate top-only retry also times out
+(`work/default-plugins-native-top-final.log`), with machine load averages still above 260. Earlier
+both-mode functional runs passed, but startup reliability under load remains unresolved; the final
+native rerun is not green. These artifacts remain opt-in development packages, not the shipped default.

@@ -1,0 +1,50 @@
+{
+  "format": "hitchhiker-service-contract/1",
+  "name": "browser.shell.layout",
+  "version": "1.0.0",
+  "state": {
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "number",
+        "enum": [1]
+      },
+      "presentation": {
+        "type": "string",
+        "enum": ["sidebar", "top"]
+      }
+    },
+    "required": ["version", "presentation"],
+    "additionalProperties": false
+  },
+  "methods": {
+    "setPresentation": {
+      "params": {
+        "type": "object",
+        "properties": {
+          "presentation": {
+            "type": "string",
+            "enum": ["sidebar", "top"]
+          }
+        },
+        "required": ["presentation"],
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "presentation": {
+            "type": "string",
+            "enum": ["sidebar", "top"]
+          }
+        },
+        "required": ["version", "presentation"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

@@ -111,13 +111,12 @@ const pageIcon = (page: BrowserPage) =>
   page.lifecycle === "sleeping" ? "app:lucide-moon" : "app:lucide-globe";
 
 const siteInitials = (url: string): string => {
-  try {
-    const hostname = new URL(url).hostname.replace(/^www\./i, "");
-    const characters = Array.from(hostname.replace(/[^\p{L}\p{N}]/gu, ""));
-    return characters[0]?.toLocaleUpperCase() || "?";
-  } catch {
-    return "?";
-  }
+  // Pages arrive with host-normalized HTTP(S) URLs. The isolated UI worker has no URL global.
+  const hostname = /^https?:\/\/(?:[^/?#@]*@)?(\[[^\]]+\]|[^/:?#]+)/i
+    .exec(url)?.[1]
+    ?.replace(/^www\./i, "");
+  const characters = Array.from((hostname ?? "").replace(/[^\p{L}\p{N}]/gu, ""));
+  return characters[0]?.toLocaleUpperCase() || "?";
 };
 
 const pageSlice = (

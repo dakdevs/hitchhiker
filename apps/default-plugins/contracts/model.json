@@ -1,0 +1,547 @@
+{
+  "format": "hitchhiker-service-contract/1",
+  "name": "browser.tabs.model",
+  "version": "1.0.0",
+  "state": {
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "number",
+        "enum": [1]
+      },
+      "pagesRevision": {
+        "type": "integer",
+        "allOf": [
+          {
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        ]
+      },
+      "selection": {
+        "anyOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["new-page"]
+              }
+            },
+            "required": ["kind"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["page"]
+              },
+              "pageId": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                  }
+                ]
+              }
+            },
+            "required": ["kind", "pageId"],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "pageOrder": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+            }
+          ]
+        },
+        "allOf": [
+          {
+            "maxItems": 128
+          },
+          {
+            "uniqueItems": true
+          }
+        ]
+      }
+    },
+    "required": ["version", "pagesRevision", "selection", "pageOrder"],
+    "additionalProperties": false
+  },
+  "methods": {
+    "select": {
+      "params": {
+        "type": "object",
+        "properties": {
+          "pageId": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+              }
+            ]
+          }
+        },
+        "required": ["pageId"],
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "pagesRevision": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            ]
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["new-page"]
+                  }
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["page"]
+                  },
+                  "pageId": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                      }
+                    ]
+                  }
+                },
+                "required": ["kind", "pageId"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "pageOrder": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                }
+              ]
+            },
+            "allOf": [
+              {
+                "maxItems": 128
+              },
+              {
+                "uniqueItems": true
+              }
+            ]
+          }
+        },
+        "required": ["version", "pagesRevision", "selection", "pageOrder"],
+        "additionalProperties": false
+      }
+    },
+    "new": {
+      "params": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "pagesRevision": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            ]
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["new-page"]
+                  }
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["page"]
+                  },
+                  "pageId": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                      }
+                    ]
+                  }
+                },
+                "required": ["kind", "pageId"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "pageOrder": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                }
+              ]
+            },
+            "allOf": [
+              {
+                "maxItems": 128
+              },
+              {
+                "uniqueItems": true
+              }
+            ]
+          }
+        },
+        "required": ["version", "pagesRevision", "selection", "pageOrder"],
+        "additionalProperties": false
+      }
+    },
+    "open": {
+      "params": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "allOf": [
+              {
+                "maxLength": 8192,
+                "format": "utf16-max-8192"
+              }
+            ]
+          }
+        },
+        "required": ["url"],
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "pagesRevision": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            ]
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["new-page"]
+                  }
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["page"]
+                  },
+                  "pageId": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                      }
+                    ]
+                  }
+                },
+                "required": ["kind", "pageId"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "pageOrder": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                }
+              ]
+            },
+            "allOf": [
+              {
+                "maxItems": 128
+              },
+              {
+                "uniqueItems": true
+              }
+            ]
+          }
+        },
+        "required": ["version", "pagesRevision", "selection", "pageOrder"],
+        "additionalProperties": false
+      }
+    },
+    "close": {
+      "params": {
+        "type": "object",
+        "properties": {
+          "pageId": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+              }
+            ]
+          }
+        },
+        "required": ["pageId"],
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "pagesRevision": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            ]
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["new-page"]
+                  }
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["page"]
+                  },
+                  "pageId": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                      }
+                    ]
+                  }
+                },
+                "required": ["kind", "pageId"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "pageOrder": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                }
+              ]
+            },
+            "allOf": [
+              {
+                "maxItems": 128
+              },
+              {
+                "uniqueItems": true
+              }
+            ]
+          }
+        },
+        "required": ["version", "pagesRevision", "selection", "pageOrder"],
+        "additionalProperties": false
+      }
+    },
+    "reorder": {
+      "params": {
+        "type": "object",
+        "properties": {
+          "pageId": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+              }
+            ]
+          },
+          "index": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": 0,
+                "maximum": 127
+              }
+            ]
+          }
+        },
+        "required": ["pageId", "index"],
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "pagesRevision": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            ]
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["new-page"]
+                  }
+                },
+                "required": ["kind"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": ["page"]
+                  },
+                  "pageId": {
+                    "type": "string",
+                    "allOf": [
+                      {
+                        "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                      }
+                    ]
+                  }
+                },
+                "required": ["kind", "pageId"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "pageOrder": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                }
+              ]
+            },
+            "allOf": [
+              {
+                "maxItems": 128
+              },
+              {
+                "uniqueItems": true
+              }
+            ]
+          }
+        },
+        "required": ["version", "pagesRevision", "selection", "pageOrder"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

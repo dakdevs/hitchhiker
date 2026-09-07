@@ -1,0 +1,105 @@
+{
+  "format": "hitchhiker-service-contract/1",
+  "name": "browser.tabs.pins",
+  "version": "1.0.0",
+  "state": {
+    "type": "object",
+    "properties": {
+      "version": {
+        "type": "number",
+        "enum": [1]
+      },
+      "pagesRevision": {
+        "type": "integer",
+        "allOf": [
+          {
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        ]
+      },
+      "pinnedPageIds": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+            }
+          ]
+        },
+        "allOf": [
+          {
+            "maxItems": 128
+          },
+          {
+            "uniqueItems": true
+          }
+        ]
+      }
+    },
+    "required": ["version", "pagesRevision", "pinnedPageIds"],
+    "additionalProperties": false
+  },
+  "methods": {
+    "set": {
+      "params": {
+        "type": "object",
+        "properties": {
+          "pageId": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+              }
+            ]
+          },
+          "pinned": {
+            "type": "boolean"
+          }
+        },
+        "required": ["pageId", "pinned"],
+        "additionalProperties": false
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "number",
+            "enum": [1]
+          },
+          "pagesRevision": {
+            "type": "integer",
+            "allOf": [
+              {
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            ]
+          },
+          "pinnedPageIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+                }
+              ]
+            },
+            "allOf": [
+              {
+                "maxItems": 128
+              },
+              {
+                "uniqueItems": true
+              }
+            ]
+          }
+        },
+        "required": ["version", "pagesRevision", "pinnedPageIds"],
+        "additionalProperties": false
+      }
+    }
+  }
+}
