@@ -26,7 +26,7 @@ const artifactsRoot = new URL("../../default-plugins/dist/", import.meta.url);
 const Value = Schema.Struct({ result: Schema.Struct({ value: Schema.Json }) });
 for (const placement of ["sidebar", "top"] as const)
   test(
-    `four default ${placement} plugins switch presenters live with retained Chromium documents and rollback`,
+    `five default ${placement} plugins switch presenters live with retained Chromium documents and rollback`,
     { skip: !binary || !pluginHost, timeout: 60_000 },
     async () => {
       const profile = await realpath(
@@ -61,6 +61,7 @@ for (const placement of ["sidebar", "top"] as const)
             "default-browser-layout",
             presenter,
             alternatePresenter,
+            "default-devtools",
           ].map(async (id) => ({
             manifest: JSON.parse(
               await readFile(new URL(`${id}/hitchhiker.plugin.json`, artifactsRoot), "utf8"),
@@ -200,6 +201,7 @@ for (const placement of ["sidebar", "top"] as const)
                     "default-tab-pins",
                     "default-browser-layout",
                     presenter,
+                    "default-devtools",
                   ],
                   composition: recipe,
                   serviceBindings: services.bindings,
@@ -210,6 +212,7 @@ for (const placement of ["sidebar", "top"] as const)
                     "default-tab-pins",
                     "default-browser-layout",
                     alternatePresenter,
+                    "default-devtools",
                   ],
                   composition: alternateRecipe,
                   serviceBindings: alternateServices.bindings,
@@ -221,9 +224,9 @@ for (const placement of ["sidebar", "top"] as const)
                 yield* apply(full);
                 yield* selected();
                 process.stdout.write(
-                  `Default ${placement} four-plugin install and first viewport: ${Math.round(performance.now() - started)}ms\n`,
+                  `Default ${placement} five-plugin install and first viewport: ${Math.round(performance.now() - started)}ms\n`,
                 );
-                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 4);
+                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 5);
                 assert(
                   committedSurface.includes("Tab /second"),
                   "SDK presenter must publish tab controls",
@@ -263,6 +266,7 @@ for (const placement of ["sidebar", "top"] as const)
                   "default-tab-model",
                   "default-tab-pins",
                   "default-browser-layout",
+                  "default-devtools",
                 ])
                   assert.equal(generations.get(id), stableGenerations.get(id));
                 assert.equal(active.has(presenter), false);
@@ -274,6 +278,7 @@ for (const placement of ["sidebar", "top"] as const)
                   "default-tab-model",
                   "default-tab-pins",
                   "default-browser-layout",
+                  "default-devtools",
                 ])
                   assert.equal(generations.get(id), stableGenerations.get(id));
                 const failedPackage = packages.find(
@@ -303,16 +308,18 @@ for (const placement of ["sidebar", "top"] as const)
                           ...alternateRecipe,
                           slots: alternateRecipe.slots.map((slot) => ({
                             ...slot,
-                            contributions: slot.contributions.map((entry) => ({
-                              ...entry,
-                              pluginId: "failing-presenter",
-                            })),
+                            contributions: slot.contributions.map((entry) =>
+                              entry.pluginId === alternatePresenter
+                                ? { ...entry, pluginId: "failing-presenter" }
+                                : entry,
+                            ),
                           })),
                         },
-                        serviceBindings: alternateServices.bindings.map((binding) => ({
-                          ...binding,
-                          consumer: "failing-presenter",
-                        })),
+                        serviceBindings: alternateServices.bindings.map((binding) =>
+                          binding.consumer === alternatePresenter
+                            ? { ...binding, consumer: "failing-presenter" }
+                            : binding,
+                        ),
                       }),
                     ),
                   ),
@@ -323,11 +330,12 @@ for (const placement of ["sidebar", "top"] as const)
                   "default-tab-model",
                   "default-tab-pins",
                   "default-browser-layout",
+                  "default-devtools",
                 ])
                   assert.equal(generations.get(id), stableGenerations.get(id));
                 assert.deepEqual(yield* modelStorage.read(), modelBefore);
                 assert.deepEqual(yield* pinsStorage.read(), pinsBefore);
-                assert.equal(peak, 4);
+                assert.equal(peak, 5);
                 assert.equal(yield* evaluate(ids[0]!, "globalThis.marker"), "first");
                 assert.equal(yield* evaluate(ids[1]!, "globalThis.marker"), "second");
               }),
@@ -337,7 +345,7 @@ for (const placement of ["sidebar", "top"] as const)
                 const manager = yield* createPluginManager(options);
                 yield* manager.restore();
                 yield* selected();
-                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 4);
+                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 5);
                 assert(
                   committedSurface.includes("Tab /second"),
                   "SDK presenter must publish tab controls",

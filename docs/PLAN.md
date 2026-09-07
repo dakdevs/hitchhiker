@@ -685,3 +685,11 @@ and exit zero using a disposable mock-Keychain profile. Five workers were observ
 peak combined RSS during the short fixture; this is not a full-browser performance claim.
 [The DevTools plan](DEVTOOLS-PLAN.md#v2-integration-evidence) records the scope and remaining
 Keychain, physical UI, full-entrypoint, shutdown-diagnostic and performance gaps.
+
+Public presenter replacement now has real Native coverage through the composed Settings controls.
+The sidebar-to-top-to-sidebar round trip retains document globals, session storage, live form values,
+selection, pins and the same open inspector. The direct-manager regression now uses the V2 five-worker
+cohort and passes failed replacement rollback and provider-generation stability for both placements.
+Three native cases pass without skips using disposable test Keychains;
+[the evidence and limits](DEVTOOLS-PLAN.md#public-presenter-retention-acceptance) distinguish synthetic
+Native input from physical clicks and keep production startup and performance requirements open.

@@ -47,6 +47,7 @@ const ModelState = Schema.Struct({
   ]),
   pageOrder: Schema.Array(Schema.String),
 });
+const Evaluation = Schema.Struct({ result: Schema.Struct({ value: Schema.Json }) });
 const PinsState = Schema.Struct({ pinnedPageIds: Schema.Array(Schema.String) });
 
 const waitUntil = (label: string, condition: Effect.Effect<boolean, unknown>) =>
@@ -56,7 +57,7 @@ const waitUntil = (label: string, condition: Effect.Effect<boolean, unknown>) =>
   );
 
 test(
-  "installed startup migrates V1 browser state into the default plugin interface",
+  "installed startup migrates V1 state and public presenter replacement retains pages and DevTools",
   { skip: !binary || !pluginHost, timeout: 60_000 },
   async (context) => {
     const profile = await realpath(
@@ -229,11 +230,94 @@ test(
             const inspector = engine
               .request("devtools.status", { pageId: "second" })
               .pipe(Effect.flatMap(Schema.decodeUnknownEffect(DevToolsStatusSchema)));
+            const evaluate = (pageId: string, expression: string) =>
+              engine
+                .request("cdp.send", {
+                  pageId,
+                  method: "Runtime.evaluate",
+                  params: { expression, returnByValue: true },
+                })
+                .pipe(
+                  Effect.flatMap(Schema.decodeUnknownEffect(Evaluation)),
+                  Effect.map((result) => result.result.value),
+                );
+            const markers = new Map<string, string>();
+            for (const pageId of ["first", "second"]) {
+              yield* waitUntil(
+                "restored document is ready",
+                evaluate(pageId, "location.pathname").pipe(
+                  Effect.map((value) => value === `/${pageId}`),
+                ),
+              );
+              const marker = crypto.randomUUID();
+              markers.set(pageId, marker);
+              yield* evaluate(
+                pageId,
+                `globalThis.retentionMarker = ${JSON.stringify(marker)}; sessionStorage.setItem("retention-marker", ${JSON.stringify(marker)}); document.body.appendChild(Object.assign(document.createElement("input"), {id:"retention-input",value:${JSON.stringify(marker)}})); true`,
+              );
+            }
             yield* press("Inspect selected page");
             yield* waitUntil(
               "default DevTools opens real inspector",
               inspector.pipe(Effect.map((value) => value.state === "open")),
             );
+            const inspectorBefore = yield* inspector;
+            const modelBefore = yield* (yield* storage.forOwner("default-tab-model")).read();
+            const pinsBefore = yield* (yield* storage.forOwner("default-tab-pins")).read();
+            for (const placement of ["top", "sidebar"]) {
+              yield* press("Settings");
+              const label = `Use ${placement} tabs`;
+              yield* waitUntil(
+                "replacement control is composed",
+                Effect.sync(() => buttons.has(label)),
+              );
+              yield* press(label);
+              yield* waitUntil(
+                "public replacement enables the selected presenter",
+                manager
+                  .plan()
+                  .pipe(
+                    Effect.map(
+                      (plan) =>
+                        plan.enabled.includes(`default-${placement}-tabs`) &&
+                        plan.enabled.includes("default-devtools") &&
+                        plan.enabled.length === 5,
+                    ),
+                  ),
+              );
+              yield* waitUntil(
+                "replacement retains selected viewport",
+                controller.snapshot.pipe(
+                  Effect.map(
+                    (snapshot) =>
+                      snapshot.viewports.length === 1 && snapshot.viewports[0]?.pageId === "second",
+                  ),
+                ),
+              );
+              yield* waitUntil(
+                "replacement publishes browser controls",
+                Effect.sync(() => buttons.has("Settings")),
+              );
+              assert.deepEqual(yield* inspector, inspectorBefore);
+              assert.deepEqual(
+                yield* (yield* storage.forOwner("default-tab-model")).read(),
+                modelBefore,
+              );
+              assert.deepEqual(
+                yield* (yield* storage.forOwner("default-tab-pins")).read(),
+                pinsBefore,
+              );
+              assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 5);
+              for (const [pageId, marker] of markers) {
+                assert.deepEqual(
+                  yield* evaluate(
+                    pageId,
+                    '[globalThis.retentionMarker,sessionStorage.getItem("retention-marker"),document.getElementById("retention-input")?.value]',
+                  ),
+                  [marker, marker, marker],
+                );
+              }
+            }
             yield* waitUntil(
               "default DevTools close control appears",
               Effect.sync(() => buttons.has("Close inspector")),

@@ -156,3 +156,25 @@ type, lint, formatting and build checks (`work/default-devtools-v2-check.log`). 
 `devtools-workbench` also passes its real compiled-plugin fixture with one pass and no skips
 (`work/default-devtools-v2-workbench.log`). Both Native runs leave no host or plugin worker process.
 A separate read-only integration review found no concrete bootstrap, bundle or capacity blocker.
+
+## Public presenter retention acceptance
+
+Extend the V2 Native startup fixture to invoke the composed Settings replacement controls through
+public plugin events, switching sidebar to top and back. Verify selection, model/pins persistence,
+five workers, JavaScript document markers, session storage, live form values and the same open
+inspector incarnation across both replacements. Update the older direct-manager regression to V2
+while preserving its failed-replacement rollback and stable provider-generation checks.
+
+This acceptance now passes against the actual Native and JavaScriptCore hosts with disposable test
+Keychains: `work/presenter-public-retention-native.log` records one pass, no skips, and both public
+Settings replacements while the same inspector stays open. Document globals, session storage and
+live input values survive; selection and model/pins storage remain unchanged. Inspector revocation
+still closes only the inspector, and the engine exits zero. The events are synthetic at the trusted
+NativeSurface boundary, not physical mouse clicks.
+
+`work/presenter-v2-rollback-native.log` records two passes, no skips, covering both starting tab
+placements with five workers, optional pin-provider removal/restoration, stable model/pins/layout/
+DevTools worker generations, retained Chromium documents, failed-presenter rollback and restore.
+The deliberately failing plugin logs its activation error as expected. The public-startup fixture
+still logs the previously recorded shutdown request-queue-full diagnostic; physical interaction,
+production Keychain and comprehensive performance acceptance remain open.
