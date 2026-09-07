@@ -693,3 +693,9 @@ cohort and passes failed replacement rollback and provider-generation stability 
 Three native cases pass without skips using disposable test Keychains;
 [the evidence and limits](DEVTOOLS-PLAN.md#public-presenter-retention-acceptance) distinguish synthetic
 Native input from physical clicks and keep production startup and performance requirements open.
+
+The misleading shutdown IPC diagnostic is corrected: late input on a stopped bridge returns quietly,
+while the unchanged 64-request capacity branch still reports actual saturation. The Native rebuild
+and all three V2 retention/rollback cases pass; captured output contains three clean shell closures
+and no queue-full diagnostic. This resolves the observed warning, not production Keychain startup
+or every release/shutdown acceptance requirement.

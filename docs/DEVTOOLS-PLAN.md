@@ -178,3 +178,19 @@ DevTools worker generations, retained Chromium documents, failed-presenter rollb
 The deliberately failing plugin logs its activation error as expected. The public-startup fixture
 still logs the previously recorded shutdown request-queue-full diagnostic; physical interaction,
 production Keychain and comprehensive performance acceptance remain open.
+
+## Shutdown diagnostic correction
+
+The IPC admission path used one diagnostic for two conditions: a stopped bridge and the unchanged
+64-request capacity limit. Buffered plugin input arriving after normal window closure could therefore
+report saturation. Separate the stopped-bridge return from the capacity diagnostic, matching the
+existing stopped check when dispatched input is processed. Rebuild the Native host and rerun the
+public-retention fixture; verify inspector/page lifecycle and exit zero while checking captured
+stderr for the misleading message. This does not change the input limit or claim a broader shutdown
+redesign.
+
+The Native host rebuild passed (`work/shutdown-diagnostic-build.log`). All three current-cohort
+Native cases pass without skips (`work/shutdown-diagnostic-native.log`), with three clean shell
+closures and no request-queue-full diagnostic. The unchanged 64-request admission bound still has
+its saturation diagnostic; this run verifies the shutdown case, not a synthetic saturation stress
+test. The test-only Keychain wrapper remains restricted to disposable fixture profile prefixes.

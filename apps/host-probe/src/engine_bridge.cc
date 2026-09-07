@@ -525,7 +525,10 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
   void PostInput(std::string frame) {
     {
       std::lock_guard<std::mutex> lock(input_lock_);
-      if (stopped_ || pending_input_ >= kMaxPendingRequests) { Diagnose("request queue full"); return; }
+      // Buffered input can arrive after the window closes the bridge.
+      // It is already discarded by ProcessInput; this is not queue saturation.
+      if (stopped_) return;
+      if (pending_input_ >= kMaxPendingRequests) { Diagnose("request queue full"); return; }
       ++pending_input_;
     }
     auto self = shared_from_this();
