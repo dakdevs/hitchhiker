@@ -66,6 +66,10 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
   const pending = new Map<number, Deferred.Deferred<Schema.Json, PluginHostError>>();
   let sequence = 0;
   let activated = false;
+  let workerStarted = false;
+  let callsReceived = 0;
+  let callsCompleted = 0;
+  let callPhase: "idle" | "dispatch" | "resolve" = "idle";
   let outgoingBytes = 0;
   let callBytes = 0;
   let stopped: PluginHostError | undefined;
@@ -103,7 +107,7 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
   }, Effect.uninterruptible);
   yield* Effect.addFinalizer(() => stop(fail("closed", "Plugin host scope closed")));
   const request = Effect.fn("PluginHost.request")(function* (
-    method: string,
+    method: "activate" | "event" | "resolve" | "stop",
     params: typeof ObjectValue.Type = {},
   ): Effect.fn.Return<Schema.Json, PluginHostError> {
     if (stopped) return yield* stopped;
@@ -127,7 +131,13 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
     return yield* Deferred.await(deferred).pipe(
       Effect.timeoutOrElse({
         duration: 5000,
-        orElse: () => Effect.fail(fail("timeout", "Plugin host did not reply")),
+        orElse: () =>
+          Effect.fail(
+            fail(
+              "timeout",
+              `Plugin host did not reply to ${method} (worker=${workerStarted ? "started" : "unconfirmed"}, calls=${callsReceived}/${callsCompleted}, phase=${callPhase})`,
+            ),
+          ),
       }),
       Effect.ensuring(
         Effect.sync(() => {
@@ -139,8 +149,16 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
   // Never await a plugin call while reading its replies: resolving a Promise can itself issue calls.
   yield* Stream.fromQueue(calls).pipe(
     Stream.runForEach(({ call, bytes }) =>
-      options.call(call.method, call.params).pipe(
+      Effect.sync(() => {
+        callPhase = "dispatch";
+      }).pipe(
+        Effect.andThen(Effect.suspend(() => options.call(call.method, call.params))),
         Effect.timeoutOrElse({ duration: 4000, orElse: () => Effect.fail("timeout") }),
+        Effect.onExit(() =>
+          Effect.sync(() => {
+            callPhase = "resolve";
+          }),
+        ),
         Effect.matchEffect({
           onFailure: (error) =>
             request("resolve", {
@@ -149,9 +167,15 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
             }),
           onSuccess: (result) => request("resolve", { callId: call.callId, result }),
         }),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            callsCompleted = Math.min(callsCompleted + 1, Number.MAX_SAFE_INTEGER);
+          }),
+        ),
         Effect.asVoid,
         Effect.ensuring(
           Effect.sync(() => {
+            callPhase = "idle";
             callBytes -= bytes;
           }),
         ),
@@ -198,7 +222,11 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
           if (callBytes + bytes > 8 * 1024 * 1024 || !Queue.offerUnsafe(calls, { call, bytes }))
             return yield* fail("capacity", "Plugin call queue limit reached");
           callBytes += bytes;
-        } else yield* PubSub.publish(events, message);
+          callsReceived = Math.min(callsReceived + 1, Number.MAX_SAFE_INTEGER);
+        } else {
+          if (message.event === "plugin.started") workerStarted = true;
+          yield* PubSub.publish(events, message);
+        }
       }),
     ),
     Effect.catch(stop),

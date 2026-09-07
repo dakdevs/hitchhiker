@@ -147,3 +147,50 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+for (const stalled of ["startup", "resolve"] as const)
+  test(`activation timeout identifies a stalled ${stalled} without exposing plugin payloads`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-timeout-"));
+    const executable = join(dir, "fixture.cjs");
+    await writeFile(
+      executable,
+      `#!${process.execPath}
+const readline = require('node:readline');
+const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.method === 'activate' && ${JSON.stringify(stalled)} === 'resolve') {
+    send({ event: 'plugin.started', params: {} });
+    send({ event: 'plugin.call', params: {
+      callId: 1, method: 'private-plugin-method', params: { secret: 'private-payload' }
+    } });
+  }
+});
+`,
+      { mode: 0o700 },
+    );
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const host = yield* spawnPluginHost({
+            executable,
+            call: () => Effect.succeed({ secret: "private-result" }),
+          });
+          const failure = yield* host.activate("private-code").pipe(Effect.flip);
+          assert.equal(failure.code, "timeout");
+          assert.match(failure.message, /did not reply to activate/);
+          assert(
+            failure.message.includes(
+              stalled === "startup"
+                ? "worker=unconfirmed, calls=0/0, phase=idle"
+                : "worker=started, calls=1/0, phase=resolve",
+            ),
+            failure.message,
+          );
+          assert(!failure.message.includes("private-"));
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });

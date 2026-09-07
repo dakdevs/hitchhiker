@@ -292,3 +292,27 @@ restart. Ordinary startup without a pending transaction still records unavailabl
 The final `pnpm check` passed after this correction: 316 portable tests passed, 29 native-gated tests
 were skipped, and dependency validation, typecheck, lint, formatting and all builds passed.
 Evidence: `work/live-plan-check.log`. Native switch verification remains failed as recorded above.
+
+Native follow-up investigation: a standalone actual model artifact completed its isolated-host
+activation in 326 ms with synthetic page/storage/service replies (`work/model-host-diagnostic.log`).
+A fresh browser fixture then timed out in `default-browser-layout`;
+shutdown again stalled after all pages closed (`work/live-plan-native-switch-second.log`). A sample
+at `work/live-plan-native-second-shutdown.sample.txt` shows the same main return offset after
+`CefShutdown` as the previous capture. The fixture and its owned host eventually exited. Add bounded
+transport phase/count diagnostics to timeout errors without logging payloads or changing deadlines
+before the next native investigation. This evidence still does not verify native switching.
+
+The diagnostic rerun (`work/live-plan-native-switch-diagnostic.log`) timed out with
+`worker=unconfirmed, calls=0/0, phase=idle`. Thus no worker-start signal or plugin API call reached
+the runtime before its existing five-second deadline; the evidence does not identify a layout API
+deadlock or establish which transport/startup component stalled. This corrects the earlier inference
+that this run had passed model activation: the configured layout is preferred first. The fixture
+again exceeded its 60-second deadline while closing; it and its owned host eventually exited.
+Transport diagnostics report only fixed host operations, bounded counts and lifecycle phases, not
+plugin method names, code, arguments or results. Two protocol fixtures verify startup and resolve
+stalls without changing production limits.
+
+The diagnostic checkpoint passes `pnpm check`: 318 portable tests passed, 29 native-gated tests
+were skipped, and dependency validation, typecheck, lint, formatting and builds passed. Evidence:
+`work/plugin-timeout-diagnostics-check.log`. The native diagnostic fixture is terminal with a failed
+60-second test deadline and no surviving owned processes; this is not a native acceptance pass.
