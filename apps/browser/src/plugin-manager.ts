@@ -3,7 +3,7 @@ import { lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import type { Capability } from "@hitchhiker/core";
 import type { GrantStoreApi } from "@hitchhiker/runtime";
-import { Clock, Deferred, Effect, Fiber, Option, Schema, Semaphore } from "effect";
+import { Clock, Deferred, Effect, Fiber, Option, Schema, Semaphore, Scope } from "effect";
 import { createPluginArtifactStore, type PluginArtifact } from "./plugin-artifacts.ts";
 
 const RegistryName = "plugins.json";
@@ -87,6 +87,8 @@ export interface PluginManagerOptions {
     onReady: Effect.Effect<void>,
   ) => Effect.Effect<void, unknown>;
   readonly safeMode?: boolean;
+  /** Configured UI owners use the host compositor instead of whole-window ownership. */
+  readonly compositionOwners?: ReadonlySet<string>;
   /** Reserved for launcher failures to restore the trusted interface. */
   readonly onRecoveryFailure?: Effect.Effect<void>;
 }
@@ -151,7 +153,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     Effect.mapError((error) => failure(error.message)),
   );
   const lock = yield* Semaphore.make(1);
-  const managerScope = yield* Effect.scope;
+  const managerScope = yield* Scope.make();
   let nextGeneration = 0;
   const running = new Map<
     string,
@@ -161,6 +163,11 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       readonly stop: () => Effect.Effect<void>;
     }
   >();
+  yield* Effect.addFinalizer((exit) =>
+    Effect.sync(() => {
+      for (const record of running.values()) record.expectedStop = true;
+    }).pipe(Effect.andThen(Scope.close(managerScope, exit))),
+  );
   let mutationPoisoned = false;
   const poisonMutation = Effect.sync(() => {
     mutationPoisoned = true;
@@ -394,6 +401,21 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     if (options.safeMode) return;
     if (running.size >= MaxRunning) return yield* failure("At most four plugins may run");
     const artifact = yield* artifactFor(plugin, plugin.revision);
+    if (
+      options.compositionOwners &&
+      artifact.manifest.capabilities.some(
+        (capability) => capability === "ui.compose" || capability === "browser.full-control",
+      ) &&
+      !options.compositionOwners.has(plugin.id)
+    )
+      return yield* failure("UI plugin is not configured in the composition recipe");
+    if (
+      options.compositionOwners?.has(plugin.id) &&
+      !artifact.manifest.capabilities.some(
+        (capability) => capability === "ui.compose" || capability === "browser.full-control",
+      )
+    )
+      return yield* failure("Configured composition owner must declare ui.compose");
     yield* authorize(artifact, plugin.revision.grantId);
     const ready = yield* Deferred.make<void, PluginManagerError>();
     const generation = ++nextGeneration;
@@ -445,7 +467,9 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
   ): Effect.fn.Return<void, PluginManagerError> {
     if (plugin.enabled && running.has(plugin.id)) return;
     const candidate = yield* artifactFor(plugin, plugin.revision);
-    if (hasUi(candidate)) {
+    if (hasUi(candidate) && options.compositionOwners && !options.compositionOwners.has(plugin.id))
+      return yield* failure("UI plugin is not configured in the composition recipe");
+    if (hasUi(candidate) && !options.compositionOwners) {
       for (const other of registry.plugins) {
         if (other.id === plugin.id || !other.enabled) continue;
         if (hasUi(yield* artifactFor(other, other.revision)))

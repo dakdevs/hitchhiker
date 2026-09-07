@@ -554,6 +554,93 @@ test("shutdown during restore retains every unresolved opening page", async () =
   }
 });
 
+test("a lifecycle update queued before window closing tolerates only the typed closing render rejection", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-closing-render-race-"));
+  try {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const events = yield* PubSub.unbounded<EngineEvent>();
+          const lifecycleCommitStarted = yield* Deferred.make<void>();
+          const releaseLifecycleCommit = yield* Deferred.make<void>();
+          const closingRejected = yield* Deferred.make<void>();
+          let nativeClosing = false;
+          let commits = 0;
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({
+              event: "host.ready",
+              params: { pageBrowserGeneration: true },
+            }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(events),
+            request: () => Effect.succeed({}),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const surface = NativeSurface.of({
+            events: Stream.empty,
+            commit: () =>
+              Effect.gen(function* () {
+                commits += 1;
+                if (commits === 3) {
+                  yield* Deferred.succeed(lifecycleCommitStarted, undefined);
+                  yield* Deferred.await(releaseLifecycleCommit);
+                }
+                if (nativeClosing) {
+                  yield* Deferred.succeed(closingRejected, undefined);
+                  return yield* new EngineError({ code: "-32003", message: "Window is closing" });
+                }
+                return commits;
+              }),
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(NativeSurface, surface),
+              ),
+            ),
+          );
+          yield* controller.start;
+          const page = yield* controller.openPage("https://closing-race.test/");
+          yield* PubSub.publish(events, {
+            event: "pages.created",
+            params: { pageId: page, generation: 1 },
+          });
+          yield* Deferred.await(lifecycleCommitStarted).pipe(Effect.timeout(500));
+
+          // Native begins closing before the controller reaches the window.closing event
+          // which follows this already queued lifecycle update.
+          nativeClosing = true;
+          yield* PubSub.publish(events, { event: "window.closing", params: {} });
+          yield* Deferred.succeed(releaseLifecycleCommit, undefined);
+          yield* Deferred.await(closingRejected).pipe(Effect.timeout(500));
+
+          nativeClosing = false;
+          yield* PubSub.publish(events, { event: "window.closeCancelled", params: {} });
+          yield* waitUntil(
+            "close cancellation redraw",
+            Effect.sync(() => commits === 4),
+          );
+
+          assert.equal(yield* controller.lastError, undefined);
+          assert.equal((yield* controller.snapshot).pages[0]?.id, page);
+          assert.deepEqual(
+            JSON.parse(
+              yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+            ).pages.map((entry: { id: string }) => entry.id),
+            [page],
+          );
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("window shutdown preserves the session, while cancellation persists actual surviving pages", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hitchhiker-window-session-"));
   try {

@@ -672,6 +672,9 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
       return;
     }
     if (method == "ui.commit") {
+      if (manager_ && manager_->closing_all()) {
+        ReplyError(request_id, -32003, "window is closing"); return;
+      }
       if (!ui_commit_handler_) {
         ReplyError(request_id, -32601, "native UI commit is unavailable");
       } else {

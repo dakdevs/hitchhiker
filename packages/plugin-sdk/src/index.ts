@@ -19,9 +19,18 @@ export interface PluginApi {
     set(configuration: BrowserConfiguration): Promise<void>;
   };
   readonly ui: {
-    /** Replace the entire browser interface; viewport geometry is still measured by Native. */
+    /** Legacy whole-window replacement for hosts that do not enable composition. */
     publish(surface: Omit<Surface, "identity">): Promise<{ readonly revision: number }>;
-    /** Return to the trusted default interface. */
+    /** Publish this plugin's configured layout; the host owns identity, slots, and bindings. */
+    publishLayout(surface: Omit<Surface, "identity">): Promise<{ readonly revision: number }>;
+    /** Publish one host-declared contribution; the host owns its placement and provider identity. */
+    publishContribution(
+      id: string,
+      surface: Omit<Surface, "identity">,
+    ): Promise<{ readonly revision: number }>;
+    /** Withdraw one host-declared contribution. */
+    withdrawContribution(id: string): Promise<{ readonly revision: number }>;
+    /** Return to the trusted default UI, or release this caller's contributions in composition mode. */
     release(): Promise<void>;
   };
 }
@@ -48,6 +57,12 @@ const api = (host: HostBridge): PluginApi =>
     ui: Object.freeze({
       publish: (surface: Omit<Surface, "identity">) =>
         host.call<{ readonly revision: number }>("ui.publish", { surface }),
+      publishLayout: (surface: Omit<Surface, "identity">) =>
+        host.call<{ readonly revision: number }>("ui.publishLayout", { surface }),
+      publishContribution: (id: string, surface: Omit<Surface, "identity">) =>
+        host.call<{ readonly revision: number }>("ui.publishContribution", { id, surface }),
+      withdrawContribution: (id: string) =>
+        host.call<{ readonly revision: number }>("ui.withdrawContribution", { id }),
       release: () => host.call<void>("ui.release", {}),
     }),
   });

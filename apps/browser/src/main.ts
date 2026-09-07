@@ -13,6 +13,8 @@ import {
 import { Console, Deferred, Effect, Fiber, Layer, Logger, Stream } from "effect";
 import { createInstalledPluginLauncher, runPluginDirectory } from "./plugin.ts";
 import { createPluginArtifactStore } from "./plugin-artifacts.ts";
+import { createBrowserComposition } from "./composition.ts";
+import { readCompositionRecipe } from "./composition-recipe.ts";
 import { createPluginManager } from "./plugin-manager.ts";
 import { browserMcpApi } from "./mcp.ts";
 import { makeBrowserController } from "./controller.ts";
@@ -113,6 +115,14 @@ const program = Effect.gen(function* () {
         message: "The trusted interface could not be restored; closing the browser",
       }),
     ).pipe(Effect.asVoid);
+    const recipe = safeMode ? undefined : yield* readCompositionRecipe(profileLease.profileRoot);
+    if (recipe && pluginDirectory)
+      return yield* Effect.die(
+        "A profile composition uses installed plugins; --plugin cannot replace it. Use a separate developer profile.",
+      );
+    const composition = recipe
+      ? yield* createBrowserComposition({ recipe, controller, onRecoveryFailure: recoveryFailure })
+      : undefined;
     let plugins: McpPluginApi | undefined;
     let stopDeveloperPlugin: Effect.Effect<void> = Effect.void;
     let stopInstalledPlugins: Effect.Effect<void, unknown> = Effect.void;
@@ -129,11 +139,13 @@ const program = Effect.gen(function* () {
         grants,
         controller,
         onRecoveryFailure: recoveryFailure,
+        composition,
       });
       const manager = yield* createPluginManager({
         profileRoot,
         grants,
         launch,
+        compositionOwners: composition?.owners,
         safeMode: process.argv.includes("--safe-mode") || pluginDirectory !== undefined,
         onRecoveryFailure: recoveryFailure,
       });
@@ -251,6 +263,7 @@ const program = Effect.gen(function* () {
           // Only a native app key monitor emits this event. Plugin-provided actions
           // cannot invoke recovery or select a grant/registry identity.
           yield* stopInstalledPlugins;
+          if (composition) yield* composition.recover;
           yield* controller.dispatch("interface.plugins");
         }).pipe(Effect.catchCause(() => recoveryFailure)),
       ),
@@ -272,7 +285,11 @@ const program = Effect.gen(function* () {
         }),
       );
     } else yield* browserExit;
-  }).pipe(Effect.provide(layers));
+  }).pipe(
+    // Close controller and plugin lifetimes while their Native services are still available.
+    Effect.scoped,
+    Effect.provide(layers),
+  );
 }).pipe(
   Effect.scoped,
   Effect.provide(NodeServices.layer),

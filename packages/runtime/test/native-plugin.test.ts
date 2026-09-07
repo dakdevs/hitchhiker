@@ -151,6 +151,30 @@ test(
           assert(Exit.isFailure(yield* Fiber.await(alpha).pipe(Effect.timeout(3_000))));
           assert.equal(releases.get("alpha-plugin"), 1);
           assert.equal(releases.get("beta-plugin"), undefined);
+          const inboxGrant = yield* grants.issue({
+            principal: "inbox-plugin",
+            profileId: "default",
+            capabilities: ["pages.list", "ui.compose"],
+            origins: [],
+          });
+          const inboxPublished = yield* Deferred.make<void>();
+          const inboxFailure = yield* Deferred.make<never, string>();
+          const inbox = yield* runLivePlugin({
+            ...options("inbox-plugin", inboxGrant.token, inboxPublished),
+            code: 'globalThis.HitchhikerPlugin={async activate(host){await host.call("ui.publish",{surface:{}});await new Promise(()=>{});}}',
+            stopWhen: Deferred.await(inboxFailure),
+          }).pipe(Effect.forkScoped);
+          yield* Effect.raceFirst(Deferred.await(inboxPublished), Fiber.join(inbox)).pipe(
+            Effect.timeout(5000),
+          );
+          yield* Deferred.fail(inboxFailure, "owner inbox overflow");
+          assert(Exit.isFailure(yield* Fiber.await(inbox).pipe(Effect.timeout(2000))));
+          assert.equal(releases.get("inbox-plugin"), 1);
+          assert.equal(
+            releases.get("beta-plugin"),
+            undefined,
+            "another worker must survive owner-local failure",
+          );
           yield* Fiber.interrupt(beta);
           assert.equal(releases.get("beta-plugin"), 1);
 

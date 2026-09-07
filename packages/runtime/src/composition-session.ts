@@ -18,7 +18,7 @@ const Owner = Schema.Struct({
   ),
 });
 const ContributionId = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,62}$/));
-const Recipe = Schema.Struct({
+export const PluginCompositionRecipeSchema = Schema.Struct({
   layout: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{1,62}$/)),
   slots: Schema.Array(
     Schema.Struct({
@@ -30,7 +30,6 @@ const Recipe = Schema.Struct({
   ).check(Schema.isMaxLength(32)),
 });
 
-type Recipe = typeof Recipe.Type;
 type PublishedLayout = { readonly owner: CompositionOwner; readonly surface: Surface };
 type PublishedContribution = {
   readonly owner: CompositionOwner;
@@ -59,6 +58,12 @@ export interface PluginCompositionSession {
     id: unknown,
     value: unknown,
   ) => Effect.Effect<number, EngineError>;
+  readonly withdrawContribution: (
+    owner: unknown,
+    id: unknown,
+  ) => Effect.Effect<number, EngineError>;
+  /** Clear this activation’s publications while permitting subsequent publication. */
+  readonly release: (owner: unknown) => Effect.Effect<number, EngineError>;
   /**
    * A failed remove leaves the last committed surface and routes intact. The
    * owner supervisor must treat that commit error as fatal and recover it.
@@ -95,9 +100,9 @@ const cloneState = (state: State): State => ({
 export const makePluginComposition = Effect.fn("makePluginComposition")(function* (
   options: MakePluginCompositionOptions,
 ): Effect.fn.Return<PluginCompositionSession, EngineError> {
-  const recipe = yield* Schema.decodeUnknownEffect(Recipe, { onExcessProperty: "error" })(
-    options.recipe,
-  ).pipe(Effect.mapError(() => invalid("Malformed composition recipe")));
+  const recipe = yield* Schema.decodeUnknownEffect(PluginCompositionRecipeSchema, {
+    onExcessProperty: "error",
+  })(options.recipe).pipe(Effect.mapError(() => invalid("Malformed composition recipe")));
   if (recipe.slots.reduce((total, slot) => total + slot.contributions.length, 0) > maxContributions)
     return yield* invalid("Too many configured contributions");
   const slots = new Set<string>();
@@ -230,16 +235,41 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
       }),
     );
   });
-  const remove = Effect.fn("PluginComposition.remove")(function* (value: unknown) {
+  const clear = Effect.fn("PluginComposition.clear")(function* (
+    value: unknown,
+    deactivate: boolean,
+  ) {
     const owner = yield* decodeOwner(value);
     return yield* permit.withPermit(
       Effect.gen(function* () {
         if (!sameOwner(state.active.get(owner.id), owner)) return lastRevision;
         const next = cloneState(state);
-        next.active.delete(owner.id);
+        if (deactivate) next.active.delete(owner.id);
         if (next.layout?.owner.id === owner.id) next.layout = undefined;
         for (const [key, contribution] of next.contributions)
           if (contribution.owner.id === owner.id) next.contributions.delete(key);
+        return yield* commitCandidate(next);
+      }),
+    );
+  });
+  const withdrawContribution = Effect.fn("PluginComposition.withdrawContribution")(function* (
+    value: unknown,
+    contribution: unknown,
+  ) {
+    const owner = yield* decodeOwner(value);
+    const id = yield* Schema.decodeUnknownEffect(ContributionId)(contribution).pipe(
+      Effect.mapError(() => invalid("Malformed contribution ID")),
+    );
+    const key = contributionKey(owner.id, id);
+    if (!configured.has(key))
+      return yield* invalid("Contribution is not declared by the composition recipe");
+    return yield* permit.withPermit(
+      Effect.gen(function* () {
+        if (!sameOwner(state.active.get(owner.id), owner))
+          return yield* invalid("Stale contribution withdrawal");
+        if (!state.contributions.has(key)) return lastRevision;
+        const next = cloneState(state);
+        next.contributions.delete(key);
         return yield* commitCandidate(next);
       }),
     );
@@ -249,7 +279,9 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
     activate,
     publishLayout,
     publishContribution,
-    remove,
+    withdrawContribution,
+    release: (owner) => clear(owner, false),
+    remove: (owner) => clear(owner, true),
     route: (event) => {
       const routed = routeCompositionEvent(routes, event);
       return routed && sameOwner(state.active.get(routed.owner.id), routed.owner)

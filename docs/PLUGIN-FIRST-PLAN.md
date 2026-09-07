@@ -114,3 +114,61 @@ transaction changes, including retained documents under composed Native viewport
 state preservation, geometry arriving before acknowledgement, and fatal timeout/interruption behavior.
 This verifies the host composition foundation, not installed-plugin composition or performance of a
 complete default plugin set.
+
+## Installed composition integration
+
+The public SDK now has `ui.publishLayout`, `ui.publishContribution`, and `ui.withdrawContribution`.
+A profile-local `hitchhiker-plugins/composition.json` binds installed plugin identities to layout slots.
+The installed launcher assigns activation generations and shares one host composition session.
+Only configured UI owners may activate together; the four-worker limit remains unchanged. Legacy
+whole-window publication is denied in a composed profile. `ui.release` clears the caller's publications
+without disabling its activation; stopping a worker removes that generation. Missing layout keeps the trusted plugin-management interface visible so the user can repair it without MCP. The existing native emergency recovery also exposes the legacy
+plugin-management interface during migration; it is not the final plugin-based recovery architecture.
+
+`apps/composition-example` builds three independent SDK artifacts. A real Native fixture installs the
+page panels before the layout, verifies two retained Chromium documents, removes and re-enables a
+panel and the layout, then restores all three through the persistent manager. This does not yet move
+the default tabs or navigation out of the controller. Recipes are currently edited on disk and loaded
+at startup; live recipe editing, contract declarations, dependencies and activation graph validation
+remain pending.
+
+## Generic service authority decision
+
+The first service protocol will require the consumer's effective host authority to contain the
+provider's entire effective authority, including profile, origins, ancestor grants and separate CDP
+permission. This is cooperation between independently authorized plugins, not delegated least
+privilege. The provider continues to execute under its own fixed identity. Core will not embed tab
+commands or tab-state schemas; contracts, state and behavior remain plugin-owned. Exact bindings,
+versions/schema digests, activation generations, bounded calls/state and current grants remain host
+responsibilities. Private provider storage exposed through a service is intentional data sharing and
+must not be described as equivalent self-storage authority. This decision is not implemented yet.
+
+Installed composition uses a direct trusted controller event sink and bounded per-activation inboxes.
+Events published before activation completes remain queued. Overflow fails only that activation,
+including a worker still awaiting activation, and cleanup removes its contribution. Missing layout
+keeps the repair interface visible, including when contributors are enabled before the layout.
+Configured UI owners without UI authority are rejected. Worker scope shutdown is marked expected
+before child scopes close. The application scope now closes inside the engine layer lifetime, so
+plugin cleanup completes before the engine closes. A real MCP fresh-process restart verifies that
+enabled composition plugins return, disabled features stay disabled, and existing pages survive.
+Safe mode also starts with an invalid composition recipe.
+
+Activation and removal adopt the composition session and its generation-specific event inbox as one
+uninterruptible transaction after permit admission. A gated cancellation regression verifies that a
+committed replacement generation can still publish and receive input after its launch is interrupted.
+
+Full native validation exposed a separate window-close race: an older navigation event may redraw
+after Native starts closing but before the controller receives `window.closing`. Native now returns
+a method-specific closing rejection for `ui.commit`; the controller classifies it at that boundary
+and skips only the lifecycle redraw. State and persistence still update, other failures remain
+errors, and a cancelled close redraws normally. The deterministic regression and focused thirty-page
+Native restoration check pass with the synchronized controller and Native binary.
+
+Browser-state saves now finish their atomic filesystem operation before cancellation completes.
+This also protects controllers without a profile write lease from leaving an in-flight write behind
+when their scope closes; the existing lease already imposed that ordering in the application.
+
+Final verification on September 6: all 232 native runtime/browser tests passed without skips
+(122 runtime, 110 browser), including installed composition, MCP fresh-process restore, thirty-page
+window close, activation interruption and gated persistence cancellation. This remains a framework
+composition checkpoint; the default-feature plugin extraction and generic services are still pending.

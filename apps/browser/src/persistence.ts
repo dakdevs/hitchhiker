@@ -87,29 +87,31 @@ export const loadBrowserPersistence = (profileRoot: string, profileId: string) =
   });
 
 export const saveBrowserPersistence = (profileRoot: string, state: BrowserPersistence) =>
-  Effect.tryPromise({
-    try: async () => {
-      const path = `${profileRoot}/${File}`;
-      const json = JSON.stringify({
-        version: 1,
-        configuration: state.configuration,
-        interface: {
-          tabPlacement: state.interfaceConfiguration.tabPlacement,
-          ...(state.interfaceState.selectedPageId === undefined
-            ? {}
-            : { selectedPageId: state.interfaceState.selectedPageId }),
-          pageOrder: state.interfaceState.pageOrder,
-          pinnedPageIds: state.interfaceState.pinnedPageIds,
-        },
-        pages: state.pages,
-      });
-      if (Buffer.byteLength(json) > maxBytes) throw new Error("Browser state exceeds 1 MiB");
-      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-      await chmod(profileRoot, 0o700);
-      const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
-      await writeFile(temporary, json, { encoding: "utf8", mode: 0o600, flag: "wx" });
-      await rename(temporary, path);
-      await chmod(path, 0o600);
-    },
-    catch: (cause) => new Error(`Could not save browser state: ${String(cause)}`),
-  });
+  Effect.uninterruptible(
+    Effect.tryPromise({
+      try: async () => {
+        const path = `${profileRoot}/${File}`;
+        const json = JSON.stringify({
+          version: 1,
+          configuration: state.configuration,
+          interface: {
+            tabPlacement: state.interfaceConfiguration.tabPlacement,
+            ...(state.interfaceState.selectedPageId === undefined
+              ? {}
+              : { selectedPageId: state.interfaceState.selectedPageId }),
+            pageOrder: state.interfaceState.pageOrder,
+            pinnedPageIds: state.interfaceState.pinnedPageIds,
+          },
+          pages: state.pages,
+        });
+        if (Buffer.byteLength(json) > maxBytes) throw new Error("Browser state exceeds 1 MiB");
+        await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+        await chmod(profileRoot, 0o700);
+        const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
+        await writeFile(temporary, json, { encoding: "utf8", mode: 0o600, flag: "wx" });
+        await rename(temporary, path);
+        await chmod(path, 0o600);
+      },
+      catch: (cause) => new Error(`Could not save browser state: ${String(cause)}`),
+    }),
+  );

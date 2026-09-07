@@ -1,0 +1,6 @@
+{
+  "id": "split-right",
+  "name": "Split right",
+  "version": "0.1.0",
+  "capabilities": ["pages.list", "ui.compose"]
+}

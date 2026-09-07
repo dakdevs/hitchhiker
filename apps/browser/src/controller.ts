@@ -26,6 +26,7 @@ import {
   selectPageFreezes,
   type PageResourceKnowledge,
   type PortableSettings,
+  type SurfaceEvent,
 } from "@hitchhiker/runtime";
 import {
   button,
@@ -42,7 +43,7 @@ import {
   type NativeTextInputState,
   type Surface,
 } from "@hitchhiker/ui";
-import { Effect, Option, PubSub, Schema, Semaphore, Stream } from "effect";
+import { Effect, Option, PubSub, Schema, Semaphore, Stream, Scope } from "effect";
 import type { ProfileWriteLease } from "./profile-write-lease.ts";
 import {
   extensionPermissionPages,
@@ -169,6 +170,11 @@ export interface BrowserController {
     owner: string,
     surface: unknown,
   ) => Effect.Effect<number, EngineError>;
+  readonly recoverPluginSurface: (owner: string) => Effect.Effect<number, EngineError>;
+  readonly registerPluginEventHandler: (
+    owner: string,
+    handler: (event: SurfaceEvent) => Effect.Effect<void, EngineError>,
+  ) => Effect.Effect<void, EngineError, Scope.Scope>;
   readonly releasePluginSurface: (owner: string) => Effect.Effect<void, EngineError>;
   readonly pluginEvents: (
     owner: string,
@@ -431,6 +437,10 @@ export const makeBrowserController = (
     let resourceSignalsAvailable = false;
     let pageBrowserGenerationAvailable = false;
     let pageBrowsers = new Map<string, PageBrowserState>();
+    const pluginEventHandlers = new Map<
+      string,
+      (event: SurfaceEvent) => Effect.Effect<void, EngineError>
+    >();
     const pluginEvents = yield* PubSub.bounded<{
       readonly owner: string;
       readonly event: string;
@@ -459,7 +469,15 @@ export const makeBrowserController = (
           browser: replacePage(state.browser, page.id, { lifecycle: "loaded", lastUsedAt: now() }),
         };
       }
-      const revision = yield* surface.commit(next);
+      const revision = yield* surface
+        .commit(next)
+        .pipe(
+          Effect.mapError((error) =>
+            error.code === "-32003"
+              ? new EngineError({ code: "window-closing", message: error.message })
+              : error,
+          ),
+        );
       const wasShown = new Set(state.browser.viewports.map((viewport) => viewport.pageId));
       const timestamp = now();
       state = {
@@ -552,6 +570,7 @@ export const makeBrowserController = (
       operation: () => Effect.Effect<void, EngineError>,
       persistChange: boolean | (() => boolean) = false,
       shouldRender: () => boolean = () => true,
+      renderChange: () => Effect.Effect<void, EngineError> = commit,
     ) =>
       lock.withPermit(
         Effect.suspend(() =>
@@ -563,7 +582,7 @@ export const makeBrowserController = (
                   : Effect.void,
               ),
             ),
-            Effect.andThen(Effect.suspend(() => (shouldRender() ? commit() : Effect.void))),
+            Effect.andThen(Effect.suspend(() => (shouldRender() ? renderChange() : Effect.void))),
           ),
         ),
       );
@@ -1370,6 +1389,12 @@ export const makeBrowserController = (
                 }),
               () => !restoring,
               () => !restoring && closingPersistence === undefined,
+              () =>
+                commit().pipe(
+                  Effect.catch((error) =>
+                    error.code === "window-closing" ? Effect.void : Effect.fail(error),
+                  ),
+                ),
             ),
           ),
           Effect.mapError(
@@ -1382,13 +1407,11 @@ export const makeBrowserController = (
         );
       });
 
-    const handleSurface = (event: {
-      readonly event: string;
-      readonly nodeId: string;
-      readonly payload: unknown;
-    }) => {
+    const handleSurface = (event: SurfaceEvent) => {
       if (pluginOwner !== undefined) {
         const owner = pluginOwner;
+        const handler = pluginEventHandlers.get(owner);
+        if (handler) return handler(event);
         return Effect.sync(() =>
           PubSub.publishUnsafe(pluginEvents, { owner, event: "ui.event", payload: event }),
         ).pipe(
@@ -1561,6 +1584,43 @@ export const makeBrowserController = (
           }),
         ),
       publishPluginSurface,
+      recoverPluginSurface: (owner) =>
+        lock.withPermit(
+          Effect.gen(function* () {
+            if (pluginOwner !== undefined && pluginOwner !== owner)
+              return yield* new EngineError({
+                code: "composition",
+                message: "Another interface owns the window",
+              });
+            const next = render(
+              { ...state, screen: "plugins" },
+              pluginSummaries,
+              pluginStatus,
+              extensionControls,
+            );
+            const revision = yield* applySurface(next, next.bindings);
+            state = { ...state, screen: "plugins" };
+            pluginOwner = undefined;
+            pluginSurface = undefined;
+            pluginBindings = [];
+            return revision;
+          }),
+        ),
+      registerPluginEventHandler: (owner, handler) =>
+        Effect.acquireRelease(
+          Effect.gen(function* () {
+            if (pluginEventHandlers.has(owner) || pluginEventHandlers.size >= 4)
+              return yield* new EngineError({
+                code: "composition",
+                message: "Interface event handler already registered or at capacity",
+              });
+            pluginEventHandlers.set(owner, handler);
+          }),
+          () =>
+            Effect.sync(() => {
+              if (pluginEventHandlers.get(owner) === handler) pluginEventHandlers.delete(owner);
+            }),
+        ),
       releasePluginSurface,
       pluginEvents: (owner) =>
         Stream.fromPubSub(pluginEvents).pipe(

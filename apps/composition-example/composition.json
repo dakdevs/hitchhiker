@@ -1,0 +1,12 @@
+{
+  "layout": "split-layout",
+  "slots": [
+    {
+      "key": "content",
+      "contributions": [
+        { "pluginId": "split-left", "id": "page" },
+        { "pluginId": "split-right", "id": "page" }
+      ]
+    }
+  ]
+}

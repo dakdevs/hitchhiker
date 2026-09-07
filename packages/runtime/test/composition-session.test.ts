@@ -178,3 +178,32 @@ test("cancellation after native commit begins completes route adoption", async (
     ),
   );
 });
+
+test("withdrawal and release keep an activation reusable while removal rejects later publication", async () => {
+  const surfaces: Surface[] = [];
+  const session = await makeSession((surface) => Effect.sync(() => surfaces.push(surface)));
+  await Effect.runPromise(session.activate(layoutOwner));
+  await Effect.runPromise(session.activate(fragmentOwner));
+  await Effect.runPromise(session.activate(pinnedOwner));
+  await Effect.runPromise(session.publishLayout(layoutOwner, layout));
+  await Effect.runPromise(session.publishContribution(fragmentOwner, "main", fragment("Main")));
+  await Effect.runPromise(session.publishContribution(pinnedOwner, "pin", fragment("Pinned")));
+  await Effect.runPromise(session.withdrawContribution(fragmentOwner, "main"));
+  assert.doesNotMatch(JSON.stringify(surfaces.at(-1)), /"Main"/);
+  assert.match(JSON.stringify(surfaces.at(-1)), /"Pinned"/);
+  await Effect.runPromise(
+    session.publishContribution(fragmentOwner, "main", fragment("Republished")),
+  );
+  await Effect.runPromise(session.release(fragmentOwner));
+  assert.doesNotMatch(JSON.stringify(surfaces.at(-1)), /Republished/);
+  assert.match(JSON.stringify(surfaces.at(-1)), /Pinned/);
+  await Effect.runPromise(session.publishContribution(fragmentOwner, "main", fragment("Again")));
+  await assert.rejects(
+    Effect.runPromise(session.withdrawContribution(owner("fragment-plugin", 2), "main")),
+  );
+  await assert.rejects(Effect.runPromise(session.withdrawContribution(fragmentOwner, "pin")));
+  await Effect.runPromise(session.remove(fragmentOwner));
+  await assert.rejects(
+    Effect.runPromise(session.publishContribution(fragmentOwner, "main", fragment())),
+  );
+});

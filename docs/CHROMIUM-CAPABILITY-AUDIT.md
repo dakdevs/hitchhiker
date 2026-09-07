@@ -37,3 +37,26 @@ as such. Examples must run against the packaged app and exercise public APIs.
 
 The target architecture and default-plugin requirements are in
 [PLUGIN-FIRST-PLAN.md](PLUGIN-FIRST-PLAN.md). This audit does not mark any missing capability done.
+
+## DevTools and security reference acceptance
+
+DevTools must ship enabled through a default plugin. Its public building blocks must let another
+plugin open, close and select an inspected page, react to its lifecycle, and compose the supported
+DevTools presentation. Document separately what can customize the surrounding Native interface,
+what can extend the DevTools frontend, and what requires a Chromium integration change. Merely
+opening a raw CDP connection does not satisfy the default DevTools experience.
+
+The security reference must distinguish three layers:
+
+- Chromium site policy: permission decisions and supported per-profile or per-origin controls.
+- Hitchhiker authority: manifest requirements, user-issued grants, origin scope and revocation.
+- Process enforcement: the host boundary and Chromium isolation that apply even to default plugins.
+
+For every configurable policy, document its default, supported values, scope, persistence, restart
+requirements and effect on existing pages. For every privileged API, show both a successful call
+and its denied or revoked behavior. Label unavailable controls explicitly; do not imply that an
+arbitrary Chromium API or security override is available because an upstream primitive exists.
+
+The reference should answer “which pieces can I use?” directly: each entry needs its public API
+signature, required grant, corresponding event, a runnable plugin example and verified limitations.
+Default feature plugins should link to these same entries rather than use a separate internal API.

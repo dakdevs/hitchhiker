@@ -1,0 +1,6 @@
+{
+  "id": "split-layout",
+  "name": "Split layout",
+  "version": "0.1.0",
+  "capabilities": ["ui.compose"]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@hitchhiker/composition-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/layout.ts --bundle --format=iife --platform=browser --target=safari17 --outfile=dist/layout.js && esbuild src/left.ts --bundle --format=iife --platform=browser --target=safari17 --outfile=dist/left.js && esbuild src/right.ts --bundle --format=iife --platform=browser --target=safari17 --outfile=dist/right.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hitchhiker/plugin-sdk": "workspace:0.1.0",
+    "@hitchhiker/ui": "workspace:0.1.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

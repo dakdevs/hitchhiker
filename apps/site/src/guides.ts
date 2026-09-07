@@ -15,7 +15,7 @@ export const pluginGuide: readonly GuideSection[] = [
     title: "A browser assembled from plugins",
     paragraphs: [
       "Hitchhiker is being built as a Chromium host with a shared Native design framework. The target default browser is a composition of plugins: a tab model, vertical or horizontal presentation, optional pinning, navigation, and developer tools. Those pieces must use the same public APIs as third-party plugins.",
-      "This migration is not complete. The current SDK can replace the whole interface, while the built-in controller still owns default tab behavior. Independently composed UI contributions, plugin services, and dependency-aware activation are the next framework work. Do not rely on those planned APIs until they appear in the reference.",
+      "This migration is not complete. A configured profile can compose a layout and its declared UI contributions, while the built-in controller still owns default tab behavior. Generic plugin services and dependency-aware activation remain pending. Do not assume that every default-browser feature is a plugin yet.",
     ],
   },
   {
@@ -24,6 +24,7 @@ export const pluginGuide: readonly GuideSection[] = [
     paragraphs: [
       "Chromium runs the pages; the plugin host controls access to its services. A private native command, an MCP tool, and a plugin SDK method are different entry points. This table describes the current implementation, not the full planned API.",
       "Hitchhiker capability grants are separate from Chromium site permissions. Raw CDP uses an explicitly authorized relay; browser.full-control does not include cdp.connect. Although a plugin manifest can declare cdp.connect, the plugin dispatcher does not yet expose a CDP method.",
+      "The planned DevTools plugin will use public inspection and presentation APIs. Customizing its Native controls, extending the DevTools frontend, and changing Chromium itself are different capabilities; each will be documented separately as it becomes available. Security controls will document their defaults, profile or origin scope, persistence, and restart requirements alongside the grant needed to change them.",
     ],
     table: {
       headings: ["Capability", "Available today", "Plugin SDK"],
@@ -101,9 +102,9 @@ export const pluginGuide: readonly GuideSection[] = [
   },
   {
     id: "page-surface",
-    title: "Put a Chromium page in your interface",
+    title: "Put a Chromium page in a legacy interface",
     paragraphs: [
-      "Save this entry point as src/index.ts. Native measures the content viewport; the binding associates it with the stable ID returned by the page API. Reorganizing that viewport later does not reload the page. An interface can use several viewports without adopting the default tab model.",
+      "Save this entry point as src/index.ts. Native measures the content viewport; the binding associates it with the stable ID returned by the page API. Reorganizing that viewport later does not reload the page. An interface can use several viewports without adopting the default tab model. ui.publish is a legacy whole-window operation and is denied in profiles that enable composition.",
     ],
     code: `import { definePlugin } from "@hitchhiker/plugin-sdk";
 import { column, text, viewport } from "@hitchhiker/ui";
@@ -117,6 +118,26 @@ definePlugin({
         viewport("content", "main", { flex: 1 }),
       ], { flex: 1 }),
       bindings: [{ viewportId: "main", pageId }],
+    });
+  },
+});`,
+  },
+  {
+    id: "composition",
+    title: "Compose independently installed UI plugins",
+    paragraphs: [
+      "At startup, Hitchhiker reads the fixed profile-local path hitchhiker-plugins/composition.json. Its recipe selects one layout plugin and ordered, declared contributions for each slot. The checked-in composition example maps split-layout to the content slot, then split-left/page and split-right/page.",
+      "The recipe arranges artifacts only. Install each plugin and grant its declared capabilities independently through hitchhiker_plugin_install; copying a recipe neither installs code nor grants access. Composition retains the existing maximum of four workers. --safe-mode ignores the recipe, and missing layouts keep legacy plugin management visible during the migration. Native emergency recovery can also restore it. Each activation has a bounded input inbox, so early actions are retained and an overflowing owner cannot stall another plugin.",
+      "A layout calls ui.publishLayout. A contributor calls ui.publishContribution with its configured ID and can call ui.withdrawContribution to remove that fragment. The public surface has no identity, slot, or provider field because the host owns those decisions. ui.release is reusable: in a composed profile it releases the caller's UI contributions, and in legacy mode it returns to the trusted default UI.",
+    ],
+    code: `import { definePlugin } from "@hitchhiker/plugin-sdk";
+import { column, text } from "@hitchhiker/ui";
+
+definePlugin({
+  async activate(browser) {
+    await browser.ui.publishContribution("page", {
+      root: column("panel", [text("label", "Ready")], { flex: 1 }),
+      bindings: [],
     });
   },
 });`,
@@ -136,8 +157,23 @@ definePlugin({
         ["pages.close(pageId)", "pages.manage", "void; requests closure through Chromium"],
         ["configuration.get()", "configuration.write", "BrowserConfiguration"],
         ["configuration.set(configuration)", "configuration.write", "void; validated replacement"],
-        ["ui.publish(surface)", "ui.compose", "{ revision }; replaces the interface"],
-        ["ui.release()", "ui.compose", "void; returns to the default interface"],
+        [
+          "ui.publish(surface)",
+          "ui.compose",
+          "{ revision }; legacy whole-window interface, denied in composed profiles",
+        ],
+        ["ui.publishLayout(surface)", "ui.compose", "{ revision }; configured layout only"],
+        [
+          "ui.publishContribution(id, surface)",
+          "ui.compose",
+          "{ revision }; configured contribution only",
+        ],
+        ["ui.withdrawContribution(id)", "ui.compose", "{ revision }; removes a contribution"],
+        [
+          "ui.release()",
+          "ui.compose",
+          "void; releases caller contributions, or returns legacy UI to default",
+        ],
       ],
     },
   },

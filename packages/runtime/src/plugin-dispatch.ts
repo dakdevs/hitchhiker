@@ -36,6 +36,12 @@ const denied = () =>
   new PluginCallError({ message: "Plugin operation is not authorized or supported" });
 const PageId = Schema.String.check(Schema.isPattern(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/));
 const Url = Schema.String.check(Schema.isMaxLength(8192));
+const ContributionId = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,62}$/));
+/** Plugin callers may supply only portable tree data; composition identity and placement are host-owned. */
+const PublicSurface = Schema.Struct({
+  root: Schema.Unknown,
+  bindings: Schema.Array(Schema.Struct({ viewportId: Schema.String, pageId: Schema.String })),
+});
 const Configuration: Schema.Codec<BrowserConfiguration> = Schema.Struct({
   colorScheme: Schema.Literals(["light", "dark", "system"]),
   sleepAfterMs: Schema.Int,
@@ -53,6 +59,12 @@ export interface PluginDispatchOptions {
   readonly browser: McpBrowserApi;
   readonly publish: (surface: unknown) => Effect.Effect<number, unknown>;
   readonly release: Effect.Effect<void, unknown>;
+  /** When present, plugins may publish only their host-declared layout or contributions. */
+  readonly composition?: {
+    readonly publishLayout: (surface: unknown) => Effect.Effect<number, unknown>;
+    readonly publishContribution: (id: string, surface: unknown) => Effect.Effect<number, unknown>;
+    readonly withdrawContribution: (id: string) => Effect.Effect<number, unknown>;
+  };
 }
 
 /** Capability declaration and durable grant are both required. There is no generic bridge escape. */
@@ -114,8 +126,40 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
       }
       case "ui.publish": {
         yield* authorize("ui.compose");
+        if (options.composition) return yield* denied();
         const { surface } = yield* decode(Schema.Struct({ surface: Schema.Unknown }), params);
         return { revision: yield* options.publish(surface).pipe(Effect.mapError(denied)) };
+      }
+      case "ui.publishLayout": {
+        yield* authorize("ui.compose");
+        if (!options.composition) return yield* denied();
+        const { surface } = yield* decode(Schema.Struct({ surface: PublicSurface }), params);
+        return {
+          revision: yield* options.composition.publishLayout(surface).pipe(Effect.mapError(denied)),
+        };
+      }
+      case "ui.publishContribution": {
+        yield* authorize("ui.compose");
+        if (!options.composition) return yield* denied();
+        const { id, surface } = yield* decode(
+          Schema.Struct({ id: ContributionId, surface: PublicSurface }),
+          params,
+        );
+        return {
+          revision: yield* options.composition
+            .publishContribution(id, surface)
+            .pipe(Effect.mapError(denied)),
+        };
+      }
+      case "ui.withdrawContribution": {
+        yield* authorize("ui.compose");
+        if (!options.composition) return yield* denied();
+        const { id } = yield* decode(Schema.Struct({ id: ContributionId }), params);
+        return {
+          revision: yield* options.composition
+            .withdrawContribution(id)
+            .pipe(Effect.mapError(denied)),
+        };
       }
       case "ui.release": {
         yield* authorize("ui.compose");

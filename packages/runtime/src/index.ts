@@ -60,7 +60,7 @@ export type { LivePluginOptions } from "./plugin-session.ts";
 
 export { composePluginSurface, routeCompositionEvent } from "./composition.ts";
 export type { CompositionOwner, CompositionRoute, ComposedPluginSurface } from "./composition.ts";
-export { makePluginComposition } from "./composition-session.ts";
+export { makePluginComposition, PluginCompositionRecipeSchema } from "./composition-session.ts";
 export type {
   PluginCompositionRecipe,
   PluginCompositionSession,

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { GrantStoreApi } from "@hitchhiker/runtime";
-import { Deferred, Effect, Fiber } from "effect";
+import { Deferred, Effect, Exit, Fiber } from "effect";
 import { createPluginArtifactStore } from "../src/plugin-artifacts.ts";
 import { createPluginManager } from "../src/plugin-manager.ts";
 
@@ -18,6 +18,23 @@ const grants = {
   authenticateGrant: () => Effect.succeed({ principal: "manager-plugin", grant: {} }),
   authorizeGrant: () => Effect.succeed({ principal: "manager-plugin", grant: {} }),
 } as unknown as GrantStoreApi;
+const compositionGrants = (principals: Readonly<Record<string, string>>) =>
+  ({
+    authenticateGrant: (id: string) =>
+      principals[id] === undefined
+        ? Effect.fail(new Error("missing grant"))
+        : Effect.succeed({ principal: principals[id], grant: {} }),
+    authorizeGrant: (id: string) =>
+      principals[id] === undefined
+        ? Effect.fail(new Error("missing grant"))
+        : Effect.succeed({ principal: principals[id], grant: {} }),
+  }) as unknown as GrantStoreApi;
+const uiManifest = (id: string) => ({
+  ...baseManifest,
+  id,
+  name: id,
+  capabilities: ["ui.compose"],
+});
 
 const withProfile = async (run: (root: string) => Promise<void>) => {
   const root = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-manager-"));
@@ -137,6 +154,86 @@ test("allows only one enabled UI owner", async () => {
   });
 });
 
+test("composition owners allow configured UI plugins while disabling removed or unconfigured owners", async () => {
+  await withProfile(async (root) => {
+    const grants = compositionGrants({
+      "left-grant": "split-left",
+      "right-grant": "split-right",
+      "removed-grant": "split-removed",
+      "outside-grant": "outside-plugin",
+    });
+    const artifacts = await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* createPluginArtifactStore(root);
+        return {
+          left: yield* store.stage({ manifest: uiManifest("split-left"), code: "left" }),
+          right: yield* store.stage({ manifest: uiManifest("split-right"), code: "right" }),
+          removed: yield* store.stage({ manifest: uiManifest("split-removed"), code: "removed" }),
+          outside: yield* store.stage({ manifest: uiManifest("outside-plugin"), code: "outside" }),
+        };
+      }),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const launched: string[] = [];
+          const manager = yield* createPluginManager({
+            profileRoot: root,
+            grants,
+            compositionOwners: new Set(["split-left", "split-right", "split-removed"]),
+            launch: (artifact, _grant, ready) =>
+              ready.pipe(
+                Effect.andThen(Effect.sync(() => launched.push(artifact.manifest.id))),
+                Effect.andThen(Effect.never),
+              ),
+          });
+          yield* manager.install(artifacts.left.hash, "left-grant");
+          yield* manager.install(artifacts.right.hash, "right-grant");
+          assert.deepEqual(launched, ["split-left", "split-right"]);
+          assert.equal((yield* manager.list()).filter((plugin) => plugin.running).length, 2);
+
+          assert(
+            Exit.isFailure(
+              yield* Effect.exit(manager.install(artifacts.outside.hash, "outside-grant")),
+            ),
+          );
+          assert.equal(
+            (yield* manager.list()).find((plugin) => plugin.id === "outside-plugin")?.enabled,
+            false,
+          );
+          assert(Exit.isFailure(yield* Effect.exit(manager.enable("outside-plugin"))));
+
+          yield* manager.install(artifacts.removed.hash, "removed-grant");
+        }),
+      ),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const launched: string[] = [];
+          const manager = yield* createPluginManager({
+            profileRoot: root,
+            grants,
+            compositionOwners: new Set(["split-left", "split-right"]),
+            launch: (artifact, _grant, ready) =>
+              ready.pipe(
+                Effect.andThen(Effect.sync(() => launched.push(artifact.manifest.id))),
+                Effect.andThen(Effect.never),
+              ),
+          });
+          yield* manager.restore();
+          const plugins = yield* manager.list();
+          assert.deepEqual(launched, ["split-left", "split-right"]);
+          assert.equal(plugins.find((plugin) => plugin.id === "split-left")?.running, true);
+          assert.equal(plugins.find((plugin) => plugin.id === "split-right")?.running, true);
+          assert.equal(plugins.find((plugin) => plugin.id === "split-removed")?.enabled, false);
+          assert.equal(plugins.find((plugin) => plugin.id === "split-removed")?.running, false);
+        }),
+      ),
+    );
+  });
+});
+
 test("restore starts durable enabled preferences in a fresh manager scope", async () => {
   await withProfile(async (root) => {
     let launches = 0;
@@ -181,6 +278,126 @@ test("restore starts durable enabled preferences in a fresh manager scope", asyn
       ),
     );
     assert.equal(launches, 2);
+  });
+});
+
+test("manager shutdown preserves enabled plugins for the next manager restore", async () => {
+  await withProfile(async (root) => {
+    let launches = 0;
+    const staged = await Effect.runPromise(
+      Effect.gen(function* () {
+        const artifacts = yield* createPluginArtifactStore(root);
+        return yield* artifacts.stage({ manifest: baseManifest, code: "durable" });
+      }),
+    );
+    const launcher = (_artifact: unknown, _grant: string, ready: Effect.Effect<void>) =>
+      ready.pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            launches++;
+          }),
+        ),
+        Effect.andThen(Effect.never),
+      );
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const manager = yield* createPluginManager({
+            profileRoot: root,
+            grants,
+            launch: launcher,
+          });
+          yield* manager.install(staged.hash, "grant-1");
+          const [plugin] = yield* manager.list();
+          assert.equal(plugin.enabled, true);
+          assert.equal(plugin.lastFailure, undefined);
+        }),
+      ),
+    );
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const manager = yield* createPluginManager({
+            profileRoot: root,
+            grants,
+            launch: launcher,
+          });
+          const [beforeRestore] = yield* manager.list();
+          assert.equal(beforeRestore.enabled, true);
+          assert.equal(beforeRestore.running, false);
+          assert.equal(beforeRestore.lastFailure, undefined);
+          yield* manager.restore();
+          assert.equal((yield* manager.list())[0].running, true);
+        }),
+      ),
+    );
+    assert.equal(launches, 2);
+  });
+});
+
+test("configured layout owners without UI authority fail install and restore", async () => {
+  await withProfile(async (root) => {
+    const layout = { ...baseManifest, id: "split-layout", name: "Split layout" };
+    const layoutGrants = compositionGrants({ "layout-grant": "split-layout" });
+    const staged = await Effect.runPromise(
+      Effect.gen(function* () {
+        const artifacts = yield* createPluginArtifactStore(root);
+        return yield* artifacts.stage({ manifest: layout, code: "layout" });
+      }),
+    );
+    const launcher = (_artifact: unknown, _grant: string, ready: Effect.Effect<void>) =>
+      ready.pipe(Effect.andThen(Effect.never));
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const manager = yield* createPluginManager({
+            profileRoot: root,
+            grants: layoutGrants,
+            compositionOwners: new Set(["split-layout"]),
+            launch: launcher,
+          });
+          assert(Exit.isFailure(yield* Effect.exit(manager.install(staged.hash, "layout-grant"))));
+          const [plugin] = yield* manager.list();
+          assert.equal(plugin.enabled, false);
+          assert.equal(plugin.running, false);
+          assert.equal(plugin.lastFailure, "Activation failed");
+        }),
+      ),
+    );
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const manager = yield* createPluginManager({
+            profileRoot: root,
+            grants: layoutGrants,
+            launch: launcher,
+          });
+          yield* manager.enable("split-layout");
+          assert.equal((yield* manager.list())[0].enabled, true);
+        }),
+      ),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const manager = yield* createPluginManager({
+            profileRoot: root,
+            grants: layoutGrants,
+            compositionOwners: new Set(["split-layout"]),
+            launch: launcher,
+          });
+          yield* manager.restore();
+          const [plugin] = yield* manager.list();
+          assert.equal(plugin.enabled, false);
+          assert.equal(plugin.running, false);
+          assert.match(plugin.lastFailure ?? "", /must declare ui\.compose/);
+        }),
+      ),
+    );
   });
 });
 

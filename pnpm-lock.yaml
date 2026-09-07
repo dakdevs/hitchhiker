@@ -71,6 +71,19 @@ importers:
         specifier: 0.28.2
         version: 0.28.2
 
+  apps/composition-example:
+    dependencies:
+      '@hitchhiker/plugin-sdk':
+        specifier: workspace:0.1.0
+        version: link:../../packages/plugin-sdk
+      '@hitchhiker/ui':
+        specifier: workspace:0.1.0
+        version: link:../../packages/ui
+    devDependencies:
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+
   apps/host-probe: {}
 
   apps/plugin-host: {}

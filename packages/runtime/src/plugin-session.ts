@@ -7,7 +7,11 @@ export interface LivePluginOptions extends Omit<PluginDispatchOptions, "manifest
   readonly manifest: unknown;
   readonly executable: string;
   readonly code: string;
-  readonly events: Stream.Stream<{ readonly event: string; readonly payload: unknown }>;
+  readonly events: Stream.Stream<{ readonly event: string; readonly payload: unknown }, unknown>;
+  /** An owner-specific inbox/resource failure terminates this worker, including activation. */
+  readonly stopWhen?: Effect.Effect<never, unknown>;
+  /** Trusted lifecycle cleanup, distinct from a worker requesting ui.release. */
+  readonly onStop?: Effect.Effect<void, unknown>;
   /** Runs only after the isolated worker's activation Promise has fulfilled. */
   readonly onReady?: Effect.Effect<void>;
   /** Escalates a failed trusted-interface recovery to the owning application. */
@@ -27,12 +31,12 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
   const dispatch = createPluginDispatcher({ ...options, manifest });
   const host = yield* spawnPluginHost({ executable: options.executable, call: dispatch });
   yield* Effect.addFinalizer(() =>
-    options.release.pipe(
+    (options.onStop ?? options.release).pipe(
       Effect.retry({ times: 2, schedule: Schedule.spaced(100) }),
       Effect.catchCause((cause) => options.onRecoveryFailure ?? Effect.die(cause)),
     ),
   );
-  yield* host.activate(options.code);
+  yield* Effect.raceFirst(host.activate(options.code), options.stopWhen ?? Effect.never);
   yield* options.onReady ?? Effect.void;
   const forwarding = options.events.pipe(
     Stream.runForEach((event) =>
@@ -69,5 +73,8 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
       return yield* Effect.fail("Plugin identity no longer authorized");
     yield* Effect.sleep(500);
   }).pipe(Effect.forever);
-  yield* Effect.raceFirst(Effect.raceFirst(forwarding, monitoring), lease);
+  yield* Effect.raceFirst(
+    Effect.raceFirst(Effect.raceFirst(forwarding, monitoring), lease),
+    options.stopWhen ?? Effect.never,
+  );
 }, Effect.scoped);
