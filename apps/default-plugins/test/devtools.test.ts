@@ -249,6 +249,17 @@ test("a layout notification refreshes compact controls with the current color sc
   );
   assert.equal(inspect?.fg, design.dark.foreground);
 });
+test("a configuration invalidation refreshes compact controls with the current color scheme", async () => {
+  const fake = fakeApi();
+  const plugin = createDevToolsPlugin();
+  await plugin.activate(fake.api);
+  fake.setColorScheme("dark");
+  await plugin.onEvent?.("configuration.changed", {});
+  const inspect = nodes(fake.publications.at(-1)!.root).find(
+    (node) => node.key === "default-devtools-inspect",
+  );
+  assert.equal(inspect?.fg, design.dark.foreground);
+});
 
 test("an action reads the latest model and never mutates a cached page after model read failure", async () => {
   const fake = fakeApi();

@@ -56,6 +56,10 @@ export const createLayoutPlugin = (): Plugin => {
       api = host;
       await run(() => publish(state.presentation));
     },
+    onEvent(event) {
+      if (event === "configuration.changed")
+        return run(() => publish(state.presentation)).then(() => undefined);
+    },
     services: {
       layout(method, params) {
         if (method !== "setPresentation") throw new Error("Unknown layout command");

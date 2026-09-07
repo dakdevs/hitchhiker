@@ -187,6 +187,11 @@ export interface BrowserController {
   readonly protectDomWrite: (pageId: string) => Effect.Effect<void, EngineError>;
   readonly configure: (configuration: BrowserConfiguration) => Effect.Effect<void, EngineError>;
   readonly configuration: Effect.Effect<BrowserConfiguration>;
+  /** Coalesced invalidation; read configuration for the current committed value. */
+  readonly configurationEvents: Stream.Stream<
+    { readonly event: "configuration.changed"; readonly payload: Record<string, never> },
+    never
+  >;
   readonly portableSettings: Effect.Effect<PortableSettings>;
   readonly applyPortableSettings: (settings: PortableSettings) => Effect.Effect<void, EngineError>;
   readonly updatePluginControls: (
@@ -551,7 +556,12 @@ export const makeBrowserController = (
       readonly event: string;
       readonly payload: unknown;
     }>({ capacity: 32 });
+    const configurationEvents = yield* PubSub.sliding<{
+      readonly event: "configuration.changed";
+      readonly payload: Record<string, never>;
+    }>({ capacity: 1 });
     yield* Effect.addFinalizer(() => PubSub.shutdown(pluginEvents));
+    yield* Effect.addFinalizer(() => PubSub.shutdown(configurationEvents));
 
     const persist = Effect.fn("BrowserController.persist")(function* () {
       const write = saveBrowserPersistence(profileRoot, closingPersistence ?? persistedState());
@@ -678,18 +688,34 @@ export const makeBrowserController = (
       renderChange: () => Effect.Effect<void, EngineError> = commit,
     ) =>
       lock.withPermit(
-        Effect.suspend(() =>
-          operation().pipe(
+        Effect.suspend(() => {
+          const before = state.configuration;
+          return operation().pipe(
             Effect.andThen(
               Effect.suspend(() =>
                 (typeof persistChange === "function" ? persistChange() : persistChange)
-                  ? persist()
+                  ? persist().pipe(
+                      Effect.tapError(() =>
+                        Effect.sync(() => {
+                          if (state.configuration !== before)
+                            state = { ...state, configuration: before };
+                        }),
+                      ),
+                    )
                   : Effect.void,
               ),
             ),
+            Effect.tap(() =>
+              before === state.configuration
+                ? Effect.void
+                : PubSub.publish(configurationEvents, {
+                    event: "configuration.changed",
+                    payload: {},
+                  }).pipe(Effect.asVoid),
+            ),
             Effect.andThen(Effect.suspend(() => (shouldRender() ? renderChange() : Effect.void))),
-          ),
-        ),
+          );
+        }),
       );
 
     const open = Effect.fn("BrowserController.open")(function* (
@@ -785,16 +811,21 @@ export const makeBrowserController = (
             }
             if (action.startsWith("settings.color.")) {
               const colorScheme = action.slice("settings.color.".length);
-              if (colorScheme === "light" || colorScheme === "dark" || colorScheme === "system")
+              if (
+                (colorScheme === "light" || colorScheme === "dark" || colorScheme === "system") &&
+                state.configuration.colorScheme !== colorScheme
+              )
                 state = { ...state, configuration: { ...state.configuration, colorScheme } };
               return;
             }
             if (action === "settings.sleep.60" || action === "settings.sleep.300") {
+              const sleepAfterMs = action.endsWith("60") ? 60_000 : 300_000;
+              if (state.configuration.sleepAfterMs === sleepAfterMs) return;
               state = {
                 ...state,
                 configuration: {
                   ...state.configuration,
-                  sleepAfterMs: action.endsWith("60") ? 60_000 : 300_000,
+                  sleepAfterMs,
                 },
               };
               return;
@@ -1142,12 +1173,33 @@ export const makeBrowserController = (
           code: "invalid-configuration",
           message: parsed.errors.join(" "),
         });
-      yield* change(
-        () =>
-          Effect.sync(() => {
-            state = { ...state, configuration: parsed.value };
+      yield* lock.withPermit(
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            if (closingPersistence !== undefined)
+              return yield* new EngineError({
+                code: "closing",
+                message: "The browser window is closing",
+              });
+            if (JSON.stringify(state.configuration) === JSON.stringify(parsed.value)) return;
+            const next = { ...state, configuration: parsed.value };
+            const write = saveBrowserPersistence(
+              profileRoot,
+              asPersistence(next, persistenceFormat, legacyBootstrapSeed),
+            );
+            yield* (options.profileLease ? options.profileLease.withWrite(write) : write).pipe(
+              Effect.mapError(
+                (error) => new EngineError({ code: "persistence", message: error.message }),
+              ),
+            );
+            state = next;
+            yield* PubSub.publish(configurationEvents, {
+              event: "configuration.changed",
+              payload: {},
+            }).pipe(Effect.asVoid);
+            yield* commit();
           }),
-        true,
+        ),
       );
     });
     const applyPortableSettings = Effect.fn("BrowserController.applyPortableSettings")(function* (
@@ -1177,6 +1229,8 @@ export const makeBrowserController = (
                 ? { interfaceConfiguration: parsed.interface }
                 : {}),
             };
+            const changed =
+              JSON.stringify(state.configuration) !== JSON.stringify(next.configuration);
             const write = saveBrowserPersistence(
               profileRoot,
               asPersistence(next, persistenceFormat, legacyBootstrapSeed),
@@ -1187,6 +1241,11 @@ export const makeBrowserController = (
               ),
             );
             state = next;
+            if (changed)
+              yield* PubSub.publish(configurationEvents, {
+                event: "configuration.changed",
+                payload: {},
+              }).pipe(Effect.asVoid);
             yield* commit();
           }),
         ),
@@ -1875,6 +1934,15 @@ export const makeBrowserController = (
       protectDomWrite,
       configure,
       configuration: Effect.sync(() => state.configuration),
+      configurationEvents: Stream.unwrap(
+        Effect.gen(function* () {
+          const subscription = yield* PubSub.subscribe(configurationEvents);
+          return Stream.concat(
+            Stream.succeed({ event: "configuration.changed" as const, payload: {} }),
+            Stream.fromSubscription(subscription),
+          );
+        }),
+      ),
       portableSettings: lock.withPermit(
         Effect.sync(() => ({
           configuration: state.configuration,

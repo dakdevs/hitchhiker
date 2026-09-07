@@ -161,12 +161,11 @@ export const createExtensionManagementPlugin = (): Plugin => {
   const refresh = async (preserveActionError = false): Promise<void> => {
     if (!api) throw new Error("Extension management plugin has not activated");
     try {
-      const [configuration, nextInventory, nextJobs] = await Promise.all([
-        api.configuration.get(),
+      dark = (await api.configuration.get()).colorScheme === "dark";
+      const [nextInventory, nextJobs] = await Promise.all([
         api.extensions.list(),
         api.extensions.installation.list(),
       ]);
-      dark = configuration.colorScheme === "dark";
       inventory = nextInventory;
       jobs = nextJobs.slice(0, maxRows);
       if (!preserveActionError) error = undefined;
@@ -217,7 +216,8 @@ export const createExtensionManagementPlugin = (): Plugin => {
       await run(refresh);
     },
     onEvent(event, payload) {
-      if (event === "extensions.installation.changed") return invalidate();
+      if (event === "extensions.installation.changed" || event === "configuration.changed")
+        return invalidate();
       if (event !== "ui.event") return;
       try {
         const value = actionFrom(payload);

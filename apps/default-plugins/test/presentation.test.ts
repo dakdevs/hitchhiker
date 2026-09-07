@@ -313,7 +313,7 @@ test("layout publishes stable slots and changes geometry through its public serv
     ...(await fake.api.configuration.get()),
     colorScheme: "dark",
   });
-  await handler("setPresentation", { presentation: "top" }, { id: "presenter", generation: 1 });
+  await plugin.onEvent?.("configuration.changed", {});
   assert.equal(fake.layouts.length, 3);
   assert.equal(fake.layouts.at(-1)?.root.bg, "#212121");
   assert.deepEqual(fake.layouts.at(-1)?.bindings, []);
@@ -568,4 +568,19 @@ test("an optional pin provider lost between render and press does not tear down 
   assert.deepEqual(fake.contributions.get("content")?.bindings, [
     { viewportId: "main-page", pageId: "page-a" },
   ]);
+});
+
+test("configuration invalidation refreshes presenter colors without changing page selection", async () => {
+  const fake = fakeApi();
+  const plugin = createPresenterPlugin("sidebar");
+  await plugin.activate(fake.api);
+  const bindings = fake.contributions.get("content")!.bindings;
+  await fake.api.configuration.set({
+    ...(await fake.api.configuration.get()),
+    colorScheme: "dark",
+  });
+  await plugin.onEvent?.("configuration.changed", {});
+  assert.equal(fake.contributions.get("settings")!.root.bg, "#212121");
+  assert.deepEqual(fake.contributions.get("content")!.bindings, bindings);
+  assert.deepEqual(fake.routeCalls, []);
 });

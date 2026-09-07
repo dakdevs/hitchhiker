@@ -358,6 +358,7 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
       return requestRefresh();
     },
     onEvent(event, payload) {
+      if (event === "configuration.changed") return requestRefresh();
       if (event === "service.state") {
         decode(ServiceStateEvent, payload);
         return requestRefresh();

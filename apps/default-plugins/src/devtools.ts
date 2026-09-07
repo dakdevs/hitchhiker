@@ -156,7 +156,8 @@ export const createDevToolsPlugin = (): Plugin => {
         }
         return;
       }
-      if (event === "devtools.changed") return enqueue(refresh);
+      if (event === "devtools.changed" || event === "configuration.changed")
+        return enqueue(refresh);
       if (event !== "ui.event") return;
       try {
         const action = actionFrom(payload);

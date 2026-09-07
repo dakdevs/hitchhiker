@@ -156,3 +156,11 @@ binary-resource execution and removal using disposable profiles. Packaged applic
 remains open. This adapter is omitted in safe/raw-CDP or degraded mode.
 Read the [extension API reference](../../docs/EXTENSIONS.md#public-inventory-and-removal) for MCP
 equivalents, raw-CDP restrictions, revocation and recovery semantics, and the compiled Native fixture.
+
+Configuration readers receive `onEvent("configuration.changed", {})` after durable configuration
+changes in their profile, including changes made through MCP or settings import. An initial
+invalidation covers changes during activation. Declare `configuration.read` and retain its live grant
+(or use a granted `browser.full-control`); the legacy write-only read compatibility does not subscribe
+to notifications. Read `api.configuration.get()` for the current value. Notifications carry no snapshot,
+may coalesce, and do not require polling. Rendering failure after a durable write does not undo the
+configuration change.

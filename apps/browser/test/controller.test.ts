@@ -15,6 +15,7 @@ import { createDefaultInterface } from "@hitchhiker/default-interface";
 import { Deferred, Effect, Fiber, Layer, PubSub, Schedule, Schema, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { makeBrowserController, normalizeAddressDraft } from "../src/controller.ts";
+import { ProfileWriteLeaseError } from "../src/profile-write-lease.ts";
 import { saveBrowserPersistence } from "../src/persistence.ts";
 import { browserMcpApi } from "../src/mcp.ts";
 
@@ -1561,6 +1562,125 @@ test("freezing requires idle navigation and protects pending scoped DOM writes",
     );
   } finally {
     Date.now = originalNow;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("configuration invalidations subscribe before initial delivery and coalesce durable changes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-configuration-events-"));
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        let failWrite = false;
+        const engine = EngineConnection.of({
+          pid: 1,
+          ready: Effect.succeed({ event: "host.ready", params: {} }),
+          exit: Effect.never,
+          events: Stream.never,
+          request: () => Effect.succeed({}),
+          loadUnpacked: () => Effect.die("unused"),
+          uninstall: () => Effect.die("unused"),
+          claimRawCdp: Effect.die("unused"),
+        });
+        const controller = yield* makeBrowserController(directory, {
+          freezeEnabled: false,
+          profileLease: {
+            profileRoot: directory,
+            assertHeld: Effect.void,
+            withWrite: (operation) =>
+              Effect.gen(function* () {
+                if (failWrite)
+                  return yield* new ProfileWriteLeaseError({ message: "test write denied" });
+                return yield* operation;
+              }),
+          },
+        }).pipe(
+          Effect.provide(
+            Layer.merge(
+              Layer.succeed(EngineConnection, engine),
+              Layer.succeed(
+                NativeSurface,
+                NativeSurface.of({ commit: () => Effect.succeed(1), events: Stream.never }),
+              ),
+            ),
+          ),
+        );
+        const initial = yield* Deferred.make<void>();
+        const resume = yield* Deferred.make<void>();
+        const values: unknown[] = [];
+        const observer = yield* controller.configurationEvents.pipe(
+          Stream.take(2),
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              values.push(event);
+              if (values.length === 1) {
+                yield* Deferred.succeed(initial, undefined);
+                yield* Deferred.await(resume);
+              }
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(initial);
+        const dark = { ...defaultConfiguration, colorScheme: "dark" as const };
+        yield* controller.configure(dark);
+        yield* controller.configure({ ...dark, sleepAfterMs: 60_000 });
+        yield* Deferred.succeed(resume, undefined);
+        yield* Fiber.join(observer).pipe(Effect.timeout(2_000));
+        assert.deepEqual(values, [
+          { event: "configuration.changed", payload: {} },
+          { event: "configuration.changed", payload: {} },
+        ]);
+        assert.equal((yield* controller.configuration).sleepAfterMs, 60_000);
+
+        const observed: unknown[] = [];
+        const ready = yield* Deferred.make<void>();
+        const next = yield* Deferred.make<void>();
+        yield* controller.configurationEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              observed.push(event);
+              yield* Deferred.succeed(observed.length === 1 ? ready : next, undefined);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(ready);
+        const before = yield* controller.configuration;
+        yield* controller.configure(before);
+        const invalid = yield* Effect.flip(controller.configure({ ...before, sleepAfterMs: -1 }));
+        assert.equal(invalid.code, "invalid-configuration");
+        failWrite = true;
+        const failure = yield* Effect.flip(
+          controller.configure({ ...before, colorScheme: "light" }),
+        );
+        assert.equal(failure.code, "persistence");
+        assert.deepEqual(yield* controller.configuration, before);
+        const legacyFailure = yield* Effect.flip(controller.dispatch("settings.color.light"));
+        assert.equal(legacyFailure.code, "persistence");
+        assert.deepEqual(yield* controller.configuration, before);
+        failWrite = false;
+        const imported = { ...before, colorScheme: "system" as const };
+        yield* controller.applyPortableSettings({
+          configuration: imported,
+          interface: { tabPlacement: "sidebar" },
+        });
+        yield* Deferred.await(next).pipe(Effect.timeout(2_000));
+        assert.equal(observed.length, 2, "no-op, rejected and failed writes do not notify");
+        assert.deepEqual(yield* controller.configuration, imported);
+        const persisted = JSON.parse(
+          yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+        );
+        assert.deepEqual(persisted.configuration, imported);
+        yield* controller.dispatch("settings.color.dark");
+        yield* waitUntil(
+          "legacy settings invalidate readers",
+          Effect.sync(() => observed.length === 3),
+        );
+        assert.equal((yield* controller.configuration).colorScheme, "dark");
+      }).pipe(Effect.scoped),
+    );
+  } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });

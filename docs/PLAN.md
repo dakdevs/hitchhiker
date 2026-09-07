@@ -819,3 +819,7 @@ Trusted worker diagnostics now bind private sampling to exact native process ide
 six-plugin extension flow passes with per-worker physical footprint and resident-byte evidence; see
 [the verified checkpoint](WORKER-DIAGNOSTICS-PLAN.md#verified-implementation-checkpoint).
 Whole-browser resource acceptance and abrupt-worker recovery remain open.
+
+Independent Settings and plugin management extraction follows the
+[management extraction plan](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md). Configuration invalidations are
+the first prerequisite; the new generic replacement API, separate artifacts and V4 cohort remain.

@@ -38,6 +38,8 @@ const ObservedNode = Schema.Struct({
   kind: Schema.String,
   label: Schema.optional(Schema.String),
   action: Schema.optional(Schema.String),
+  fg: Schema.optional(Schema.String),
+  bg: Schema.optional(Schema.String),
   children: Schema.optional(Schema.Array(Schema.Unknown)),
 });
 const ModelState = Schema.Struct({
@@ -100,11 +102,15 @@ test(
             const nativeSurface = yield* NativeSurface;
             const input = yield* PubSub.unbounded<SurfaceEvent>();
             let revision = 0;
+            const colors = new Map<string, string | undefined>();
+            let rootBackground: string | undefined;
             const buttons = new Map<string, { key: string; action: string }>();
             const collect = (value: unknown): void => {
               const node = Schema.decodeUnknownSync(ObservedNode)(value);
-              if (node.kind === "button" && node.label !== undefined && node.action !== undefined)
+              if (node.kind === "button" && node.label !== undefined && node.action !== undefined) {
                 buttons.set(node.label, { key: node.key, action: node.action });
+                colors.set(node.label, node.fg);
+              }
               node.children?.forEach(collect);
             };
             let committed = "";
@@ -118,6 +124,8 @@ test(
                       const decoded = Schema.decodeUnknownSync(ObservedSurface)(surface);
                       revision = next;
                       buttons.clear();
+                      colors.clear();
+                      rootBackground = Schema.decodeUnknownSync(ObservedNode)(decoded.root).bg;
                       collect(decoded.root);
                       committed = JSON.stringify(surface);
                     }),
@@ -269,6 +277,33 @@ test(
             const inspectorBefore = yield* inspector;
             const modelBefore = yield* (yield* storage.forOwner("default-tab-model")).read();
             const pinsBefore = yield* (yield* storage.forOwner("default-tab-pins")).read();
+            const generationsBeforeConfiguration = new Map(generations);
+            for (const colorScheme of ["dark", "light"] as const) {
+              yield* controller.configure({ ...(yield* controller.configuration), colorScheme });
+              yield* waitUntil(
+                "all independent default controls follow configuration changes",
+                Effect.sync(
+                  () =>
+                    rootBackground === (colorScheme === "dark" ? "#212121" : "#FFFFFF") &&
+                    colors.get("Settings") === (colorScheme === "dark" ? "#B4B4B4" : "#6B6B6B") &&
+                    ["Inspect selected page", "Extensions"].every(
+                      (label) =>
+                        colors.get(label) === (colorScheme === "dark" ? "#ECECEC" : "#171717"),
+                    ),
+                ),
+              ).pipe(
+                Effect.tapError(() =>
+                  Effect.sync(() => {
+                    process.stderr.write(
+                      `CONFIG_COLORS ${JSON.stringify({ colorScheme, rootBackground, colors: Object.fromEntries(colors) })}\n`,
+                    );
+                  }),
+                ),
+              );
+              assert.deepEqual(generations, generationsBeforeConfiguration);
+              assert.equal((yield* controller.snapshot).viewports[0]?.pageId, "second");
+              assert.deepEqual(yield* inspector, inspectorBefore);
+            }
             for (const placement of ["top", "sidebar"]) {
               yield* press("Settings");
               const label = `Use ${placement} tabs`;

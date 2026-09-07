@@ -180,106 +180,110 @@ test("live plugin authenticates before spawn, expires idle credentials, and esca
   }
 });
 
-test("installation invalidations are forwarded only with a declared, current install grant", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-install-events-"));
-  const executable = join(directory, "host.cjs");
-  const delivered = join(directory, "events");
-  await writeFile(executable, eventHostScript(delivered), { mode: 0o700 });
-  try {
-    await Effect.runPromise(
-      Effect.gen(function* () {
-        const grants = yield* create({ directory: join(directory, "grants") });
-        const granted = yield* grants.issue({
-          principal: "event-plugin",
-          profileId: "default",
-          capabilities: ["extensions.install"],
-          origins: [],
-        });
-        const browser = {
-          pages: Effect.succeed([]),
-          open: () => Effect.die("not used"),
-          navigate: () => Effect.die("not used"),
-          close: () => Effect.die("not used"),
-          configuration: Effect.die("not used"),
-          configure: () => Effect.die("not used"),
-          setTabPlacement: () => Effect.die("not used"),
-        };
-        const event = { event: "extensions.installation.changed", payload: {} };
-        const base = {
-          executable,
-          code: "compiled",
-          profileId: "default",
-          grants,
-          browser,
-          publish: () => Effect.die("not used"),
-          release: Effect.void,
-        };
-        yield* runLivePlugin({
-          ...base,
-          manifest: {
-            id: "event-plugin",
-            version: "1.0.0",
-            name: "Events",
-            capabilities: ["extensions.install"],
-          },
-          token: granted.token,
-          events: Stream.fromIterable([event]),
-        });
-        assert.deepEqual(
-          JSON.parse(yield* Effect.promise(() => readFile(delivered, "utf8"))) as unknown,
-          { event: "extensions.installation.changed", payload: {} },
-        );
+for (const [name, capability] of [
+  ["extensions.installation.changed", "extensions.install"],
+  ["configuration.changed", "configuration.read"],
+] as const)
+  test(`${name} requires a declared, current grant`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-install-events-"));
+    const executable = join(directory, "host.cjs");
+    const delivered = join(directory, "events");
+    await writeFile(executable, eventHostScript(delivered), { mode: 0o700 });
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const grants = yield* create({ directory: join(directory, "grants") });
+          const granted = yield* grants.issue({
+            principal: "event-plugin",
+            profileId: "default",
+            capabilities: [capability],
+            origins: [],
+          });
+          const browser = {
+            pages: Effect.succeed([]),
+            open: () => Effect.die("not used"),
+            navigate: () => Effect.die("not used"),
+            close: () => Effect.die("not used"),
+            configuration: Effect.die("not used"),
+            configure: () => Effect.die("not used"),
+            setTabPlacement: () => Effect.die("not used"),
+          };
+          const event = { event: name, payload: {} };
+          const base = {
+            executable,
+            code: "compiled",
+            profileId: "default",
+            grants,
+            browser,
+            publish: () => Effect.die("not used"),
+            release: Effect.void,
+          };
+          yield* runLivePlugin({
+            ...base,
+            manifest: {
+              id: "event-plugin",
+              version: "1.0.0",
+              name: "Events",
+              capabilities: [capability],
+            },
+            token: granted.token,
+            events: Stream.fromIterable([event]),
+          });
+          assert.deepEqual(
+            JSON.parse(yield* Effect.promise(() => readFile(delivered, "utf8"))) as unknown,
+            { event: name, payload: {} },
+          );
 
-        yield* Effect.promise(() => rm(delivered, { force: true }));
-        yield* runLivePlugin({
-          ...base,
-          manifest: { id: "event-plugin", version: "1.0.0", name: "Events", capabilities: [] },
-          token: granted.token,
-          events: Stream.fromIterable([event]),
-        });
-        assert.equal(
-          yield* Effect.promise(() =>
-            readFile(delivered, "utf8").then(
-              () => true,
-              () => false,
+          yield* Effect.promise(() => rm(delivered, { force: true }));
+          yield* runLivePlugin({
+            ...base,
+            manifest: { id: "event-plugin", version: "1.0.0", name: "Events", capabilities: [] },
+            token: granted.token,
+            events: Stream.fromIterable([event]),
+          });
+          assert.equal(
+            yield* Effect.promise(() =>
+              readFile(delivered, "utf8").then(
+                () => true,
+                () => false,
+              ),
             ),
-          ),
-          false,
-        );
+            false,
+          );
 
-        const ready = yield* Deferred.make<void>();
-        const trigger = yield* Deferred.make<void>();
-        const pending = yield* runLivePlugin({
-          ...base,
-          manifest: {
-            id: "event-plugin",
-            version: "1.0.0",
-            name: "Events",
-            capabilities: ["extensions.install"],
-          },
-          token: granted.token,
-          events: Stream.fromEffect(Deferred.await(trigger).pipe(Effect.as(event))),
-          onReady: Deferred.succeed(ready, undefined),
-        }).pipe(Effect.forkScoped);
-        yield* Deferred.await(ready);
-        yield* grants.revoke(granted.grant.id);
-        yield* Deferred.succeed(trigger, undefined);
-        assert(Exit.isFailure(yield* Fiber.await(pending).pipe(Effect.timeout(2_000))));
-        assert.equal(
-          yield* Effect.promise(() =>
-            readFile(delivered, "utf8").then(
-              () => true,
-              () => false,
+          const ready = yield* Deferred.make<void>();
+          const trigger = yield* Deferred.make<void>();
+          const pending = yield* runLivePlugin({
+            ...base,
+            manifest: {
+              id: "event-plugin",
+              version: "1.0.0",
+              name: "Events",
+              capabilities: [capability],
+            },
+            token: granted.token,
+            events: Stream.fromEffect(Deferred.await(trigger).pipe(Effect.as(event))),
+            onReady: Deferred.succeed(ready, undefined),
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(ready);
+          yield* grants.revoke(granted.grant.id);
+          yield* Deferred.succeed(trigger, undefined);
+          assert(Exit.isFailure(yield* Fiber.await(pending).pipe(Effect.timeout(2_000))));
+          assert.equal(
+            yield* Effect.promise(() =>
+              readFile(delivered, "utf8").then(
+                () => true,
+                () => false,
+              ),
             ),
-          ),
-          false,
-        );
-      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-    );
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+            false,
+          );
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
 for (const phase of ["ready-hook", "idle"] as const)
   test(`worker death terminates a live session during ${phase} without a new command`, async () => {

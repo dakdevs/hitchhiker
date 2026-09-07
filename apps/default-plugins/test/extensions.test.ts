@@ -6,7 +6,7 @@ import type {
   Json,
   PluginApi,
 } from "@hitchhiker/plugin-sdk";
-import type { NativeNode, Surface } from "@hitchhiker/ui";
+import { design, type NativeNode, type Surface } from "@hitchhiker/ui";
 
 import { createExtensionManagementPlugin } from "../src/extensions.ts";
 
@@ -48,6 +48,7 @@ const fakeApi = () => {
   };
   let jobs: readonly ExtensionInstallationSnapshot[] = [job("awaiting_review")];
   let fail = false;
+  let colorScheme: "light" | "dark" = "light";
   const unexpected = (() => Promise.reject(new Error("Unexpected public API call"))) as never;
   const api: PluginApi = {
     extensions: {
@@ -93,7 +94,7 @@ const fakeApi = () => {
     configuration: {
       get: async () => {
         calls.push("configuration.get");
-        return { colorScheme: "light", sleepAfterMs: 300_000, alwaysAwakeOrigins: [] };
+        return { colorScheme, sleepAfterMs: 300_000, alwaysAwakeOrigins: [] };
       },
       set: unexpected,
     },
@@ -144,6 +145,9 @@ const fakeApi = () => {
     api,
     calls,
     publications,
+    setColorScheme(value: "light" | "dark") {
+      colorScheme = value;
+    },
     setJobs(value: readonly ExtensionInstallationSnapshot[]) {
       jobs = value;
     },
@@ -242,6 +246,27 @@ test("denied actions retain a safe error, and choosing, error, and read-only sta
   assert(rendered.some((node) => node.key === "extensions-error"));
   assert.equal(
     rendered.some((node) => "label" in node && node.label.includes("revoked")),
+    false,
+  );
+});
+
+test("configuration invalidation recolors the independent extension screen and launcher", async () => {
+  const fake = fakeApi();
+  const plugin = createExtensionManagementPlugin();
+  await plugin.activate(fake.api);
+  fake.setColorScheme("dark");
+  fake.setFail(true); // Unavailable inventory must not prevent the independent palette refresh.
+  await plugin.onEvent?.("configuration.changed", {});
+  assert.equal(
+    fake.publications.findLast((entry) => entry.id === "main")!.surface.root.bg,
+    "#212121",
+  );
+  assert.equal(
+    fake.publications.findLast((entry) => entry.id === "launcher")!.surface.root.fg,
+    design.dark.foreground,
+  );
+  assert.equal(
+    fake.calls.some((call) => call.startsWith("show:")),
     false,
   );
 });

@@ -211,7 +211,7 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
                 Stream.map(() => ({ event: "extensions.installation.changed", payload: {} })),
               ),
             ),
-            pageWatch?.events ?? Stream.empty,
+            Stream.merge(pageWatch?.events ?? Stream.empty, options.controller.configurationEvents),
           ),
         });
       }).pipe(
@@ -358,7 +358,7 @@ export const runPluginDirectory = Effect.fn("Browser.runPluginDirectory")(functi
           Stream.map(() => ({ event: "extensions.installation.changed", payload: {} })),
         ),
       ),
-      pageWatch?.events ?? Stream.empty,
+      Stream.merge(pageWatch?.events ?? Stream.empty, options.controller.configurationEvents),
     ),
   });
 });
