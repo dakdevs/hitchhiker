@@ -1,8 +1,8 @@
 # Trusted worker diagnostics
 
-Status: design accepted for implementation; no diagnostics API is implemented by this document.
-The six-worker lifecycle fixtures pass, but current memory samples match executable names across
-the system. Replace that provisional collection before making a resource acceptance claim.
+Status: implemented and verified as a private, read-only runtime facility. The browser fixture now
+samples six exact activation-bound worker identities instead of matching executable names across
+the system. Aggregate browser resource acceptance remains open.
 
 ## Ownership and identity
 
@@ -34,10 +34,10 @@ stream, dispatcher, SDK, MCP, manifests, grants, or public error payloads. No cr
 ## Verification
 
 Portable transport tests cover reserved-frame exclusion, malformed/duplicate identities, mismatched
-stops and sample replies, stale handles, request limits, and timeout/teardown cleanup. Native tests
-register all six handles by activation identity, sample each exact worker, and assert distinct PIDs,
-positive physical footprints, and all recorded identities stopping on scope teardown. Measure
-startup, idle, route changes, picker/review/install, removal, and full restart using these handles.
+stops and sample replies, stale handles, request limits, and timeout/teardown cleanup. The browser test
+registers all six handles by activation identity, samples each exact worker, and asserts distinct PIDs
+and positive physical footprints. Remaining coverage should observe all recorded identities stopping
+on scope teardown and measure idle, route changes and full restart using these handles.
 
 For abrupt failure, terminate only a worker whose current identity is known. A raw PID signal after
 sampling has a reuse race; prefer a testing-only broker operation that verifies the full identity
@@ -46,3 +46,56 @@ Verify the selected optional plugin's fallback, the other five identities remain
 handle invalidation, and new identity after authorized recovery. Keep production Keychain startup,
 full packaged application entrypoint, frame latency, and aggregate Chromium/GPU memory acceptance
 separate from these worker measurements.
+
+## First implementation wire contract
+
+This first slice is read-only; abrupt termination remains a later testing-only addition.
+All envelopes have exactly one top-level `hostControl` key and reject excess nested fields.
+Native uint64 start time uses a nonzero canonical decimal string; other numbers are positive safe
+integers except byte counts, which permit zero. Generations are local to one native client.
+
+- Started: `{hostControl:{event:"worker.started",identity:{pid,generation,startAbstime}}}`.
+- Stopped: `{hostControl:{event:"worker.stopped",identity:{pid,generation,startAbstime}}}`.
+- Sample request: `{hostControl:{id,method:"worker.sample",identity:{pid,generation,startAbstime}}}`.
+- Sample success: `{hostControl:{id,result:{identity:{pid,generation,startAbstime},physicalFootprintBytes,residentBytes}}}`.
+- Sample failure: `{hostControl:{id,error:{code:"stale_worker"|"unavailable"}}}`.
+
+The client emits started only after it has obtained an exact start time for the current worker.
+Failure to establish diagnostic identity must fail diagnostics without silently substituting zero or
+another process. Ordinary plugin execution and its watchdog remain available. Sampling checks the
+current identity before and after `proc_pid_rusage`; unknown identity returns `stale_worker`.
+Controller diagnostic requests never reach the worker or ordinary command queue. Worker-emitted
+reserved envelopes are rejected by the broker irrespective of their payload.
+
+Runtime host handles expose `diagnostics.started`, `diagnostics.sample(identity)`, and
+`diagnostics.stopped(identity)`. Private sampling uses its own request IDs, at most eight pending
+requests, and a two-second deadline. Lifecycle parsing rejects duplicate starts or mismatched stops;
+transport termination resolves pending observations as failure. Diagnostic payloads never enter
+`host.events`. A trusted callback option can pass this handle through `runLivePlugin` and the browser
+launcher, whose closure binds profile/plugin/activation identity. No plugin API is added.
+
+## Verified implementation checkpoint
+
+The native protocol suite passes eight tests, including exact identity sampling and broker-confirmed
+stop after an RSS watchdog termination. Nineteen portable transport tests cover live request
+capacity, actual deadlines, cancellation of one of two stop observers, stale replies and wire bounds.
+Identity acquisition retries at most twenty times; waiting for identity has a five-second diagnostic
+deadline without preventing ordinary plugin execution.
+
+The real six-plugin extension-management fixture passes picker, native review, installation, binary
+resource execution, removal and selected-plugin disable/re-enable with clean shutdown. Each sample
+asserts six distinct worker PIDs and matching native identity. Measured sums in bytes:
+
+| Phase     | Physical footprint | Resident bytes |
+| --------- | -----------------: | -------------: |
+| Startup   |         31,345,808 |     66,256,896 |
+| Picker    |         31,640,720 |     66,584,576 |
+| Review    |         31,673,488 |     66,732,032 |
+| Installed |         32,328,848 |     67,682,304 |
+| Removed   |         32,361,616 |     67,633,152 |
+
+These are worker-only measurements, excluding Chromium, brokers and GPU processes. Startup was
+5.97 seconds in this fixture. Route observation used a 250 ms poll and is not a frame-latency
+benchmark. All-six stop observation, abrupt selected-worker recovery, long idle measurements, full
+application memory and production Keychain startup remain separate acceptance work. The fixture
+uses disposable profiles and mock Keychain. No public SDK or MCP diagnostics API was added.

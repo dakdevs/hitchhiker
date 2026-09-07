@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NodeServices } from "@effect/platform-node";
-import { Deferred, Effect, Exit } from "effect";
+import { Deferred, Effect, Exit, Fiber, Stream, Schema, type Scope } from "effect";
 import { PluginCallError } from "../src/plugin-dispatch.ts";
-import { spawnPluginHost } from "../src/plugin.ts";
+import { spawnPluginHost, WorkerIdentitySchema, WorkerUsageSchema } from "../src/plugin.ts";
 
 const script = `#!${process.execPath}
 const readline = require('node:readline');
@@ -22,6 +22,186 @@ readline.createInterface({ input:process.stdin }).on('line', line => {
  } else send({id:req.id,result:{accepted:true}});
 });
 `;
+type DiagnosticHost = Effect.Success<ReturnType<typeof spawnPluginHost>>;
+const withDiagnostics = async (
+  sampleBody: string,
+  use: (host: DiagnosticHost) => Effect.Effect<void, unknown, Scope.Scope>,
+  announce = true,
+) => {
+  const dir = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-diagnostics-"));
+  const executable = join(dir, "fixture.cjs");
+  await writeFile(
+    executable,
+    `#!${process.execPath}
+const readline=require('node:readline');
+const send=v=>process.stdout.write(JSON.stringify(v)+'\\n');
+const identity={pid:123,generation:7,startAbstime:'42'};
+let count=0;
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const q=JSON.parse(line);
+ if(q.method==='activate'){${announce ? "send({hostControl:{event:'worker.started',identity}});" : ""}send({id:q.id,result:null});}
+ else if(q.method==='stop'){${announce ? "send({hostControl:{event:'worker.stopped',identity}});" : ""}send({id:q.id,result:null});}
+ else if(q.hostControl){count++;const reply=()=>send({hostControl:{id:q.hostControl.id,result:{identity,physicalFootprintBytes:10,residentBytes:8}}});${sampleBody}}
+});
+`,
+  );
+  await chmod(executable, 0o700);
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const host = yield* spawnPluginHost({ executable, call: () => Effect.die("unused") });
+        yield* use(host);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer), Effect.timeout(8_000)),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+};
+
+test("diagnostic frames stay private while exact samples and ordinary events remain available", () =>
+  withDiagnostics("reply();send({event:'visible',params:{}});", (host) =>
+    Effect.gen(function* () {
+      const seen: unknown[] = [];
+      const visible = yield* Deferred.make<void>();
+      yield* host.events.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            seen.push(event);
+            if (event.event === "visible") yield* Deferred.succeed(visible, undefined);
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      yield* host.activate("");
+      const identity = yield* host.diagnostics.started;
+      assert.deepEqual(identity, { pid: 123, generation: 7, startAbstime: "42" });
+      assert.deepEqual(yield* host.diagnostics.sample(identity), {
+        identity,
+        physicalFootprintBytes: 10,
+        residentBytes: 8,
+      });
+      yield* Deferred.await(visible);
+      assert.deepEqual(seen, [{ event: "visible", params: {} }]);
+      assert.equal(
+        (yield* Effect.flip(host.diagnostics.sample({ ...identity, pid: 124 }))).code,
+        "stale_worker",
+      );
+      yield* host.stop;
+      yield* host.diagnostics.stopped(identity);
+    }),
+  ));
+
+for (const [name, body] of [
+  ["duplicate start", "send({hostControl:{event:'worker.started',identity}});"],
+  [
+    "mismatched stop",
+    "send({hostControl:{event:'worker.stopped',identity:{...identity,pid:124}}});",
+  ],
+  [
+    "start after stop",
+    "send({hostControl:{event:'worker.stopped',identity}});send({hostControl:{event:'worker.started',identity}});",
+  ],
+] as const)
+  test(`diagnostics reject ${name} as protocol failure`, () =>
+    withDiagnostics(body, (host) =>
+      Effect.gen(function* () {
+        yield* host.activate("");
+        const identity = yield* host.diagnostics.started;
+        assert.equal((yield* Effect.flip(host.diagnostics.sample(identity))).code, "protocol");
+        assert.equal((yield* Effect.flip(host.failure)).code, "protocol");
+      }),
+    ));
+
+test("canceling one stop observer leaves another subscribed to the exact stop", () =>
+  withDiagnostics("reply();send({hostControl:{event:'worker.stopped',identity}});", (host) =>
+    Effect.gen(function* () {
+      yield* host.activate("");
+      const identity = yield* host.diagnostics.started;
+      const first = yield* host.diagnostics.stopped(identity).pipe(Effect.forkScoped);
+      const second = yield* host.diagnostics.stopped(identity).pipe(Effect.forkScoped);
+      yield* Effect.sleep(10);
+      yield* Fiber.interrupt(first);
+      // A reply sent just before stop may settle before or after the stop is consumed.
+      const sampled = yield* Effect.exit(host.diagnostics.sample(identity));
+      if (Exit.isSuccess(sampled)) assert.deepEqual(sampled.value.identity, identity);
+      yield* Fiber.join(second).pipe(Effect.timeout(500));
+      yield* host.diagnostics.stopped(identity);
+      assert.equal((yield* Effect.flip(host.diagnostics.sample(identity))).code, "stale_worker");
+    }),
+  ));
+
+test("mismatched and late sample replies cannot change worker attribution", () =>
+  withDiagnostics(
+    "if(count===1)send({hostControl:{id:q.hostControl.id,result:{identity:{...identity,pid:124},physicalFootprintBytes:1,residentBytes:1}}});else reply();",
+    (host) =>
+      Effect.gen(function* () {
+        yield* host.activate("");
+        const identity = yield* host.diagnostics.started;
+        assert.equal((yield* Effect.flip(host.diagnostics.sample(identity))).code, "stale_worker");
+        assert.deepEqual((yield* host.diagnostics.sample(identity)).identity, identity);
+      }),
+  ));
+
+test("eight pending samples time out, a ninth hits capacity, and late replies leave reclaimed slots usable", () =>
+  withDiagnostics(
+    "if(count<=8)setTimeout(reply,2250);else reply();send({event:'received',params:{count}});",
+    (host) =>
+      Effect.gen(function* () {
+        const eight = yield* Deferred.make<void>();
+        yield* host.events.pipe(
+          Stream.runForEach((event) =>
+            event.event === "received" && event.params.count === 8
+              ? Deferred.succeed(eight, undefined)
+              : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
+        yield* host.activate("");
+        const identity = yield* host.diagnostics.started;
+        const requests = [];
+        for (let index = 0; index < 8; index++)
+          requests.push(yield* host.diagnostics.sample(identity).pipe(Effect.forkScoped));
+        yield* Deferred.await(eight);
+        assert.equal((yield* Effect.flip(host.diagnostics.sample(identity))).code, "capacity");
+        for (const request of requests)
+          assert.equal((yield* Effect.flip(Fiber.join(request))).code, "timeout");
+        assert.deepEqual((yield* host.diagnostics.sample(identity)).identity, identity);
+        yield* Effect.sleep(350);
+        assert.deepEqual((yield* host.diagnostics.sample(identity)).identity, identity);
+      }),
+  ));
+
+test("diagnostic wire schemas enforce native PID, uint64 start time and safe byte counts", () => {
+  const identity = { pid: 123, generation: 7, startAbstime: "18446744073709551615" };
+  assert.deepEqual(Schema.decodeUnknownSync(WorkerIdentitySchema)(identity), identity);
+  for (const invalid of [
+    { ...identity, pid: 2147483648 },
+    { ...identity, startAbstime: "18446744073709551616" },
+    { ...identity, startAbstime: "0" },
+    { ...identity, startAbstime: "01" },
+  ])
+    assert.throws(() => Schema.decodeUnknownSync(WorkerIdentitySchema)(invalid));
+  assert.throws(() =>
+    Schema.decodeUnknownSync(WorkerUsageSchema)({
+      identity,
+      physicalFootprintBytes: Number.MAX_SAFE_INTEGER + 1,
+      residentBytes: 0,
+    }),
+  );
+});
+
+test("unavailable diagnostic identity has a deadline without stopping ordinary host commands", () =>
+  withDiagnostics(
+    "reply();",
+    (host) =>
+      Effect.gen(function* () {
+        yield* host.activate("");
+        assert.equal((yield* Effect.flip(host.diagnostics.started)).code, "unavailable");
+        yield* host.stop;
+      }),
+    false,
+  ));
+
 test("isolated transport resolves nested calls without blocking replies and disallows revision reuse", async () => {
   const dir = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-transport-"));
   const executable = join(dir, "fixture.cjs");

@@ -56,8 +56,18 @@ export type {
   ScopedDomSession,
 } from "./scoped-dom.ts";
 
-export { spawnPluginHost, PluginHostError } from "./plugin.ts";
-export type { PluginHostOptions } from "./plugin.ts";
+export {
+  spawnPluginHost,
+  PluginHostError,
+  WorkerIdentitySchema,
+  WorkerUsageSchema,
+} from "./plugin.ts";
+export type {
+  PluginHostOptions,
+  TrustedPluginWorkerDiagnostics,
+  WorkerIdentity,
+  WorkerUsage,
+} from "./plugin.ts";
 export { LivePluginManifest, PluginCallError, createPluginDispatcher } from "./plugin-dispatch.ts";
 export type { PluginDispatchOptions } from "./plugin-dispatch.ts";
 export {

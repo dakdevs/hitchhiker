@@ -343,3 +343,8 @@ Keychains; packaged application-entrypoint and production Keychain acceptance ar
 
 The next resource work follows the [trusted diagnostics design](WORKER-DIAGNOSTICS-PLAN.md), which
 keeps authoritative worker identity and sampling outside plugin-accessible events and APIs.
+
+Trusted worker diagnostics now bind private sampling to exact native process identities. The real
+six-plugin extension flow passes with per-worker physical footprint and resident-byte evidence; see
+[the verified checkpoint](WORKER-DIAGNOSTICS-PLAN.md#verified-implementation-checkpoint).
+Whole-browser resource acceptance and abrupt-worker recovery remain open.

@@ -5,8 +5,6 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import test from "node:test";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { NodeServices } from "@effect/platform-node";
 import { defaultConfiguration } from "@hitchhiker/core";
 import { createDefaultInterface } from "@hitchhiker/default-interface";
@@ -16,6 +14,7 @@ import {
   createGrantStore,
   createPluginStorage,
   type SurfaceEvent,
+  type TrustedPluginWorkerDiagnostics,
 } from "@hitchhiker/runtime";
 import { Effect, Layer, PubSub, Schedule, Schema, Stream } from "effect";
 import { runDefaultPluginBootstrap } from "../src/default-plugin-bootstrap.ts";
@@ -49,21 +48,33 @@ const Node = Schema.Struct({
   children: Schema.optional(Schema.Array(Schema.Unknown)),
 });
 const Value = Schema.Struct({ result: Schema.Struct({ value: Schema.Json }) });
-const execute = promisify(execFile);
-const memory = (phase: string) =>
-  Effect.promise(async () => {
-    const { stdout } = await execute("/bin/ps", ["-axo", "pid=,ppid=,rss=,comm="]);
-    const workers = stdout.split("\n").flatMap((line) => {
-      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
-      return match?.[4]?.endsWith("/plugin-worker")
-        ? [{ pid: Number(match[1]), rssKiB: Number(match[3]) }]
-        : [];
-    });
-    assert.equal(workers.length, 6, "fixture expects exactly six isolated plugin workers");
-    process.stdout.write(
-      `HITCHHIKER_DEFAULT_EXTENSIONS_MEMORY=${JSON.stringify({ phase, workers, rssKiB: workers.reduce((sum, item) => sum + item.rssKiB, 0) })}\n`,
-    );
-  });
+type WorkerBinding = {
+  readonly generation: number;
+  readonly diagnostics: TrustedPluginWorkerDiagnostics;
+};
+const memory = Effect.fn("DefaultExtensions.memory")(function* (
+  phase: string,
+  bindings: ReadonlyMap<string, WorkerBinding>,
+) {
+  assert.equal(bindings.size, 6);
+  const workers = yield* Effect.forEach(
+    [...bindings],
+    ([pluginId, binding]) =>
+      Effect.gen(function* () {
+        const identity = yield* binding.diagnostics.started.pipe(Effect.timeout(5_000));
+        const usage = yield* binding.diagnostics.sample(identity);
+        assert.deepEqual(usage.identity, identity);
+        assert.ok(usage.physicalFootprintBytes > 0);
+        assert.ok(usage.residentBytes > 0);
+        return { pluginId, activationGeneration: binding.generation, ...usage };
+      }),
+    { concurrency: 6 },
+  );
+  assert.equal(new Set(workers.map((worker) => worker.identity.pid)).size, 6);
+  process.stdout.write(
+    `HITCHHIKER_DEFAULT_EXTENSIONS_MEMORY=${JSON.stringify({ phase, workers, physicalFootprintBytes: workers.reduce((sum, item) => sum + item.physicalFootprintBytes, 0), residentBytes: workers.reduce((sum, item) => sum + item.residentBytes, 0) })}\n`,
+  );
+});
 const wait = (label: string, condition: Effect.Effect<boolean, unknown>) =>
   condition.pipe(
     Effect.filterOrFail(Boolean, () => new Error(label)),
@@ -191,8 +202,17 @@ test(
                 onRecoveryFailure: Effect.void,
               });
               const management = yield* createPluginManagement({ startPaused: true });
+              const workerBindings = new Map<string, WorkerBinding>();
               const launchWorker = yield* createInstalledPluginLauncher({
                 executable: pluginHost!,
+                onWorkerDiagnostics: (owner, diagnostics) =>
+                  Effect.sync(() => {
+                    assert.equal(owner.profileId, "default");
+                    workerBindings.set(owner.pluginId, {
+                      generation: owner.generation,
+                      diagnostics,
+                    });
+                  }),
                 grants,
                 controller,
                 composition,
@@ -266,7 +286,7 @@ test(
                 ),
               );
               yield* evaluate("retained", "globalThis.defaultExtensionRetained='retained'");
-              yield* memory("startup");
+              yield* memory("startup", workerBindings);
               const press = (label: string) =>
                 Effect.gen(function* () {
                   const button = buttons.get(label);
@@ -297,7 +317,7 @@ test(
                 "picker did not start",
                 Effect.sync(() => last.includes("choosing.")),
               );
-              yield* memory("picker");
+              yield* memory("picker", workerBindings);
               process.stdout.write(
                 `HITCHHIKER_DEFAULT_EXTENSIONS_PICKER_DIRECTORY=${source}\nHITCHHIKER_DEFAULT_EXTENSIONS_PICKER_READY\n`,
               );
@@ -310,7 +330,7 @@ test(
                 "review did not start",
                 Effect.sync(() => last.includes("reviewing.")),
               );
-              yield* memory("review");
+              yield* memory("review", workerBindings);
               process.stdout.write("HITCHHIKER_DEFAULT_EXTENSIONS_REVIEW_READY\n");
               yield* wait(
                 "extension did not install",
@@ -342,7 +362,7 @@ test(
                     Effect.map((value) => value.result.value === "enabled"),
                   ),
               );
-              yield* memory("installed");
+              yield* memory("installed", workerBindings);
               assert.equal(
                 yield* evaluate("retained", "globalThis.defaultExtensionRetained"),
                 "retained",
@@ -412,7 +432,7 @@ test(
                 yield* evaluate("retained", "globalThis.defaultExtensionRetained"),
                 "retained",
               );
-              yield* memory("removed");
+              yield* memory("removed", workerBindings);
               process.stdout.write(
                 `HITCHHIKER_DEFAULT_EXTENSIONS_REMOVED=${JSON.stringify({ ms: performance.now() - started })}\n`,
               );

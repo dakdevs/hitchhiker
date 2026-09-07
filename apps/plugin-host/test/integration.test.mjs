@@ -203,6 +203,44 @@ test("native plugin host isolates workers and recovers from resource violations"
 
   const build = buildNative({ testing: true });
   assert.equal(build.status, 0, `${build.stdout}\n${build.stderr}`);
+  await t.test(
+    "private diagnostics bind samples and stop to the exact native worker",
+    async (diagnostics) => {
+      const host = new Host();
+      diagnostics.after(() => host.kill());
+      await host.send({
+        id: 1,
+        method: "activate",
+        params: { code: "globalThis.HitchhikerPlugin={activate(){}}" },
+      });
+      const started = await host.next((message) => message.hostControl?.event === "worker.started");
+      const identity = started.hostControl.identity;
+      assert.ok(Number.isSafeInteger(identity.pid) && identity.pid > 0);
+      assert.ok(Number.isSafeInteger(identity.generation) && identity.generation > 0);
+      assert.match(identity.startAbstime, /^[1-9][0-9]*$/);
+      await host.reply(1);
+      await host.send({ hostControl: { id: 1, method: "worker.sample", identity } });
+      const sample = await host.next((message) => message.hostControl?.id === 1);
+      assert.deepEqual(sample.hostControl.result.identity, identity);
+      assert.ok(sample.hostControl.result.physicalFootprintBytes > 0);
+      assert.ok(sample.hostControl.result.residentBytes > 0);
+      await host.send({
+        hostControl: {
+          id: 2,
+          method: "worker.sample",
+          identity: { ...identity, startAbstime: String(BigInt(identity.startAbstime) + 1n) },
+        },
+      });
+      assert.deepEqual(
+        (await host.next((message) => message.hostControl?.id === 2)).hostControl.error,
+        { code: "stale_worker" },
+      );
+      await host.stop();
+      const stopped = await host.next((message) => message.hostControl?.event === "worker.stopped");
+      assert.deepEqual(stopped.hostControl.identity, identity);
+    },
+  );
+
   const serviceRoot = resolve(
     root,
     "work/plugin-host/build/PluginHost.app/Contents/XPCServices/PluginBroker.xpc",
@@ -490,6 +528,14 @@ test("native plugin host isolates workers and recovers from resource violations"
     await host.reply(12);
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
 
+    const previousDiagnosticGeneration = Math.max(
+      0,
+      ...host.messages.flatMap((message) =>
+        message.hostControl?.event === "worker.started"
+          ? [message.hostControl.identity.generation]
+          : [],
+      ),
+    );
     await host.send({
       id: 13,
       method: "activate",
@@ -498,10 +544,30 @@ test("native plugin host isolates workers and recovers from resource violations"
       },
     });
     await host.event("plugin.started");
+    const memoryIdentity = (
+      await host.next(
+        (message) =>
+          message.hostControl?.event === "worker.started" &&
+          message.hostControl.identity.generation > previousDiagnosticGeneration,
+      )
+    ).hostControl.identity;
     const memoryResource = await host.event("plugin.resource", 5000);
     assert.equal(memoryResource.params.reason, "rss", JSON.stringify(memoryResource));
     assert.ok(memoryResource.params.rssBytes > 150 * 1024 * 1024);
     await host.event("plugin.crash");
+    const memoryStopped = await host.next(
+      (message) =>
+        message.hostControl?.event === "worker.stopped" &&
+        message.hostControl.identity.generation === memoryIdentity.generation,
+    );
+    assert.deepEqual(memoryStopped.hostControl.identity, memoryIdentity);
+    await host.send({
+      hostControl: { id: 400, method: "worker.sample", identity: memoryIdentity },
+    });
+    assert.deepEqual(
+      (await host.next((message) => message.hostControl?.id === 400)).hostControl.error,
+      { code: "stale_worker" },
+    );
 
     await host.send({
       id: 14,

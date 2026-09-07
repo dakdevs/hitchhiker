@@ -149,6 +149,30 @@ test("live plugin authenticates before spawn, expires idle credentials, and esca
         yield* Fiber.interrupt(recovery);
         assert.equal(recoveryAttempts, 3);
         assert.equal(escalations, 1);
+        let hookReleases = 0;
+        let hookReady = false;
+        const hookFailure = yield* Effect.flip(
+          runLivePlugin({
+            ...base,
+            manifest: {
+              id: "recovery-plugin",
+              version: "1.0.0",
+              name: "Recovery",
+              capabilities: [],
+            },
+            token: recoveryGrant.token,
+            onDiagnostics: () => Effect.fail("diagnostic-hook-failed"),
+            onReady: Effect.sync(() => {
+              hookReady = true;
+            }),
+            release: Effect.sync(() => {
+              hookReleases++;
+            }),
+          }),
+        );
+        assert.equal(hookFailure, "diagnostic-hook-failed");
+        assert.equal(hookReleases, 1);
+        assert.equal(hookReady, false);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
   } finally {

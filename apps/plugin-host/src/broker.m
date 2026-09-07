@@ -198,6 +198,13 @@ static void *watch_worker(void *opaque) {
 static void forward_worker_line(WorkerThread *thread, NSData *line) {
   BrokerState *state = thread->state;
   NSDictionary *object = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
+  if ([object isKindOfClass:NSDictionary.class] && object[@"hostControl"] != nil) {
+    pthread_mutex_lock(&state->lock);
+    if (state->generation == thread->generation && state->worker_pid == thread->pid)
+      kill_worker_locked(state, @"protocol");
+    pthread_mutex_unlock(&state->lock);
+    return;
+  }
   NSNumber *identifier = [object isKindOfClass:NSDictionary.class] ? object[@"id"] : nil;
   NSString *control = [object isKindOfClass:NSDictionary.class] ? object[@"control"] : nil;
   NSString *event = [object isKindOfClass:NSDictionary.class] ? object[@"event"] : nil;

@@ -7,6 +7,7 @@ import {
   LivePluginManifest,
   type GrantStoreApi,
   type ScopedDomDriver,
+  type TrustedPluginWorkerDiagnostics,
 } from "@hitchhiker/runtime";
 import { browserMcpApi } from "./mcp.ts";
 import type { BrowserController } from "./controller.ts";
@@ -31,6 +32,10 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
     readonly management?: PluginManagement;
     readonly extensions?: ExtensionManagement;
     readonly extensionInstallation?: ExtensionInstallation;
+    readonly onWorkerDiagnostics?: (
+      owner: { readonly profileId: string; readonly pluginId: string; readonly generation: number },
+      diagnostics: TrustedPluginWorkerDiagnostics,
+    ) => Effect.Effect<void, unknown>;
   }) {
     const engine = yield* EngineConnection;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -165,6 +170,17 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
                 showRoute: (id) => composition.showRoute(composedOwner, id),
                 hideRoute: (id) => composition.hideRoute(composedOwner, id),
               }
+            : undefined,
+          onDiagnostics: options.onWorkerDiagnostics
+            ? (diagnostics) =>
+                options.onWorkerDiagnostics!(
+                  {
+                    profileId: activation.profileId,
+                    pluginId: artifact.manifest.id,
+                    generation: activation.generation,
+                  },
+                  diagnostics,
+                )
             : undefined,
           onReady: (services
             ? services.ready(composedOwner).pipe(Effect.andThen(onReady))

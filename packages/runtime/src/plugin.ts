@@ -10,6 +10,46 @@ const Identifier = Schema.Int.check(
   Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
 );
 const Event = Schema.Struct({ event: Schema.String, params: ObjectValue });
+const Positive = Schema.Int.check(
+  Schema.isGreaterThan(0),
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
+const StartAbstime = Schema.String.check(
+  Schema.isPattern(/^[1-9][0-9]*$/),
+  Schema.makeFilter(
+    (value) => value.length < 20 || (value.length === 20 && value <= "18446744073709551615"),
+  ),
+);
+const ByteCount = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
+export const WorkerIdentitySchema = Schema.Struct({
+  pid: Schema.Int.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(2_147_483_647)),
+  generation: Positive,
+  startAbstime: StartAbstime,
+});
+export type WorkerIdentity = typeof WorkerIdentitySchema.Type;
+export const WorkerUsageSchema = Schema.Struct({
+  identity: WorkerIdentitySchema,
+  physicalFootprintBytes: ByteCount,
+  residentBytes: ByteCount,
+});
+export type WorkerUsage = typeof WorkerUsageSchema.Type;
+const HostControl = Schema.Struct({
+  hostControl: Schema.Union([
+    Schema.Struct({ event: Schema.Literal("worker.started"), identity: WorkerIdentitySchema }),
+    Schema.Struct({ event: Schema.Literal("worker.stopped"), identity: WorkerIdentitySchema }),
+    Schema.Struct({
+      id: Positive,
+      result: WorkerUsageSchema,
+    }),
+    Schema.Struct({
+      id: Positive,
+      error: Schema.Struct({ code: Schema.Literals(["stale_worker", "unavailable"]) }),
+    }),
+  ]),
+});
 const Message = Schema.Union([
   Event,
   Schema.Struct({ id: Identifier, result: Schema.Json }),
@@ -23,7 +63,10 @@ const Call = Schema.Struct({
   method: Schema.String.check(Schema.isMaxLength(128)),
   params: ObjectValue,
 });
-const decodeMessage = Schema.decodeUnknownEffect(Schema.fromJsonString(Message));
+const Incoming = Schema.Union([HostControl, Message]);
+const decodeIncoming = Schema.decodeUnknownEffect(Schema.fromJsonString(Incoming), {
+  onExcessProperty: "error",
+});
 const decodeCall = Schema.decodeUnknownEffect(Call, { onExcessProperty: "error" });
 export class PluginHostError extends Schema.TaggedError<PluginHostError>()("PluginHostError", {
   code: Schema.String,
@@ -75,6 +118,11 @@ export interface PluginHostOptions {
     params: typeof ObjectValue.Type,
   ) => Effect.Effect<Schema.Json, unknown>;
 }
+export interface TrustedPluginWorkerDiagnostics {
+  readonly started: Effect.Effect<WorkerIdentity, PluginHostError>;
+  readonly stopped: (identity: WorkerIdentity) => Effect.Effect<void, PluginHostError>;
+  readonly sample: (identity: WorkerIdentity) => Effect.Effect<WorkerUsage, PluginHostError>;
+}
 
 /** Private transport for one isolated plugin. No executable path or identity comes from plugin code. */
 export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: PluginHostOptions) {
@@ -84,8 +132,15 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
   const outgoing = yield* Queue.bounded<Uint8Array>(32);
   const calls = yield* Queue.bounded<{ call: typeof Call.Type; bytes: number }>(32);
   const events = yield* PubSub.sliding<typeof Event.Type>({ capacity: 16 });
+  const diagnosticStarted = yield* Deferred.make<WorkerIdentity, PluginHostError>();
+  const diagnosticStopped = new Map<string, Deferred.Deferred<void, PluginHostError>>();
+  const observedStops = new Set<string>();
   const pending = new Map<number, Deferred.Deferred<Schema.Json, PluginHostError>>();
+  const pendingDiagnostics = new Map<number, Deferred.Deferred<WorkerUsage, PluginHostError>>();
   let sequence = 0;
+  let diagnosticSequence = 0;
+  let workerIdentity: WorkerIdentity | undefined;
+  let diagnosticWorkerStarted = false;
   let activated = false;
   let workerStarted = false;
   let callsReceived = 0;
@@ -122,9 +177,14 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
     yield* Deferred.fail(termination, error);
     for (const deferred of pending.values()) yield* Deferred.fail(deferred, error);
     pending.clear();
+    for (const deferred of pendingDiagnostics.values()) yield* Deferred.fail(deferred, error);
+    pendingDiagnostics.clear();
     yield* Queue.shutdown(outgoing);
     yield* Queue.shutdown(calls);
     yield* PubSub.shutdown(events);
+    yield* Deferred.fail(diagnosticStarted, error).pipe(Effect.catch(() => Effect.void));
+    for (const deferred of diagnosticStopped.values()) yield* Deferred.fail(deferred, error);
+    diagnosticStopped.clear();
   }, Effect.uninterruptible);
   yield* Effect.addFinalizer(() => stop(fail("closed", "Plugin host scope closed")));
   const request = Effect.fn("PluginHost.request")(function* (
@@ -166,6 +226,104 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
         }),
       ),
     );
+  });
+  const sameIdentity = (left: WorkerIdentity | undefined, right: WorkerIdentity) =>
+    left?.pid === right.pid &&
+    left.generation === right.generation &&
+    left.startAbstime === right.startAbstime;
+  const sample = Effect.fn("PluginHost.sampleWorker")(function* (identity: WorkerIdentity) {
+    if (stopped) return yield* stopped;
+    if (!sameIdentity(workerIdentity, identity))
+      return yield* fail("stale_worker", "Worker identity is no longer current");
+    if (pendingDiagnostics.size >= 8 || diagnosticSequence >= Number.MAX_SAFE_INTEGER)
+      return yield* fail("capacity", "Worker diagnostic request limit reached");
+    const id = ++diagnosticSequence;
+    const bytes = Buffer.from(
+      `${JSON.stringify({ hostControl: { id, method: "worker.sample", identity } })}\n`,
+    );
+    if (bytes.length > 1024 * 1024 || outgoingBytes + bytes.length > 8 * 1024 * 1024)
+      return yield* fail("capacity", "Worker diagnostic input buffer limit reached");
+    const deferred = yield* Deferred.make<WorkerUsage, PluginHostError>();
+    pendingDiagnostics.set(id, deferred);
+    outgoingBytes += bytes.length;
+    if (!Queue.offerUnsafe(outgoing, bytes)) {
+      outgoingBytes -= bytes.length;
+      pendingDiagnostics.delete(id);
+      return yield* fail("capacity", "Worker diagnostic input queue is full");
+    }
+    return yield* Deferred.await(deferred).pipe(
+      Effect.timeoutOrElse({
+        duration: 2_000,
+        orElse: () => Effect.fail(fail("timeout", "Worker diagnostic sample timed out")),
+      }),
+      Effect.flatMap((result) =>
+        sameIdentity(workerIdentity, identity) && sameIdentity(result.identity, identity)
+          ? Effect.succeed(result)
+          : Effect.fail(fail("stale_worker", "Worker identity changed while sampling")),
+      ),
+      Effect.ensuring(Effect.sync(() => pendingDiagnostics.delete(id))),
+    );
+  });
+  const identityKey = (identity: WorkerIdentity) =>
+    `${identity.pid}\u0000${identity.generation}\u0000${identity.startAbstime}`;
+  const observeStopped = (identity: WorkerIdentity) =>
+    Effect.suspend(() => {
+      const key = identityKey(identity);
+      if (observedStops.has(key)) return Effect.void;
+      if (stopped) return Effect.fail(stopped);
+      if (!sameIdentity(workerIdentity, identity))
+        return Effect.fail(fail("stale_worker", "Worker identity is no longer current"));
+      const existing = diagnosticStopped.get(key);
+      if (existing) return Deferred.await(existing);
+      return Effect.gen(function* () {
+        const deferred = yield* Deferred.make<void, PluginHostError>();
+        diagnosticStopped.set(key, deferred);
+        return yield* Deferred.await(deferred);
+      });
+    });
+  const handleControl = Effect.fn("PluginHost.handleControl")(function* (
+    control: typeof HostControl.Type,
+  ) {
+    const value = control.hostControl;
+    if ("event" in value) {
+      if (value.event === "worker.started") {
+        if (diagnosticWorkerStarted)
+          return yield* stop(fail("protocol", "Duplicate worker diagnostic start"));
+        diagnosticWorkerStarted = true;
+        workerIdentity = value.identity;
+        yield* Deferred.succeed(diagnosticStarted, value.identity).pipe(
+          Effect.catch(() => Effect.void),
+        );
+        return;
+      }
+      if (!sameIdentity(workerIdentity, value.identity))
+        return yield* stop(fail("protocol", "Mismatched worker diagnostic stop"));
+      workerIdentity = undefined;
+      const key = identityKey(value.identity);
+      observedStops.add(key);
+      const deferred = diagnosticStopped.get(key);
+      if (deferred) yield* Deferred.succeed(deferred, undefined);
+      diagnosticStopped.delete(key);
+      return;
+    }
+    const deferred = pendingDiagnostics.get(value.id);
+    if (!deferred) return;
+    if ("error" in value)
+      return yield* Deferred.fail(
+        deferred,
+        fail(
+          value.error.code,
+          value.error.code === "stale_worker"
+            ? "Worker identity is stale"
+            : "Worker diagnostics are unavailable",
+        ),
+      );
+    if (!sameIdentity(workerIdentity, value.result.identity))
+      return yield* Deferred.fail(
+        deferred,
+        fail("stale_worker", "Worker identity changed while sampling"),
+      );
+    yield* Deferred.succeed(deferred, value.result);
   });
   // Never await a plugin call while reading its replies: resolving a Promise can itself issue calls.
   yield* Stream.fromQueue(calls).pipe(
@@ -217,9 +375,11 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
     Stream.flatMap(Stream.fromIterable),
     Stream.runForEach((line) =>
       Effect.gen(function* () {
-        const message = yield* decodeMessage(line).pipe(
+        const incoming = yield* decodeIncoming(line).pipe(
           Effect.mapError(() => fail("protocol", "Invalid plugin output")),
         );
+        if ("hostControl" in incoming) return yield* handleControl(incoming);
+        const message = incoming;
         if ("id" in message) {
           const deferred = pending.get(message.id);
           if (deferred) {
@@ -250,7 +410,9 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
         }
       }),
     ),
-    Effect.catch(stop),
+    Effect.catch((error) =>
+      stop(fail("read", error instanceof PluginHostError ? error.message : "Plugin output failed")),
+    ),
     Effect.ensuring(stop(fail("closed", "Plugin output closed"))),
     Effect.forkScoped,
   );
@@ -270,6 +432,17 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
   return {
     events: Stream.fromPubSub(events),
     failure: Deferred.await(termination),
+    diagnostics: {
+      started: Deferred.await(diagnosticStarted).pipe(
+        Effect.timeoutOrElse({
+          duration: 5_000,
+          orElse: () =>
+            Effect.fail(fail("unavailable", "Worker diagnostic identity is unavailable")),
+        }),
+      ),
+      stopped: observeStopped,
+      sample,
+    },
     activate,
     sendEvent: (event: string, payload: Schema.Json) => request("event", { event, payload }),
     stop: request("stop"),

@@ -1,7 +1,7 @@
 import { Effect, Schedule, Schema, Stream } from "effect";
 import type { PluginDispatchOptions } from "./plugin-dispatch.ts";
 import { LivePluginManifest, createPluginDispatcher } from "./plugin-dispatch.ts";
-import { spawnPluginHost } from "./plugin.ts";
+import { spawnPluginHost, type TrustedPluginWorkerDiagnostics } from "./plugin.ts";
 import { makePluginDomSession } from "./plugin-dom.ts";
 import type { ScopedDomDriver } from "./scoped-dom.ts";
 import type { ExtensionManagementApi } from "./extension-management.ts";
@@ -29,6 +29,10 @@ export interface LivePluginOptions extends Omit<
   readonly onStop?: Effect.Effect<void, unknown>;
   /** Runs only after the isolated worker's activation Promise has fulfilled. */
   readonly onReady?: Effect.Effect<void, unknown>;
+  /** Trusted launcher hook for private broker-owned worker diagnostics. */
+  readonly onDiagnostics?: (
+    diagnostics: TrustedPluginWorkerDiagnostics,
+  ) => Effect.Effect<void, unknown>;
   /** Escalates a failed trusted-interface recovery to the owning application. */
   readonly onRecoveryFailure?: Effect.Effect<void>;
 }
@@ -43,7 +47,7 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
   });
   if (credential.principal !== manifest.id)
     return yield* Effect.fail("Plugin identity is not authorized");
-  const { dom: domDriver, ...dispatchOptions } = options;
+  const { dom: domDriver, onDiagnostics, ...dispatchOptions } = options;
   const dom = yield* makePluginDomSession({
     manifest,
     profileId: options.profileId,
@@ -63,6 +67,7 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
       Effect.catchCause((cause) => options.onRecoveryFailure ?? Effect.die(cause)),
     ),
   );
+  yield* onDiagnostics?.(host.diagnostics) ?? Effect.void;
   const stopped = Effect.raceFirst(host.failure, options.stopWhen ?? Effect.never);
   yield* Effect.raceFirst(
     host.activate(options.code).pipe(Effect.andThen(options.onReady ?? Effect.void)),

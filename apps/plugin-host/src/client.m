@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include <errno.h>
+#include <limits.h>
 #include <libproc.h>
 #include <math.h>
 #include <pthread.h>
@@ -10,6 +11,7 @@
 static const NSUInteger MAX_LINE_BYTES = 1024 * 1024;
 static const NSUInteger MAX_CODE_BYTES = 512 * 1024;
 static const NSUInteger MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+enum { MAX_IDENTITY_ATTEMPTS = 20 };
 
 typedef struct OutputItem {
   void *bytes;
@@ -26,9 +28,19 @@ typedef struct {
   BOOL closed;
   atomic_bool closing;
   xpc_connection_t connection;
+  dispatch_queue_t lifecycle_queue;
   pid_t worker_pid;
   uint64_t worker_generation;
+  uint64_t worker_start_abstime;
+  BOOL worker_identity_available;
+  BOOL resource_kill_requested;
+  BOOL identity_retry_scheduled;
+  NSUInteger identity_attempts;
+  BOOL lifecycle_protocol_failed;
 } OutputQueue;
+
+static void enqueue_object(OutputQueue *queue, NSDictionary *object);
+static void establish_worker_identity(OutputQueue *queue, pid_t pid, uint64_t generation);
 
 static BOOL positive_integer(id value) {
   if (![value isKindOfClass:NSNumber.class] ||
@@ -36,6 +48,153 @@ static BOOL positive_integer(id value) {
     return NO;
   double number = [value doubleValue];
   return isfinite(number) && number >= 1 && number <= 9007199254740991.0 && floor(number) == number;
+}
+
+static BOOL positive_uint64_string(id value, uint64_t *result) {
+  if (![value isKindOfClass:NSString.class] || [(NSString *)value length] == 0) return NO;
+  NSString *string = value;
+  if ([string characterAtIndex:0] == '0') return NO;
+  uint64_t number = 0;
+  for (NSUInteger index = 0; index < string.length; index++) {
+    unichar character = [string characterAtIndex:index];
+    if (character < '0' || character > '9') return NO;
+    uint64_t digit = (uint64_t)(character - '0');
+    if (number > (UINT64_MAX - digit) / 10) return NO;
+    number = number * 10 + digit;
+  }
+  if (number == 0) return NO;
+  *result = number;
+  return YES;
+}
+
+static BOOL exact_keys(NSDictionary *object, NSArray<NSString *> *keys) {
+  if (object.count != keys.count) return NO;
+  for (NSString *key in keys)
+    if (object[key] == nil) return NO;
+  return YES;
+}
+
+static NSDictionary *identity_object(pid_t pid, uint64_t generation, uint64_t start_abstime) {
+  return @{
+    @"pid" : @(pid),
+    @"generation" : @(generation),
+    @"startAbstime" : [NSString stringWithFormat:@"%llu", start_abstime],
+  };
+}
+
+static void enqueue_host_control(OutputQueue *queue, NSDictionary *control) {
+  enqueue_object(queue, @{ @"hostControl" : control });
+}
+
+static void emit_diagnostic_failure(OutputQueue *queue, NSNumber *identifier, NSString *code) {
+  if (!positive_integer(identifier)) return;
+  enqueue_host_control(queue, @{
+    @"id" : identifier,
+    @"error" : @{ @"code" : code },
+  });
+}
+
+static BOOL diagnostic_sample_request(NSDictionary *request, NSNumber **identifier,
+                                      pid_t *pid, uint64_t *generation,
+                                      uint64_t *start_abstime) {
+  if (!exact_keys(request, @[ @"hostControl" ])) return NO;
+  NSDictionary *control = request[@"hostControl"];
+  if (![control isKindOfClass:NSDictionary.class] ||
+      !exact_keys(control, @[ @"id", @"method", @"identity" ])) return NO;
+  NSNumber *request_id = control[@"id"];
+  NSDictionary *identity = control[@"identity"];
+  if (!positive_integer(request_id) || ![control[@"method"] isEqual:@"worker.sample"] ||
+      ![identity isKindOfClass:NSDictionary.class] ||
+      !exact_keys(identity, @[ @"pid", @"generation", @"startAbstime" ]) ||
+      !positive_integer(identity[@"pid"]) || !positive_integer(identity[@"generation"]) ||
+      [identity[@"pid"] unsignedLongLongValue] > INT_MAX ||
+      !positive_uint64_string(identity[@"startAbstime"], start_abstime))
+    return NO;
+  *identifier = request_id;
+  *pid = (pid_t)[identity[@"pid"] intValue];
+  *generation = [identity[@"generation"] unsignedLongLongValue];
+  return YES;
+}
+
+static BOOL current_identity_locked(OutputQueue *queue, pid_t pid, uint64_t generation,
+                                    uint64_t start_abstime) {
+  return queue->worker_identity_available && queue->worker_pid == pid &&
+         queue->worker_generation == generation &&
+         queue->worker_start_abstime == start_abstime;
+}
+
+static void emit_lifecycle_protocol_failure(OutputQueue *queue) {
+  pthread_mutex_lock(&queue->lock);
+  BOOL first_failure = !queue->lifecycle_protocol_failed;
+  queue->lifecycle_protocol_failed = YES;
+  pthread_mutex_unlock(&queue->lock);
+  if (first_failure)
+    enqueue_object(queue, @{
+      @"event" : @"plugin.crash",
+      @"params" : @{ @"reason" : @"broker_lifecycle_protocol" }
+    });
+}
+
+static void handle_diagnostic_sample(OutputQueue *queue, NSNumber *identifier, pid_t pid,
+                                     uint64_t generation, uint64_t start_abstime) {
+  pthread_mutex_lock(&queue->lock);
+  BOOL bound = queue->worker_pid == pid && queue->worker_generation == generation;
+  BOOL current = bound && current_identity_locked(queue, pid, generation, start_abstime);
+  BOOL unavailable = bound && !queue->worker_identity_available;
+  pthread_mutex_unlock(&queue->lock);
+  if (!current) {
+    emit_diagnostic_failure(queue, identifier, unavailable ? @"unavailable" : @"stale_worker");
+    return;
+  }
+  struct rusage_info_v4 usage = {0};
+  if (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&usage) != 0) {
+    emit_diagnostic_failure(queue, identifier, @"unavailable");
+    return;
+  }
+  pthread_mutex_lock(&queue->lock);
+  current = current_identity_locked(queue, pid, generation, start_abstime) &&
+            usage.ri_proc_start_abstime == start_abstime;
+  pthread_mutex_unlock(&queue->lock);
+  if (!current) {
+    emit_diagnostic_failure(queue, identifier, @"stale_worker");
+    return;
+  }
+  if (usage.ri_phys_footprint > 9007199254740991ULL ||
+      usage.ri_resident_size > 9007199254740991ULL) {
+    emit_diagnostic_failure(queue, identifier, @"unavailable");
+    return;
+  }
+  enqueue_host_control(queue, @{
+    @"id" : identifier,
+    @"result" : @{
+      @"identity" : identity_object(pid, generation, start_abstime),
+      @"physicalFootprintBytes" : @(usage.ri_phys_footprint),
+      @"residentBytes" : @(usage.ri_resident_size),
+    },
+  });
+}
+
+static void establish_worker_identity(OutputQueue *queue, pid_t pid, uint64_t generation) {
+  struct rusage_info_v4 usage = {0};
+  BOOL sampled = proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&usage) == 0 &&
+                 usage.ri_proc_start_abstime != 0;
+  pthread_mutex_lock(&queue->lock);
+  BOOL current = queue->worker_pid == pid && queue->worker_generation == generation;
+  BOOL established = current && !queue->worker_identity_available && sampled;
+  if (established) {
+    queue->worker_start_abstime = usage.ri_proc_start_abstime;
+    queue->worker_identity_available = YES;
+  }
+  if (current && !established && !queue->worker_identity_available &&
+      queue->identity_attempts < MAX_IDENTITY_ATTEMPTS)
+    queue->identity_attempts++;
+  queue->identity_retry_scheduled = NO;
+  pthread_mutex_unlock(&queue->lock);
+  if (established)
+    enqueue_host_control(queue, @{
+      @"event" : @"worker.started",
+      @"identity" : identity_object(pid, generation, usage.ri_proc_start_abstime),
+    });
 }
 
 static BOOL write_all(int descriptor, const void *bytes, size_t length) {
@@ -112,17 +271,29 @@ static void *watch_memory(void *opaque) {
     pthread_mutex_lock(&state->lock);
     pid_t pid = state->worker_pid;
     uint64_t generation = state->worker_generation;
+    BOOL identity_available = state->worker_identity_available;
+    BOOL retry_identity = pid > 0 && !identity_available &&
+                          !state->identity_retry_scheduled &&
+                          state->identity_attempts < MAX_IDENTITY_ATTEMPTS;
+    if (retry_identity) state->identity_retry_scheduled = YES;
     pthread_mutex_unlock(&state->lock);
+    if (retry_identity)
+      dispatch_async(state->lifecycle_queue, ^{
+        establish_worker_identity(state, pid, generation);
+      });
     if (pid <= 0) continue;
     struct rusage_info_v4 usage = {0};
     if (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&usage) != 0 ||
         usage.ri_phys_footprint <= 150ULL * 1024ULL * 1024ULL)
       continue;
     pthread_mutex_lock(&state->lock);
-    BOOL current = state->worker_pid == pid && state->worker_generation == generation;
-    if (current) state->worker_pid = 0;
+    BOOL current = state->worker_pid == pid && state->worker_generation == generation &&
+                   (!state->worker_identity_available ||
+                    usage.ri_proc_start_abstime == state->worker_start_abstime);
+    BOOL should_kill = current && !state->resource_kill_requested;
+    if (should_kill) state->resource_kill_requested = YES;
     pthread_mutex_unlock(&state->lock);
-    if (!current) continue;
+    if (!should_kill) continue;
     xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
     xpc_dictionary_set_uint64(message, "killGeneration", generation);
     xpc_dictionary_set_uint64(message, "rssBytes", usage.ri_phys_footprint);
@@ -207,22 +378,73 @@ int main(int argc, const char *argv[]) {
     pthread_t writer;
     pthread_create(&writer, NULL, write_output, output);
 
+    dispatch_queue_t lifecycle_queue = dispatch_queue_create(
+      "dev.hitchhiker.PluginHost.Client.lifecycle", DISPATCH_QUEUE_SERIAL);
+    output->lifecycle_queue = lifecycle_queue;
     xpc_connection_t connection = xpc_connection_create(
-      "dev.hitchhiker.PluginHost.Broker", dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+      "dev.hitchhiker.PluginHost.Broker", lifecycle_queue);
     output->connection = connection;
     xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
       @autoreleasepool {
         if (xpc_get_type(event) == XPC_TYPE_DICTIONARY) {
-          if (xpc_dictionary_get_value(event, "workerPid")) {
-            pthread_mutex_lock(&output->lock);
-            output->worker_pid = (pid_t)xpc_dictionary_get_int64(event, "workerPid");
-            output->worker_generation = xpc_dictionary_get_uint64(event, "generation");
-            pthread_mutex_unlock(&output->lock);
-          } else if (xpc_dictionary_get_value(event, "workerStopped")) {
+          BOOL has_start = xpc_dictionary_get_value(event, "workerPid") != NULL;
+          BOOL has_stop = xpc_dictionary_get_value(event, "workerStopped") != NULL;
+          if (has_start && has_stop) {
+            emit_lifecycle_protocol_failure(output);
+          } else if (has_start) {
+            pid_t pid = (pid_t)xpc_dictionary_get_int64(event, "workerPid");
             uint64_t generation = xpc_dictionary_get_uint64(event, "generation");
+            if (pid <= 0 || generation == 0) {
+              emit_lifecycle_protocol_failure(output);
+              return;
+            }
             pthread_mutex_lock(&output->lock);
-            if (output->worker_generation == generation) output->worker_pid = 0;
+            BOOL empty = output->worker_pid == 0;
+            if (empty) {
+              output->worker_pid = pid;
+              output->worker_generation = generation;
+              output->worker_start_abstime = 0;
+              output->worker_identity_available = NO;
+              output->resource_kill_requested = NO;
+              output->identity_retry_scheduled = NO;
+              output->identity_attempts = 0;
+            }
             pthread_mutex_unlock(&output->lock);
+            if (!empty) {
+              emit_lifecycle_protocol_failure(output);
+              return;
+            }
+            establish_worker_identity(output, pid, generation);
+          } else if (has_stop) {
+            pid_t pid = (pid_t)xpc_dictionary_get_int64(event, "workerStopped");
+            uint64_t generation = xpc_dictionary_get_uint64(event, "generation");
+            if (pid <= 0 || generation == 0) {
+              emit_lifecycle_protocol_failure(output);
+              return;
+            }
+            pthread_mutex_lock(&output->lock);
+            BOOL current = output->worker_pid == pid && output->worker_generation == generation;
+            BOOL available = current && output->worker_identity_available;
+            uint64_t start_abstime = output->worker_start_abstime;
+            if (current) {
+              output->worker_pid = 0;
+              output->worker_generation = 0;
+              output->worker_start_abstime = 0;
+              output->worker_identity_available = NO;
+              output->resource_kill_requested = NO;
+              output->identity_retry_scheduled = NO;
+              output->identity_attempts = 0;
+            }
+            pthread_mutex_unlock(&output->lock);
+            if (!current) {
+              emit_lifecycle_protocol_failure(output);
+              return;
+            }
+            if (available)
+              enqueue_host_control(output, @{
+                @"event" : @"worker.stopped",
+                @"identity" : identity_object(pid, generation, start_abstime),
+              });
           } else {
             size_t length = 0;
             const void *bytes = xpc_dictionary_get_data(event, "line", &length);
@@ -252,6 +474,19 @@ int main(int argc, const char *argv[]) {
           continue;
         }
         NSDictionary *request = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];
+        if ([request isKindOfClass:NSDictionary.class] && request[@"hostControl"] != nil) {
+          NSNumber *identifier = nil;
+          pid_t pid = 0;
+          uint64_t generation = 0, start_abstime = 0;
+          if (diagnostic_sample_request(request, &identifier, &pid, &generation, &start_abstime))
+            handle_diagnostic_sample(output, identifier, pid, generation, start_abstime);
+          else {
+            NSDictionary *control = [request[@"hostControl"] isKindOfClass:NSDictionary.class]
+              ? request[@"hostControl"] : nil;
+            emit_diagnostic_failure(output, control[@"id"], @"unavailable");
+          }
+          continue;
+        }
         NSString *message = nil;
         if (![request isKindOfClass:NSDictionary.class] || !valid_request(request, &message)) {
           NSNumber *identifier = positive_integer(request[@"id"]) ? request[@"id"] : @0;
