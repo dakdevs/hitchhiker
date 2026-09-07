@@ -3,8 +3,8 @@
 This is the remaining distribution startup migration, not a tab policy in the generic host. The
 live manager plan is implemented. The state-seeding, managed-grant and exact staged-install retry
 prerequisites, packaged bundle index and controller restoration barrier are published. The coordinator
-now passes its focused recovery tests, review and combined repository check. Management
-routes, the runtime bundle loader and main startup cutover are not yet implemented.
+now passes its focused recovery tests, review and combined repository check. The runtime bundle
+reader is implemented with portable tests. Public management routes and main startup cutover remain.
 
 ## Eligibility and ownership
 
@@ -83,13 +83,21 @@ possibly user-edited plugin storage as cleanup.
 
 ## Remaining integration
 
-Generate a strict default bundle index/digest in `apps/default-plugins/build.mjs`, verify all five
-artifacts and both recipes, and copy the bundle into the packaged app's resources. Resolve the bundle
-from the controller's installed resource location and reject paths escaping that trusted bundle.
+The builder and packager already produce and verify the index and resource payload. The runtime
+reader resolves `Resources/default-plugins` relative to the installed
+`Resources/controller/dist` module, with no current-directory or missing-bundle fallback. It validates
+the strict versioned index, its digest, all five manifests/code hashes and both exact recipes. It reads
+bounded regular UTF-8 files through nofollow descriptors, checking fixed parent directories and
+file identity; it never evaluates code or stages profile artifacts while reading. Development callers may
+provide their explicit build directory. Tests use an isolated real build and relocated resource tree
+plus tampered, redirected, malformed and oversized payloads. The reader returns the coordinator's
+existing lazy bundle shape; main startup remains gated on the public management routes.
+The bundle and controller share the application distribution trust boundary. The index digest checks
+consistency, not publisher authenticity: this reader must not accept arbitrary downloaded bundles.
+Authenticating the whole application and its sealed resources remains part of the unfinished signing
+and notarization release gate. Development paths are explicitly trusted by their caller.
 
-Implement the coordinator and fault-injection tests for every journal/grant/install/seed/promotion
-boundary. Test terminal state after removal, divergence in every pending phase, malformed journals,
-no duplicate grants, preserved nonzero storage, and both exact presentation plans. Only wire it from
+The coordinator and its current fault-injection coverage are described below. Only wire it from
 `main.ts` once Settings/Plugins are functional through public composed plugin routes. Then remove
 legacy default-interface ownership from normal startup; retain only the minimal trusted recovery
 surface. Legacy tab fields may remain inert during migration but cannot stay authoritative.
@@ -129,9 +137,49 @@ and manager services with controlled failures and mock workers; they are not nat
 Read-only review accepted the material recovery decisions. Concurrent double-bootstrap calls and
 an actual filesystem sync failure remain useful additional coverage; promotion-gap tests simulate
 the durable state through the manager. Normal startup is deliberately not wired yet: it still needs
-the runtime bundle reader and functional public Settings/Plugins routes before the default cutover.
+functional public Settings/Plugins routes before the default cutover.
 
 The combined `pnpm check` passes 346 portable tests with 29 native-gated skips, including dependency
 validation, typecheck, lint, formatting and all builds. Evidence:
 `work/default-bootstrap-coordinator-check.log`. Native startup and clean shutdown remain unverified
 for this coordinator; previous failed native gates remain open.
+
+## Public management route design
+
+Settings and Plugins are presenter-owned Native content contributions. Opening either screen removes
+the page viewport binding; returning to browsing binds the same selected page. Page events must not
+force a route change. Shared route rendering can compile into both alternative presenters without
+adding a fifth worker or moving tab-model, pinning or layout ownership into the presenter. The host
+must not recognize product route names or call the legacy controller screens.
+
+The next API slice separates `configuration.read`, `plugins.read` and `plugins.manage` from code
+installation authority. A bounded public management snapshot exposes display metadata and lifecycle
+state, never grant IDs, artifact paths or credentials. Lifecycle operations use `plugins.manage`;
+executable staging and grant delegation retain `plugins.install`. These new capabilities and routes
+are a design, not an implemented SDK contract.
+
+A proposed authenticated `replaceSelf(targetId, expectedRevision)` operation substitutes the caller
+references in the existing plan, preserving unrelated entries and using ordinary complete-plan
+validation. Sidebar/top switching then replaces only the presenter and keeps model/pins/layout
+workers, page identities and owner storage. Before accepting this API, test stale revisions, missing
+or incompatible targets, authority denial and preservation of unrelated entries.
+
+Accepted management mutations must run in an application-owned scope. Stopping the calling presenter
+must not cancel the transaction that replaces it. A late-bound port is created before the installed
+launcher, bound once before restore, and fails closed while unbound. The dispatcher authorizes and
+decodes each request before admission. Developer plugins receive no port by default. A deterministic
+cancellation test and a native public-action switch test are required; direct manager-plan tests alone
+do not prove this lifecycle.
+
+## Runtime reader verification
+
+Nine portable tests build the real default artifacts in isolation, relocate them into an app resource
+tree, load both recipes, and stage the returned bytes through the public artifact store. Rejection
+cases cover changed hashes, redirected index paths, unexpected fields, missing/duplicate identities,
+rehashed identity/recipe mismatches, linked roots/directories/files, oversized payloads, invalid UTF-8
+and missing or relative resource paths. The reader neither executes plugins nor writes profile state.
+
+The combined `pnpm check` passes 355 portable tests with 29 native-gated skips, dependency validation,
+typecheck, lint, formatting and all builds. Evidence: `work/default-bundle-reader-check.log`. This
+verifies the portable reader and existing suite; it does not establish normal startup cutover or
+native acceptance.
