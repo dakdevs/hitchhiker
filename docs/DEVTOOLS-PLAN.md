@@ -101,9 +101,15 @@ startup error in 30.28 seconds and left no owned host process, without manual te
 (`work/devtools-native-bounded-startup.log`). This fixes cleanup, not Keychain availability.
 
 The independent default toolbar factory is implemented and covered by five focused tests in
-`apps/default-plugins/src/devtools.ts`. It consumes the existing model selection service and needs
-only `ui.compose` and `devtools.manage`. It is not yet in the default bundle. Integration requires a
+`apps/default-plugins/src/devtools.ts`. It consumes the existing model selection service. Its direct API calls need
+`ui.compose` and `devtools.manage`, but the current broker also requires its manifest and grant to
+contain the model provider authority: `pages.list`, `pages.manage` and `storage.local`. The module
+does not call pages APIs or own page state; these additional capabilities are binding requirements.
+A narrower grant fails service admission. Do not weaken containment to bypass that requirement. It is not yet in the default bundle. Integration requires a
 sixth artifact, fifth active worker, additional toolbar contribution and model-service binding.
 The new bootstrap cohort must preserve old pending journal artifacts/grants, honor completed or
 abandoned journals, and leave removed/custom plans unchanged. The standalone whole-surface example
 and this toolbar feature must use distinct installed identities before they can coexist.
+
+The implementation checkpoint is published at `11bb9ca1410efd0cea5baff7985b4e9782a94491`;
+[exact-commit CI](https://github.com/dakdevs/hitchhiker/actions/runs/34110688643) passed.

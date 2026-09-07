@@ -670,3 +670,10 @@ error after 30 seconds with no remaining host or plugin worker. The public API r
 this distinction. The default toolbar factory has five focused tests; default bundle integration,
 physical UI validation, docking/frontend extension APIs and production Keychain acceptance remain
 open. [DEVTOOLS-PLAN.md](DEVTOOLS-PLAN.md) records the evidence and versioned-cohort requirements.
+
+Published DevTools checkpoint `11bb9ca` has exact-commit CI success (run `34110688643`). Before
+adding the toolbar to a new default cohort, account for service-authority containment: binding the
+existing model requires `pages.list`, `pages.manage` and `storage.local` in addition to the toolbar’s
+direct `ui.compose`/`devtools.manage` authority. The factory uses no pages API, but a two-capability
+manifest cannot bind this provider under the current broker. Preserve that boundary during
+integration; old profiles must not silently adopt the expanded default grant.
