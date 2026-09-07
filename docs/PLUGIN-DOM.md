@@ -81,7 +81,9 @@ not a default feature or an installed workbench.
 `stale_ref`, `covered`, `unsupported`, `limit` and `browser_error`. Missing capability declarations,
 an unavailable adapter or malformed wire arguments may return the existing `denied` code.
 Revocation may terminate the plugin before a rejected call can reach its JavaScript handler.
-Errors do not expose private browser handles or arbitrary engine exception messages.
+An action authorized immediately before revocation may still execute and then return an
+authorization failure; revocation does not undo an in-flight browser side effect. Errors do not
+expose private browser handles or arbitrary engine exception messages.
 
 This API does not provide selectors, script evaluation, screenshots, request interception,
 cross-frame DOM traversal, password reading/filling or browser security-policy configuration. Those are

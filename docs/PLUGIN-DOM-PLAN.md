@@ -59,3 +59,9 @@ dependency, type, lint, format and production build checks (`work/plugin-dom-ful
 Native DOM fixture runs its two cases separately with zero skips. Final process inspection finds
 no remaining fixture host or plugin worker. The test package compiler uses the repository's exact
 esbuild version and public SDK dependency; no handwritten bridge substitutes for the SDK.
+
+Independent security review of implementation commit `f53b110` found no blocking authority,
+namespace, admission, bridge, serialization or limit issue. Origin discovery itself may attach the
+CEF client even when access is subsequently denied. Revocation is rechecked, but is not atomic with
+an already authorized in-flight browser side effect. A dedicated simultaneous MCP/plugin same-page
+contention test remains unverified; production wiring shares the same driver and per-page semaphore.
