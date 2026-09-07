@@ -60,6 +60,15 @@ const nodeBinary = join(nodeRoot, "bin/node");
 const corepack = join(nodeRoot, "lib/node_modules/corepack/dist/corepack.js");
 const isolatedWorkspace = join(work, "package-staging/workspace");
 const controllerStage = join(work, "package-staging/controller");
+const defaultPluginBundle = join(root, "apps/default-plugins/dist");
+const defaultArtifactIds = [
+  "default-tab-model",
+  "default-tab-pins",
+  "default-browser-layout",
+  "default-sidebar-tabs",
+  "default-top-tabs",
+];
+const defaultPlacements = ["sidebar", "top"];
 
 const fail = (message) => {
   throw new Error(message);
@@ -87,6 +96,8 @@ const sha256File = (path) => {
   return hash.digest("hex");
 };
 
+const sha256FileContents = (contents) => createHash("sha256").update(contents).digest("hex");
+
 const requireDirectory = (path, description) => {
   if (!existsSync(path) || !statSync(path).isDirectory())
     fail(`${description} is missing at ${path}`);
@@ -94,6 +105,149 @@ const requireDirectory = (path, description) => {
 
 const requireFile = (path, description) => {
   if (!existsSync(path) || !statSync(path).isFile()) fail(`${description} is missing at ${path}`);
+};
+
+const exactKeys = (value, keys) =>
+  value !== null &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+
+const isSha256 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+
+const isDefaultPlan = (placement, composition, services) => {
+  const presenter = `default-${placement}-tabs`;
+  const expectedBindings = [
+    ["model", "default-tab-model", "model"],
+    ["pins", "default-tab-pins", "pins"],
+    ["layout", "default-browser-layout", "layout"],
+  ];
+  return (
+    exactKeys(composition, ["layout", "slots"]) &&
+    composition.layout === "default-browser-layout" &&
+    Array.isArray(composition.slots) &&
+    composition.slots.length === 3 &&
+    composition.slots.every(
+      (slot, index) =>
+        exactKeys(slot, ["key", "contributions"]) &&
+        slot.key === ["tabs", "toolbar", "content"][index] &&
+        Array.isArray(slot.contributions) &&
+        slot.contributions.length === 1 &&
+        exactKeys(slot.contributions[0], ["pluginId", "id"]) &&
+        slot.contributions[0].pluginId === presenter &&
+        slot.contributions[0].id === slot.key,
+    ) &&
+    exactKeys(services, ["bindings"]) &&
+    Array.isArray(services.bindings) &&
+    services.bindings.length === expectedBindings.length &&
+    services.bindings.every(
+      (binding, index) =>
+        exactKeys(binding, ["consumer", "dependency", "provider", "service"]) &&
+        binding.consumer === presenter &&
+        binding.dependency === expectedBindings[index][0] &&
+        binding.provider === expectedBindings[index][1] &&
+        binding.service === expectedBindings[index][2],
+    )
+  );
+};
+
+/**
+ * The bundle index names only this fixed, trusted inventory. Never use a path supplied by a
+ * plugin manifest to find a file: index paths are part of the signed application payload.
+ */
+const validateDefaultPluginBundle = (directory) => {
+  requireDirectory(directory, "Default plugin bundle");
+  if (lstatSync(directory).isSymbolicLink()) fail("Default plugin bundle must not be a symlink");
+  const readRegular = (relativePath, description) => {
+    const path = join(directory, relativePath);
+    if (!path.startsWith(`${directory}${sep}`)) fail(`Invalid ${description} path`);
+    if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !statSync(path).isFile()) {
+      fail(`${description} must be a regular file`);
+    }
+    return readFileSync(path);
+  };
+  const indexBytes = readRegular("bundle.json", "Default plugin index");
+  let index;
+  try {
+    index = JSON.parse(indexBytes);
+  } catch {
+    fail("Default plugin index is not valid JSON");
+  }
+  if (!exactKeys(index, ["format", "artifacts", "plans", "digest"]) || index.format !== 1) {
+    fail("Default plugin index has an invalid schema");
+  }
+  const unsigned = { format: index.format, artifacts: index.artifacts, plans: index.plans };
+  if (
+    !isSha256(index.digest) ||
+    sha256FileContents(Buffer.from(JSON.stringify(unsigned))) !== index.digest
+  ) {
+    fail("Default plugin index digest does not match its contents");
+  }
+  if (!Array.isArray(index.artifacts) || index.artifacts.length !== defaultArtifactIds.length) {
+    fail("Default plugin index does not contain the five required artifacts");
+  }
+  for (const [position, id] of defaultArtifactIds.entries()) {
+    const artifact = index.artifacts[position];
+    const manifest = `${id}/hitchhiker.plugin.json`;
+    const code = `${id}/plugin.js`;
+    if (
+      !exactKeys(artifact, ["id", "manifest", "code", "manifestSha256", "codeSha256"]) ||
+      artifact.id !== id ||
+      artifact.manifest !== manifest ||
+      artifact.code !== code ||
+      !isSha256(artifact.manifestSha256) ||
+      !isSha256(artifact.codeSha256)
+    ) {
+      fail(`Default plugin index has an invalid ${id} artifact`);
+    }
+    const manifestBytes = readRegular(manifest, `${id} manifest`);
+    const codeBytes = readRegular(code, `${id} code`);
+    if (
+      sha256FileContents(manifestBytes) !== artifact.manifestSha256 ||
+      sha256FileContents(codeBytes) !== artifact.codeSha256
+    ) {
+      fail(`Default plugin index hash mismatch for ${id}`);
+    }
+    let parsedManifest;
+    try {
+      parsedManifest = JSON.parse(manifestBytes);
+    } catch {
+      fail(`Default plugin ${id} manifest is not valid JSON`);
+    }
+    if (parsedManifest.id !== id) fail(`Default plugin manifest identity mismatch for ${id}`);
+  }
+  if (!exactKeys(index.plans, defaultPlacements))
+    fail("Default plugin plans have an invalid schema");
+  for (const placement of defaultPlacements) {
+    const plan = index.plans[placement];
+    const composition = `${placement}/composition.json`;
+    const services = `${placement}/services.json`;
+    if (
+      !exactKeys(plan, ["composition", "compositionSha256", "services", "servicesSha256"]) ||
+      plan.composition !== composition ||
+      plan.services !== services ||
+      !isSha256(plan.compositionSha256) ||
+      !isSha256(plan.servicesSha256)
+    ) {
+      fail(`Default plugin ${placement} plan is invalid`);
+    }
+    const compositionBytes = readRegular(composition, `${placement} composition`);
+    const servicesBytes = readRegular(services, `${placement} services`);
+    if (
+      sha256FileContents(compositionBytes) !== plan.compositionSha256 ||
+      sha256FileContents(servicesBytes) !== plan.servicesSha256
+    ) {
+      fail(`Default plugin index hash mismatch for ${placement} plan`);
+    }
+    try {
+      if (!isDefaultPlan(placement, JSON.parse(compositionBytes), JSON.parse(servicesBytes))) {
+        fail(`Default plugin ${placement} recipe does not match the fixed plan`);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Default plugin")) throw error;
+      fail(`Default plugin ${placement} recipe is not valid JSON`);
+    }
+  }
 };
 
 const safeRemove = (path) => {
@@ -166,6 +320,11 @@ const buildInputs = () => {
   const environment = buildEnvironment();
   run(nodeBinary, [join(root, "apps/plugin-host/scripts/build.mjs")], { env: environment });
   run(nodeBinary, [join(root, "apps/host-probe/scripts/build.mjs")], { env: environment });
+};
+
+const buildDefaultPluginBundle = () => {
+  run(nodeBinary, [join(root, "apps/default-plugins/build.mjs")], { env: buildEnvironment() });
+  validateDefaultPluginBundle(defaultPluginBundle);
 };
 
 const prepareIsolatedWorkspace = () => {
@@ -393,6 +552,12 @@ const stageBundle = () => {
     verbatimSymlinks: true,
   });
   assertContainedSymlinks(join(resources, "controller"));
+  validateDefaultPluginBundle(defaultPluginBundle);
+  cpSync(defaultPluginBundle, join(resources, "default-plugins"), {
+    recursive: true,
+    verbatimSymlinks: true,
+  });
+  validateDefaultPluginBundle(join(resources, "default-plugins"));
 
   const licenses = join(resources, "licenses");
   mkdirSync(licenses, { recursive: true });
@@ -465,6 +630,7 @@ const verifyBundle = (bundle) => {
   const plugin = join(contents, "Helpers/PluginHost.app");
   const bundledNode = join(contents, "Helpers/node");
   const controller = join(contents, "Resources/controller/dist/controller.js");
+  const defaultPlugins = join(contents, "Resources/default-plugins");
   const manifestPath = join(contents, "Resources/build-manifest.json");
   for (const code of [plugin, bundle]) {
     run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", code]);
@@ -476,6 +642,7 @@ const verifyBundle = (bundle) => {
     fail("Bundled Node version mismatch");
   }
   requireFile(manifestPath, "Bundle input manifest");
+  validateDefaultPluginBundle(defaultPlugins);
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   if (
     manifest.node?.version !== nodeVersion ||
@@ -532,6 +699,7 @@ if (verifyOnly) {
   await downloadNode();
   validateInputs();
   if (!skipBuild) buildInputs();
+  buildDefaultPluginBundle();
   deployController(!skipBuild);
   stageBundle();
   verifyBundle(output);

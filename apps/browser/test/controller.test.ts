@@ -31,6 +31,75 @@ test("normalizes addresses and keeps plain search text out of engine navigation"
   assert.equal(normalizeAddressDraft("file:///private"), undefined);
 });
 
+test("restoration settles for an empty profile and propagates startup or host failures", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-restore-barrier-"));
+  try {
+    for (const scenario of ["empty", "startup-failure", "host-exit", "closed"] as const) {
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const exited = yield* Deferred.make<number>();
+            const engine = EngineConnection.of({
+              pid: 1,
+              ready:
+                scenario === "startup-failure"
+                  ? Effect.fail(new EngineError({ code: "ready-failed", message: "Not ready" }))
+                  : Effect.succeed({
+                      event: "host.ready",
+                      params: { pageBrowserGeneration: true },
+                    }),
+              exit: Deferred.await(exited),
+              events: Stream.never,
+              request: () => Effect.succeed({}),
+              loadUnpacked: () => Effect.die("unused"),
+              uninstall: () => Effect.die("unused"),
+              claimRawCdp: Effect.die("unused"),
+            });
+            let commits = 0;
+            const create = makeBrowserController(directory).pipe(
+              Effect.provide(
+                Layer.merge(
+                  Layer.succeed(EngineConnection, engine),
+                  Layer.succeed(
+                    NativeSurface,
+                    NativeSurface.of({
+                      commit: () => Effect.sync(() => ++commits),
+                      events: Stream.empty,
+                    }),
+                  ),
+                ),
+              ),
+            );
+            const controller = yield* scenario === "closed" ? Effect.scoped(create) : create;
+            if (scenario === "empty") {
+              yield* controller.start;
+              yield* controller.restored;
+              assert.equal(commits, 1);
+              assert.deepEqual((yield* controller.snapshot).pages, []);
+            } else {
+              if (scenario === "startup-failure") yield* Effect.exit(controller.start);
+              if (scenario === "host-exit") yield* Deferred.succeed(exited, 0);
+              const error = yield* controller.restored.pipe(
+                Effect.match({ onSuccess: () => undefined, onFailure: (error) => error }),
+              );
+              assert.equal(
+                error?.code,
+                scenario === "startup-failure"
+                  ? "ready-failed"
+                  : scenario === "host-exit"
+                    ? "restore-exit"
+                    : "restore-closed",
+              );
+            }
+          }),
+        ).pipe(Effect.timeout(3000)),
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("restores a complete session before its first persistence and render", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hitchhiker-restore-staging-"));
   try {
@@ -112,6 +181,11 @@ test("restores a complete session before its first persistence and render", asyn
             ),
           );
           yield* controller.start;
+          const restorationObserved = yield* Deferred.make<void>();
+          yield* controller.restored.pipe(
+            Effect.andThen(Deferred.succeed(restorationObserved, undefined)),
+            Effect.forkScoped,
+          );
           yield* waitUntil(
             "restored page opens",
             Effect.sync(() => opened.length === 3),
@@ -127,6 +201,7 @@ test("restores a complete session before its first persistence and render", asyn
           );
           assert.deepEqual(opened, ["first", "second", "third"]);
           assert.equal(commits.length, 0, "partial restored pages must not render");
+          assert.equal(yield* Deferred.isDone(restorationObserved), false);
           assert.deepEqual(
             yield* Effect.promise(() => readFile(join(directory, "browser-state.json"))),
             initialPersistence,
@@ -141,6 +216,7 @@ test("restores a complete session before its first persistence and render", asyn
             event: "pages.created",
             params: { pageId: "third", generation: 1 },
           });
+          yield* Deferred.await(restorationObserved);
           yield* waitUntil(
             "completed restore render",
             Effect.sync(() => commits.length === 1),
@@ -197,6 +273,9 @@ test("restore drains a bounded lifecycle queue while pages.open is still resolvi
       Effect.scoped(
         Effect.gen(function* () {
           const events = yield* PubSub.bounded<EngineEvent>({ capacity: 1 });
+          const finishRequest = yield* Deferred.make<void>();
+          const requestEventsSent = yield* Deferred.make<void>();
+          const restorationObserved = yield* Deferred.make<void>();
           const commits: unknown[] = [];
           const engine = EngineConnection.of({
             pid: 1,
@@ -225,6 +304,8 @@ test("restore drains a bounded lifecycle queue while pages.open is still resolvi
                     canGoForward: false,
                   },
                 });
+                yield* Deferred.succeed(requestEventsSent, undefined);
+                yield* Deferred.await(finishRequest);
                 return {};
               }),
             loadUnpacked: () => Effect.die("unused"),
@@ -244,8 +325,21 @@ test("restore drains a bounded lifecycle queue while pages.open is still resolvi
             ),
           );
           yield* Effect.yieldNow;
-          yield* controller.start.pipe(Effect.timeout(500));
-          yield* Effect.sleep(20);
+          const started = yield* Deferred.make<void, EngineError>();
+          yield* Deferred.complete(started, controller.start).pipe(Effect.forkScoped);
+          yield* controller.restored.pipe(
+            Effect.andThen(Deferred.succeed(restorationObserved, undefined)),
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(requestEventsSent).pipe(Effect.timeout(500));
+          yield* waitUntil(
+            "restored page render",
+            Effect.sync(() => commits.length > 0),
+          );
+          assert.equal(yield* Deferred.isDone(restorationObserved), false);
+          yield* Deferred.succeed(finishRequest, undefined);
+          yield* Deferred.await(started);
+          yield* Deferred.await(restorationObserved);
           assert.deepEqual(
             (yield* controller.snapshot).pages.map((page) => page.id),
             ["first"],
@@ -421,6 +515,7 @@ test("a non-close pages.open error remains fatal during restore", async () => {
           );
           const error = yield* controller.start.pipe(Effect.flip);
           assert.equal(error.code, "transport");
+          assert.equal((yield* controller.restored.pipe(Effect.flip)).code, "transport");
           assert.equal(opens, 1);
         }),
       ),

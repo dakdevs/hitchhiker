@@ -253,6 +253,13 @@ events and payloads, required grants and profile/origin scope, lifecycle behavio
 and verified support status. Distinguish the Hitchhiker SDK, Chrome extension APIs, CDP domains and
 native embedding APIs; an upstream Chromium feature is not automatically an exposed plugin API.
 
+Each reference entry must name the owning plugin or host service and include a minimal executable
+example of both a command and its observable result. State which behavior a replacement plugin can
+change, which controls come from the shared Native component library, and which changes require a
+CEF/Chromium host implementation. Security entries also specify the default policy, revocation
+behavior, persistence and any restart requirement. Coverage must include denial and unsupported
+operation behavior, not only successful calls.
+
 DevTools must work in the default distribution through a replaceable plugin. Document opening and
 closing tools, target selection, presentation and available customization hooks, with separate
 coverage for protocol automation and DevTools frontend customization. Mark unavailable bridges as

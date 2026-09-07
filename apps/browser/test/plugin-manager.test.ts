@@ -838,6 +838,15 @@ test("exact staged retries preserve the plan and reject changed grants, artifact
         const plan = yield* manager.plan();
         const path = join(profileRoot, "hitchhiker-plugins", "plugins.json");
         const bytes = yield* Effect.promise(() => readFile(path, "utf8"));
+        assert.equal(yield* manager.inspectInstallation("missing-plugin"), undefined);
+        assert.deepEqual(yield* manager.inspectInstallation(baseManifest.id), {
+          hash: first.hash,
+          grantId: "first-grant",
+          enabled: false,
+          removing: false,
+          suspended: false,
+        });
+        assert.equal(Object.hasOwn((yield* manager.list())[0], "grantId"), false);
         yield* manager.install(first.hash, "first-grant", { staged: true });
         assert.deepEqual(yield* manager.plan(), plan);
         assert.equal(yield* Effect.promise(() => readFile(path, "utf8")), bytes);
@@ -853,6 +862,13 @@ test("exact staged retries preserve the plan and reject changed grants, artifact
         assert.equal(yield* Effect.promise(() => readFile(path, "utf8")), bytes);
         yield* manager.enable(baseManifest.id);
         const enabled = yield* manager.plan();
+        assert.deepEqual(yield* manager.inspectInstallation(baseManifest.id), {
+          hash: first.hash,
+          grantId: "first-grant",
+          enabled: true,
+          removing: false,
+          suspended: false,
+        });
         assert.equal(launches, 1);
         assert.match(
           (yield* manager.install(first.hash, "first-grant", { staged: true }).pipe(Effect.flip))

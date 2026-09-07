@@ -104,6 +104,18 @@ export interface ManagedPlugin {
 }
 export interface PluginManager {
   readonly list: () => Effect.Effect<readonly ManagedPlugin[], PluginManagerError>;
+  /** Trusted recovery metadata; no bearer credential and no worker/MCP endpoint. */
+  readonly inspectInstallation: (id: string) => Effect.Effect<
+    | {
+        readonly hash: string;
+        readonly grantId: string;
+        readonly enabled: boolean;
+        readonly removing: boolean;
+        readonly suspended: boolean;
+      }
+    | undefined,
+    PluginManagerError
+  >;
   readonly install: (
     hash: string,
     grantId: string,
@@ -1675,6 +1687,22 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       : current;
   return {
     list,
+    inspectInstallation: (id) =>
+      lock.withPermit(
+        Effect.gen(function* () {
+          const registry = yield* load();
+          const plugin = registry.plugins.find((entry) => entry.id === id);
+          return plugin
+            ? {
+                hash: plugin.revision.hash,
+                grantId: plugin.revision.grantId,
+                enabled: plugin.enabled,
+                removing: plugin.removing === true,
+                suspended: plugin.suspended === true,
+              }
+            : undefined;
+        }),
+      ),
     plan,
     applyPlan,
     install: (hash: string, grantId: string, config?: { readonly staged?: boolean }) =>

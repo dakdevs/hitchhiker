@@ -2,8 +2,9 @@
 
 This is the remaining distribution startup migration, not a tab policy in the generic host. The
 live manager plan is implemented. The state-seeding, managed-grant and exact staged-install retry
-prerequisites are now implemented and under final verification; the coordinator, packaged bundle index, management routes and main startup cutover
-are not yet implemented.
+prerequisites are published. The packaged bundle index and controller restoration barrier are now
+implemented and under verification. The coordinator is under recovery review; management routes and
+main startup cutover are not yet implemented.
 
 ## Eligibility and ownership
 
@@ -13,8 +14,10 @@ Capture decoded legacy browser persistence under the profile lease before contro
 save newer state. Restore the same Chromium pages through the controller, then run manager recovery
 before bootstrap. Use the complete restored page inventory to prepare plugin state. The current
 `controller.start` finishes issuing restore requests but does not itself await every staged page
-lifecycle event. Add/await an explicit restoration barrier before capturing that inventory or starting
-default workers; do not seed from a transient partial `controller.snapshot`.
+lifecycle event. Await `controller.restored` before capturing that inventory or starting default
+workers; it settles after all initial requests and staged page events, persistence and rendering.
+Startup errors, host exit and controller closure fail pending waiters. Do not seed from a transient
+partial `controller.snapshot`.
 
 A permanent journal at `hitchhiker-plugins/default-bootstrap.json` decides whether bootstrap may run.
 With no journal, only a revision-zero empty plan and an empty installed-plugin list are eligible.

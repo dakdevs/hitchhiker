@@ -565,3 +565,16 @@ trusted managed grants, and exact disabled staged-install retry. The combined po
 over. [DEFAULT-BOOTSTRAP-PLAN.md](DEFAULT-BOOTSTRAP-PLAN.md) defines permanent completion/abandonment
 markers, crash-gap recovery, page-restoration readiness, packaging and management-route prerequisites.
 Native startup/clean-shutdown acceptance remains unresolved.
+
+The next startup prerequisites add `controller.restored`, which waits for the complete initial page
+cohort and fails on startup/host/scope termination, plus trusted installation identity inspection for
+recovery without exposing grant credentials. Controller and manager tests pass together (32 tests).
+Default artifact builds now emit a deterministic hash-bound index of five packages and both placement
+recipes; packaging verifies and copies it to `Contents/Resources/default-plugins`. The default package
+suite passes (18 tests); no native app was built for this change. Coordinator fault recovery remains
+under review and normal startup still uses the legacy default interface.
+
+The Chromium documentation contract now explicitly requires API ownership, executable command/result
+examples, replacement hooks, security defaults, denial and revocation behavior, persistence and restart
+requirements. DevTools UI and its default plugin remain unfinished. Codex project registration remains
+manual: the available app API has no add-project operation, and computer use denies access to Codex.

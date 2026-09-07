@@ -45,7 +45,7 @@ import {
   type NativeTextInputState,
   type Surface,
 } from "@hitchhiker/ui";
-import { Effect, Option, PubSub, Schema, Semaphore, Stream, Scope } from "effect";
+import { Deferred, Effect, Option, PubSub, Schema, Semaphore, Stream, Scope } from "effect";
 import type { ProfileWriteLease } from "./profile-write-lease.ts";
 import {
   extensionPermissionPages,
@@ -153,6 +153,8 @@ export type PluginManagementAction = "enable" | "disable" | "rollback" | "uninst
 
 export interface BrowserController {
   readonly start: Effect.Effect<void, EngineError>;
+  /** Initial page creation events, persistence, and rendering have settled. */
+  readonly restored: Effect.Effect<void, EngineError>;
   readonly dispatch: (action: string) => Effect.Effect<void, EngineError>;
   readonly snapshot: Effect.Effect<BrowserState>;
   readonly observePages: (
@@ -438,6 +440,18 @@ export const makeBrowserController = (
       | ((operation: PluginManagementAction, id: string) => Effect.Effect<void, unknown>)
       | undefined;
     let restoring = false;
+    let restoreRequestsCompleted = false;
+    let restorationCompleted = false;
+    const restoration = yield* Deferred.make<void, EngineError>();
+    yield* Effect.addFinalizer(() =>
+      Deferred.fail(
+        restoration,
+        new EngineError({
+          code: "restore-closed",
+          message: "Controller closed during restoration",
+        }),
+      ),
+    );
     let closeCancellationGeneration = 0;
     let closingPersistence: BrowserPersistence | undefined;
     let pluginSurface: unknown;
@@ -471,6 +485,17 @@ export const makeBrowserController = (
           effect.pipe(Effect.ensuring(Effect.sync(() => observations.publish(observedPages())))),
         ),
     };
+    const completeRestoration = Effect.suspend(() =>
+      restorationCompleted
+        ? Effect.void
+        : mutex.withPermit(
+            Effect.gen(function* () {
+              if (!restoreRequestsCompleted || restoring) return;
+              yield* Deferred.succeed(restoration, undefined);
+              restorationCompleted = true;
+            }),
+          ),
+    );
     const pluginEventHandlers = new Map<
       string,
       (event: SurfaceEvent) => Effect.Effect<void, EngineError>
@@ -1505,7 +1530,13 @@ export const makeBrowserController = (
       Effect.forkScoped,
     );
     yield* engine.events.pipe(
-      Stream.runForEach((event) => handleEngine(event).pipe(Effect.catch(recordEventError))),
+      Stream.runForEach((event) =>
+        handleEngine(event).pipe(
+          Effect.tapCause((cause) => Deferred.failCause(restoration, cause)),
+          Effect.andThen(completeRestoration),
+          Effect.catch(recordEventError),
+        ),
+      ),
       Effect.forkScoped,
     );
 
@@ -1571,7 +1602,9 @@ export const makeBrowserController = (
           if (result === "opened") break;
         }
       }
-    });
+      restoreRequestsCompleted = true;
+      yield* completeRestoration;
+    }).pipe(Effect.tapCause((cause) => Deferred.failCause(restoration, cause)));
 
     yield* lock
       .withPermit(
@@ -1617,6 +1650,16 @@ export const makeBrowserController = (
 
     return {
       start,
+      restored: Effect.raceFirst(
+        Deferred.await(restoration),
+        engine.exit.pipe(
+          Effect.flatMap(() =>
+            Effect.fail(
+              new EngineError({ code: "restore-exit", message: "Host exited during restoration" }),
+            ),
+          ),
+        ),
+      ),
       dispatch,
       snapshot: Effect.sync(() => state.browser),
       observePages: (owner) =>
