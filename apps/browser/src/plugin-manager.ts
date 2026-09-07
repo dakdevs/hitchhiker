@@ -328,7 +328,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     );
   const put = (registry: Registry, plugin: StoredPlugin) =>
     save({
-      version: 1,
+      ...registry,
       plugins: [...registry.plugins.filter((entry) => entry.id !== plugin.id), plugin],
     });
   const acquireMutationLock = Effect.fn("PluginManager.acquireMutationLock")(
@@ -631,7 +631,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       lastFailure: undefined,
     };
     const prospective = {
-      version: 1 as const,
+      ...registry,
       plugins: [...registry.plugins.filter((entry) => entry.id !== plugin.id), starting],
     };
     yield* prepareServices(prospective, plugin.id);
@@ -844,7 +844,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
           starting: old?.enabled === true,
         };
         const prospective: Registry = {
-          version: 1,
+          ...registry,
           plugins: [...registry.plugins.filter((entry) => entry.id !== candidate.id), candidate],
         };
         const plan = yield* prepareServices(
@@ -861,7 +861,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
             if (!candidate.enabled) return;
             yield* activate(
               {
-                version: 1,
+                ...registry,
                 plugins: [
                   ...registry.plugins.filter((entry) => entry.id !== candidate.id),
                   candidate,
@@ -883,7 +883,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         const candidate = { ...plugin, enabled: true };
         yield* prepareServices(
           {
-            version: 1,
+            ...registry,
             plugins: [...registry.plugins.filter((entry) => entry.id !== id), candidate],
           },
           id,
@@ -903,7 +903,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         const plugin = registry.plugins.find((entry) => entry.id === id);
         if (!plugin) return yield* failure("Plugin is not installed");
         const next: Registry = {
-          version: 1,
+          ...registry,
           plugins: registry.plugins.map((entry) =>
             entry.id === id ? { ...entry, enabled: false, starting: false } : entry,
           ),
@@ -934,7 +934,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         if (owned.some((grant) => grant.principal !== id || grant.profileId !== profileId))
           return yield* failure("Plugin revision grant does not belong to this plugin and profile");
         const next: Registry = {
-          version: 1,
+          ...registry,
           plugins: registry.plugins.filter((entry) => entry.id !== id),
         };
         const plan = yield* prepareServices(next);
@@ -952,7 +952,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
               .remove(id)
               .pipe(Effect.mapError((error) => failure(error.message)));
             yield* save({
-              version: 1,
+              ...registry,
               plugins: registry.plugins.filter((entry) => entry.id !== id),
             });
           }).pipe(Effect.tapError(() => poisonMutation)),
@@ -971,7 +971,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
           starting: plugin.enabled,
         };
         const prospective: Registry = {
-          version: 1,
+          ...registry,
           plugins: [...registry.plugins.filter((entry) => entry.id !== id), next],
         };
         const plan = yield* prepareServices(prospective, next.enabled ? id : undefined);
@@ -985,7 +985,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
             if (!next.enabled) return;
             yield* activate(
               {
-                version: 1,
+                ...registry,
                 plugins: [...registry.plugins.filter((entry) => entry.id !== id), next],
               },
               next,

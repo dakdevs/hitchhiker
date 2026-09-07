@@ -30,7 +30,12 @@ export const pluginGuide: readonly GuideSection[] = [
       headings: ["Capability", "Available today", "Plugin SDK"],
       rows: [
         ["Pages", "List, open, navigate, close through plugins and MCP", "Implemented"],
-        ["Back / forward / reload / stop", "Private native host and default controller", "Planned"],
+        ["Back / forward / reload / stop", "Plugin SDK and MCP with pages.manage", "Implemented"],
+        [
+          "Page state watch",
+          "Revisioned snapshots and coalesced invalidations with pages.list",
+          "Implemented",
+        ],
         ["DOM inspection and interaction", "Scoped MCP snapshot, click and fill", "Planned"],
         ["CDP", "Explicitly authorized raw relay and private host adapter", "Planned"],
         [

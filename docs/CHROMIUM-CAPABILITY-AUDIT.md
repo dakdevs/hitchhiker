@@ -4,18 +4,18 @@ This is an implementation inventory as of September 6, 2026, not the intended fi
 reference must eventually include executable examples, profile scope, grants and lifecycle behavior
 for each supported capability. A private host method does not imply a public plugin API exists.
 
-| Capability        | Current implementation                                                                          | Public plugin gap                                                                                 |
-| ----------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Pages             | Plugin SDK and MCP expose list/open/navigate/close.                                             | Navigation history controls remain private controller/host actions.                               |
-| History/loading   | Host exposes back/forward/reload/stop and loading/history flags.                                | No typed plugin or MCP history controls.                                                          |
-| DOM               | Scoped MCP snapshot/click/fill use opaque document-bound references and origin grants.          | No plugin DOM API.                                                                                |
-| CDP               | Private page-scoped `cdp.send`; separately authenticated raw relay with explicit `cdp.connect`. | The manifest accepts `cdp.connect`, but the plugin dispatcher exposes no CDP operation yet.       |
-| Cookies/storage   | Raw CDP may expose relevant domains through the explicit relay.                                 | No typed host/plugin/MCP service.                                                                 |
-| Network           | Chromium and Chrome extensions retain their own networking behavior.                            | No Hitchhiker request inspection/interception API.                                                |
-| Site permissions  | Chromium handles its site permissions; Hitchhiker grants protect framework APIs.                | No site-permission query/configuration plugin service. Framework grants are not site permissions. |
-| Downloads         | CEF handler and a download-active page protection signal exist.                                 | No plugin list/cancel/open/management API.                                                        |
-| Chrome extensions | Trusted review/staging/install/uninstall/restart replay uses Chromium's extension support.      | No plugin management API; Hitchhiker-plugin MCP tools do not manage Chrome extensions.            |
-| DevTools UI       | Pinned CEF provides `ShowDevTools`, `CloseDevTools`, `HasDevTools`.                             | No host adapter or default DevTools plugin yet; docking/customization is unimplemented.           |
+| Capability        | Current implementation                                                                            | Public plugin gap                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Pages             | Plugin SDK and MCP expose list/open/navigate/close; plugins also expose a revisioned page watch.  | Page invalidation events require a fresh watch snapshot; there is no plugin DOM API.              |
+| History/loading   | Plugin SDK and MCP expose back/forward/reload/stop; page snapshots include loading/history flags. | `pages.manage` grants history controls; `pages.list` grants page snapshots and watch.             |
+| DOM               | Scoped MCP snapshot/click/fill use opaque document-bound references and origin grants.            | No plugin DOM API.                                                                                |
+| CDP               | Private page-scoped `cdp.send`; separately authenticated raw relay with explicit `cdp.connect`.   | The manifest accepts `cdp.connect`, but the plugin dispatcher exposes no CDP operation yet.       |
+| Cookies/storage   | Raw CDP may expose relevant domains through the explicit relay.                                   | No typed host/plugin/MCP service.                                                                 |
+| Network           | Chromium and Chrome extensions retain their own networking behavior.                              | No Hitchhiker request inspection/interception API.                                                |
+| Site permissions  | Chromium handles its site permissions; Hitchhiker grants protect framework APIs.                  | No site-permission query/configuration plugin service. Framework grants are not site permissions. |
+| Downloads         | CEF handler and a download-active page protection signal exist.                                   | No plugin list/cancel/open/management API.                                                        |
+| Chrome extensions | Trusted review/staging/install/uninstall/restart replay uses Chromium's extension support.        | No plugin management API; Hitchhiker-plugin MCP tools do not manage Chrome extensions.            |
+| DevTools UI       | Pinned CEF provides `ShowDevTools`, `CloseDevTools`, `HasDevTools`.                               | No host adapter or default DevTools plugin yet; docking/customization is unimplemented.           |
 
 ## Source map
 

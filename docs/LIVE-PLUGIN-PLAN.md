@@ -119,7 +119,9 @@ Moving the same owner/contribution ID to another slot may retain that worker and
 
 Mark the full stop set expected before stopping anything. Stop consumers before providers, then
 reconfigure the service broker and composition. Start missing target workers in a deterministic
-combined order: service providers before consumers and the layout before its contributors. Every
+order: service providers before consumers, preferring the layout among workers whose services are
+ready. A contributor may provide a service required by the layout; composition does not add a
+reverse dependency or require that the layout publish first. Every
 new or replacement process receives a fresh process-global generation from the existing allocator.
 An identity with the same artifact, grant, required bindings, and compatible composition role keeps
 its worker and generation. Chromium pages belong to the controller and plugin storage belongs to the
@@ -158,7 +160,8 @@ generations at capacity; admitting another identity requires restarting the brow
 
 The next slices are:
 
-1. Add a pure `apps/browser/src/installed-plugin-plan.ts` preparer and diff policy with focused tests.
+1. The internal `apps/browser/src/installed-plugin-plan.ts` preparer and diff policy are implemented.
+   They validate candidate cohorts and compute restart sets; the manager does not invoke them yet.
 2. Add Registry V2 migration, `plan`, `applyPlan`, journaling, forward reconciliation, and rollback to
    [`apps/browser/src/plugin-manager.ts`](../apps/browser/src/plugin-manager.ts).
 3. Make [`apps/browser/src/plugin.ts`](../apps/browser/src/plugin.ts) use the stable dynamic composition
@@ -169,6 +172,24 @@ The next slices are:
    migration readers. On a Version 1 profile, construct the initial plan from its enabled flags and
    legacy files, validate it, and persist Version 2. Invalid legacy input stays repairable through safe
    mode and must not be overwritten as though migration succeeded.
+
+## Legacy whole-window compatibility
+
+Version 1 profiles without a composition recipe may contain one enabled whole-window UI plugin.
+During migration, synthesize `{ layout: pluginId, slots: [] }` for that identity. Zero enabled UI
+plugins produces a headless plan; more than one is invalid and must remain repairable without
+rewriting Version 1. An existing explicit composition recipe remains authoritative.
+
+The dispatcher will support `ui.publish` as a deprecated alias for `ui.publishLayout` only for the
+host-assigned current layout owner. Contributors cannot select that role or publish a whole-window
+surface. This uses the same surface validation, grant checks, owner namespacing, viewport bindings
+and event routing as ordinary layout publication; it grants no additional authority. All installed
+Version 2 UI still uses the compositor, with no parallel legacy execution path or durable exception
+flag. Developer `--plugin` retains its separately selected direct path.
+
+This adapter and migration are planned, not implemented. Verify publication with viewports and
+actions, release and re-publication, contributor denial, malformed input rejection, and invalid
+multi-UI legacy profiles before enabling the migration.
 
 ## Acceptance evidence
 
@@ -194,3 +215,23 @@ Passing the composition slice alone proves only dynamic composition mechanics. P
 transactions and the native switch proves the live-plan prerequisite. It still does not complete the
 default-interface migration, Settings/Plugins routing, startup performance work, DevTools extraction,
 or removal of the legacy controller interface.
+
+## Plan preparer verification — September 6
+
+The pure preparer now validates installed identities, the runnable service cohort, composition
+membership and the four-worker limit. Its diff retains optional-service consumers and compatible
+slot remaps, while restarting required dependents and owners whose artifact, grant or composition
+role changes. Layout priority never introduces a reverse service dependency.
+
+Node 24.19.0 verification: focused planner cases passed; browser typecheck, root lint, formatting
+and the complete build passed. The full `pnpm check` reached tests but failed the controller shutdown
+case and interrupted-extension handoff case under machine load above 400. Turbo then interrupted
+remaining browser tests. Serial reruns of those two files passed 36 tests; the separate planner,
+manager and uninstall run also passed. Logs are local under `work/plugin-plan-{check,focused,
+regression,build}.log`. No native test was rerun for this pure planning change. The earlier native
+shutdown/startup failures remain unresolved.
+
+The manager's registry rewrite helpers now preserve the existing registry envelope in preparation
+for Version 2. This does not implement Version 2, `applyPlan`, or journaled reconciliation; the new
+preparer is not yet connected to runtime mutations. The next step remains that integration and its
+failure/cancellation recovery tests.
