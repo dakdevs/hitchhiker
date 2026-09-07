@@ -26,7 +26,7 @@ const artifactsRoot = new URL("../../default-plugins/dist/", import.meta.url);
 const Value = Schema.Struct({ result: Schema.Struct({ value: Schema.Json }) });
 for (const placement of ["sidebar", "top"] as const)
   test(
-    `six default ${placement} plugins switch presenters live with retained Chromium documents and rollback`,
+    `eight default ${placement} plugins switch presenters live with retained Chromium documents and rollback`,
     { skip: !binary || !pluginHost, timeout: 60_000 },
     async () => {
       const profile = await realpath(
@@ -63,6 +63,8 @@ for (const placement of ["sidebar", "top"] as const)
             alternatePresenter,
             "default-devtools",
             "default-extension-management",
+            "default-settings",
+            "default-plugin-management",
           ].map(async (id) => ({
             manifest: JSON.parse(
               await readFile(new URL(`${id}/hitchhiker.plugin.json`, artifactsRoot), "utf8"),
@@ -204,6 +206,8 @@ for (const placement of ["sidebar", "top"] as const)
                     presenter,
                     "default-devtools",
                     "default-extension-management",
+                    "default-settings",
+                    "default-plugin-management",
                   ],
                   composition: recipe,
                   serviceBindings: services.bindings,
@@ -216,6 +220,8 @@ for (const placement of ["sidebar", "top"] as const)
                     alternatePresenter,
                     "default-devtools",
                     "default-extension-management",
+                    "default-settings",
+                    "default-plugin-management",
                   ],
                   composition: alternateRecipe,
                   serviceBindings: alternateServices.bindings,
@@ -227,9 +233,9 @@ for (const placement of ["sidebar", "top"] as const)
                 yield* apply(full);
                 yield* selected();
                 process.stdout.write(
-                  `Default ${placement} six-plugin install and first viewport: ${Math.round(performance.now() - started)}ms\n`,
+                  `Default ${placement} eight-plugin install and first viewport: ${Math.round(performance.now() - started)}ms\n`,
                 );
-                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 6);
+                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 8);
                 assert(
                   committedSurface.includes("Tab /second"),
                   "SDK presenter must publish tab controls",
@@ -271,6 +277,8 @@ for (const placement of ["sidebar", "top"] as const)
                   "default-browser-layout",
                   "default-devtools",
                   "default-extension-management",
+                  "default-settings",
+                  "default-plugin-management",
                 ])
                   assert.equal(generations.get(id), stableGenerations.get(id));
                 assert.equal(active.has(presenter), false);
@@ -284,6 +292,8 @@ for (const placement of ["sidebar", "top"] as const)
                   "default-browser-layout",
                   "default-devtools",
                   "default-extension-management",
+                  "default-settings",
+                  "default-plugin-management",
                 ])
                   assert.equal(generations.get(id), stableGenerations.get(id));
                 const failedPackage = packages.find(
@@ -354,23 +364,29 @@ for (const placement of ["sidebar", "top"] as const)
                   "default-browser-layout",
                   "default-devtools",
                   "default-extension-management",
+                  "default-settings",
+                  "default-plugin-management",
                 ])
                   assert.equal(generations.get(id), stableGenerations.get(id));
                 assert.deepEqual(yield* modelStorage.read(), modelBefore);
                 assert.deepEqual(yield* pinsStorage.read(), pinsBefore);
-                assert.equal(peak, 6);
+                assert.equal(peak, 8);
                 assert.equal(yield* evaluate(ids[0]!, "globalThis.marker"), "first");
                 assert.equal(yield* evaluate(ids[1]!, "globalThis.marker"), "second");
               }),
             );
-            assert.equal(active.size, 0, "all six activations must finish before manager restart");
+            assert.equal(
+              active.size,
+              0,
+              "all eight activations must finish before manager restart",
+            );
             const beforeRestart = new Map(generations);
             yield* Effect.scoped(
               Effect.gen(function* () {
                 const manager = yield* createPluginManager(options);
                 yield* manager.restore();
                 yield* selected();
-                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 6);
+                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 8);
                 for (const id of active) {
                   assert.ok(beforeRestart.has(id));
                   assert.notEqual(
@@ -460,6 +476,8 @@ for (const placement of ["sidebar", "top"] as const)
               presenter,
               "default-devtools",
               "default-extension-management",
+              "default-settings",
+              "default-plugin-management",
             ].sort();
             assert.deepEqual(
               (yield* manager.list())

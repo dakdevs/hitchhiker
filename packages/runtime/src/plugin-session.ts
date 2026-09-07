@@ -67,6 +67,14 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
       Effect.catchCause((cause) => options.onRecoveryFailure ?? Effect.die(cause)),
     ),
   );
+  // Keep the client reader alive until the broker observes a cooperative worker exit.
+  // Failed or unresponsive workers still reach the scope's forced process cleanup.
+  yield* Effect.addFinalizer(() =>
+    host.stop.pipe(
+      Effect.timeout(2_000),
+      Effect.catch(() => Effect.void),
+    ),
+  );
   yield* onDiagnostics?.(host.diagnostics) ?? Effect.void;
   const stopped = Effect.raceFirst(host.failure, options.stopWhen ?? Effect.never);
   yield* Effect.raceFirst(

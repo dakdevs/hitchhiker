@@ -6,7 +6,7 @@ import test from "node:test";
 import { NodeServices } from "@effect/platform-node";
 import { Deferred, Effect, Exit, Fiber, Stream } from "effect";
 import { create } from "../src/grants.ts";
-import { PluginHostError } from "../src/plugin.ts";
+import { PluginHostError, type TrustedPluginWorkerDiagnostics } from "../src/plugin.ts";
 import { runLivePlugin, type LivePluginOptions } from "../src/plugin-session.ts";
 
 const hostScript = (marker: string) => `#!${process.execPath}
@@ -352,3 +352,101 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+for (const cooperative of [true, false]) {
+  test(`session shutdown ${cooperative ? "waits for exact worker stop" : "forces cleanup after an ignored stop"} and preserves its failure`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-shutdown-"));
+    const marker = join(directory, "order");
+    const spawned = join(directory, "spawned");
+    const executable = join(directory, "host.cjs");
+    await writeFile(
+      executable,
+      `#!${process.execPath}
+const fs=require('node:fs');const rl=require('node:readline');
+const send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
+const identity={pid:123,generation:1,startAbstime:'42'};
+fs.writeFileSync(${JSON.stringify(spawned)},String(process.pid));
+rl.createInterface({input:process.stdin}).on('line',line=>{
+ const r=JSON.parse(line);
+ if(r.method==='activate'){send({hostControl:{event:'worker.started',identity}});send({id:r.id,result:true});}
+ if(r.method==='stop'){
+   fs.writeFileSync(${JSON.stringify(marker)},'requested');
+   ${cooperative ? `send({id:r.id,result:true});setTimeout(()=>{fs.writeFileSync(${JSON.stringify(marker)},'stopped');send({hostControl:{event:'worker.stopped',identity}});},50);` : ""}
+ }
+});`,
+      { mode: 0o700 },
+    );
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const grants = yield* create({ directory: join(directory, "grants") });
+          const issued = yield* grants.issue({
+            principal: "shutdown-plugin",
+            profileId: "default",
+            capabilities: [],
+            origins: [],
+          });
+          const ready = yield* Deferred.make<void>();
+          const finish = yield* Deferred.make<never, string>();
+          let diagnostics: TrustedPluginWorkerDiagnostics | undefined;
+          let released = false;
+          const fiber = yield* runLivePlugin({
+            manifest: {
+              id: "shutdown-plugin",
+              version: "1.0.0",
+              name: "Shutdown",
+              capabilities: [],
+            },
+            executable,
+            code: "compiled",
+            token: issued.token,
+            grants,
+            profileId: "default",
+            browser: {
+              pages: Effect.succeed([]),
+              open: () => Effect.die("unused"),
+              navigate: () => Effect.die("unused"),
+              close: () => Effect.die("unused"),
+              configuration: Effect.die("unused"),
+              configure: () => Effect.die("unused"),
+              setTabPlacement: () => Effect.die("unused"),
+            },
+            publish: () => Effect.die("unused"),
+            release: Effect.promise(async () => {
+              assert.equal(await readFile(marker, "utf8"), cooperative ? "stopped" : "requested");
+              released = true;
+            }),
+            events: Stream.never,
+            onDiagnostics: (value) =>
+              Effect.sync(() => {
+                diagnostics = value;
+              }),
+            onReady: Deferred.succeed(ready, undefined),
+            stopWhen: Deferred.await(finish),
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(ready).pipe(Effect.timeout(3_000));
+          const pid = yield* Effect.promise(() => waitForSpawn(spawned, 0));
+          const began = performance.now();
+          yield* Deferred.fail(finish, "original-session-failure");
+          assert.equal(
+            yield* Fiber.join(fiber).pipe(Effect.flip, Effect.timeout(5_000)),
+            "original-session-failure",
+          );
+          assert(released);
+          if (cooperative) {
+            assert(diagnostics);
+            const identity = yield* diagnostics.started;
+            yield* diagnostics.stopped(identity);
+          } else
+            assert(
+              performance.now() - began >= 1_800,
+              "an unacknowledged stop reaches its shutdown deadline",
+            );
+          yield* Effect.promise(() => waitForExit(pid));
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}

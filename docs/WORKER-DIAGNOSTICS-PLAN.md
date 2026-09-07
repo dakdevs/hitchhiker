@@ -99,3 +99,9 @@ These are worker-only measurements, excluding Chromium, brokers and GPU processe
 benchmark. All-six stop observation, abrupt selected-worker recovery, long idle measurements, full
 application memory and production Keychain startup remain separate acceptance work. The fixture
 uses disposable profiles and mock Keychain. No public SDK or MCP diagnostics API was added.
+
+The [V4 management checkpoint](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md#v4-integration-checkpoint)
+adds eight-worker samples and exact stop observation across ten activation generations. Cooperative
+shutdown now stops dispatch before the worker and waits for broker confirmation; a two-second
+deadline retains forced cleanup for unresponsive workers. This extends worker lifecycle evidence,
+while aggregate browser memory, abrupt crash recovery and long-idle performance remain open.

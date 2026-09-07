@@ -219,10 +219,6 @@ const fakeApi = () => {
         return { revision: layouts.length };
       },
       publishContribution: async (id, surface) => {
-        if (id === "toolbar") {
-          for (const route of ["content", "settings", "plugins"])
-            assert.ok(contributions.has(route), `${route} must be ready before its launcher`);
-        }
         contributions.set(id, surface);
         return { revision: contributions.size };
       },
@@ -333,8 +329,14 @@ test("sidebar presenter publishes screenshot-compatible fragments and routes sel
     { viewportId: "main-page", pageId: "page-b" },
   ]);
   const toolbarNodes = nodes(fake.contributions.get("toolbar")!.root);
-  assert.equal(toolbarNodes.find((node) => node.key === "plugins")?.kind, "button");
-  assert.equal(toolbarNodes.find((node) => node.key === "settings")?.kind, "button");
+  assert.equal(
+    toolbarNodes.some((node) => node.key === "plugins"),
+    false,
+  );
+  assert.equal(
+    toolbarNodes.some((node) => node.key === "settings"),
+    false,
+  );
   await plugin.onEvent?.(
     "ui.event",
     uiEvent("press", "page-select-page-a", { action: "page.select:page-a" }),
@@ -349,108 +351,23 @@ test("sidebar presenter publishes screenshot-compatible fragments and routes sel
   ]);
 });
 
-test("presenter management routes replace the viewport and Back restores the selected page", async () => {
+test("presenter ignores management actions and never calls management APIs", async () => {
   const fake = fakeApi();
   const plugin = createPresenterPlugin("sidebar");
   await plugin.activate(fake.api);
-  await plugin.onEvent?.(
-    "ui.event",
-    uiEvent("press", "settings", { action: "interface.settings" }),
-  );
-  assert.equal(fake.selectedRoute(), "settings");
-  assert.equal(fake.contributions.get("settings")?.root.key, "settings-route");
-  assert.deepEqual(fake.contributions.get("settings")?.bindings, []);
-  assert.equal(fake.contributions.get("content")?.root.key, "main-page");
-  await plugin.onPagesChanged?.(2);
-  assert.equal(fake.selectedRoute(), "settings");
-  assert.deepEqual(fake.routeCalls, ["settings"]);
-  await plugin.onEvent?.(
-    "ui.event",
-    uiEvent("press", "settings-color-dark", { action: "settings.color:dark" }),
-  );
-  assert.deepEqual(fake.configurationWrites.at(-1), {
-    colorScheme: "dark",
-    sleepAfterMs: 300_000,
-    alwaysAwakeOrigins: ["https://kept.example"],
-  });
-  await plugin.onEvent?.(
-    "ui.event",
-    uiEvent("press", "management-back", { action: "management.back" }),
-  );
-  assert.equal(fake.contributions.get("content")?.root.key, "main-page");
-  assert.equal(fake.selectedRoute(), "content");
-  assert.deepEqual(fake.contributions.get("content")?.bindings, [
-    { viewportId: "main-page", pageId: "page-b" },
-  ]);
-});
-
-test("management routes refresh tab state and navigation uses a selection changed while Settings is open", async () => {
-  const fake = fakeApi();
-  const plugin = createPresenterPlugin("sidebar");
-  await plugin.activate(fake.api);
-  await plugin.onEvent?.(
-    "ui.event",
-    uiEvent("press", "settings", { action: "interface.settings" }),
-  );
-  fake.setModel({
-    version: 1,
-    pagesRevision: 2,
-    selection: { kind: "page", pageId: "page-a" },
-    pageOrder: ["page-a", "page-b"],
-  });
-  await plugin.onEvent?.("service.state", {
-    dependency: "model",
-    providerGeneration: 1,
-    revision: 2,
-    available: true,
-  });
-  assert.equal(fake.selectedRoute(), "settings");
-  assert.deepEqual(fake.contributions.get("content")?.bindings, [
-    { viewportId: "main-page", pageId: "page-a" },
-  ]);
-  assert.ok(
-    nodes(fake.contributions.get("tabs")!.root).some((node) => node.key === "page-select-page-a"),
-  );
-  await plugin.onEvent?.("ui.event", uiEvent("input", "address", { kind: "clear" }));
-  await plugin.onEvent?.(
-    "ui.event",
-    uiEvent("input", "address", { kind: "insert_text", text: "example.com" }),
-  );
-  await plugin.onEvent?.("ui.event", uiEvent("press", "navigate", { action: "browser.navigate" }));
-  assert.equal(fake.contributions.get("content")?.root.key, "main-page");
-  assert.deepEqual(fake.pageCalls.at(-1), {
-    method: "navigate",
-    pageId: "page-a",
-    url: "https://example.com",
-  });
-});
-
-test("presenter forwards bounded lifecycle operations and refreshes the revision before switching", async () => {
-  const fake = fakeApi();
-  const plugin = createPresenterPlugin("sidebar");
-  await plugin.activate(fake.api);
-  await plugin.onEvent?.("ui.event", uiEvent("press", "plugins", { action: "interface.plugins" }));
-  assert.equal(fake.selectedRoute(), "plugins");
-  assert.equal(fake.contributions.get("plugins")?.root.key, "plugins-route");
-  assert.deepEqual(fake.contributions.get("plugins")?.bindings, []);
   for (const action of [
+    "interface.settings",
+    "interface.plugins",
+    "settings.color:dark",
+    "settings.sleep:60000",
     "plugins.disable:other-plugin",
-    "plugins.rollback:other-plugin",
-    "plugins.uninstall:other-plugin",
+    "plugins.replace-self",
   ])
     await plugin.onEvent?.("ui.event", uiEvent("press", action, { action }));
-  await plugin.onEvent?.(
-    "ui.event",
-    uiEvent("press", "plugins-switch-presenter", { action: "plugins.replace-self" }),
-  );
-  assert.deepEqual(fake.pluginCalls, [
-    { method: "snapshot" },
-    { method: "disable", id: "other-plugin" },
-    { method: "rollback", id: "other-plugin" },
-    { method: "uninstall", id: "other-plugin" },
-    { method: "snapshot" },
-    { method: "replaceSelf", id: "default-top-tabs", revision: 7 },
-  ]);
+  assert.deepEqual(fake.pluginCalls, []);
+  assert.deepEqual(fake.configurationWrites, []);
+  assert.equal(fake.contributions.has("settings"), false);
+  assert.equal(fake.contributions.has("plugins"), false);
 });
 
 test("presenter routes address, history, tab, pin, and reorder actions through public APIs", async () => {
@@ -583,7 +500,7 @@ test("configuration invalidation refreshes presenter colors without changing pag
     colorScheme: "dark",
   });
   await plugin.onEvent?.("configuration.changed", {});
-  assert.equal(fake.contributions.get("settings")!.root.bg, "#212121");
+  assert.ok(fake.contributions.get("toolbar"));
   assert.deepEqual(fake.contributions.get("content")!.bindings, bindings);
   assert.deepEqual(fake.routeCalls, []);
 });

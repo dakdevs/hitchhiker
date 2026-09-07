@@ -27,6 +27,7 @@ const withDiagnostics = async (
   sampleBody: string,
   use: (host: DiagnosticHost) => Effect.Effect<void, unknown, Scope.Scope>,
   announce = true,
+  call: Parameters<typeof spawnPluginHost>[0]["call"] = () => Effect.die("unused"),
 ) => {
   const dir = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-diagnostics-"));
   const executable = join(dir, "fixture.cjs");
@@ -36,11 +37,11 @@ const withDiagnostics = async (
 const readline=require('node:readline');
 const send=v=>process.stdout.write(JSON.stringify(v)+'\\n');
 const identity={pid:123,generation:7,startAbstime:'42'};
-let count=0;
+let count=0;let stops=0;
 readline.createInterface({input:process.stdin}).on('line',line=>{
  const q=JSON.parse(line);
  if(q.method==='activate'){${announce ? "send({hostControl:{event:'worker.started',identity}});" : ""}send({id:q.id,result:null});}
- else if(q.method==='stop'){${announce ? "send({hostControl:{event:'worker.stopped',identity}});" : ""}send({id:q.id,result:null});}
+ else if(q.method==='stop'){if(++stops>1){send({id:q.id,error:{code:"duplicate_stop",message:"duplicate stop"}});return;}${announce ? "send({hostControl:{event:'worker.stopped',identity}});" : ""}send({id:q.id,result:null});}
  else if(q.hostControl){count++;const reply=()=>send({hostControl:{id:q.hostControl.id,result:{identity,physicalFootprintBytes:10,residentBytes:8}}});${sampleBody}}
 });
 `,
@@ -49,7 +50,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
   try {
     await Effect.runPromise(
       Effect.gen(function* () {
-        const host = yield* spawnPluginHost({ executable, call: () => Effect.die("unused") });
+        const host = yield* spawnPluginHost({ executable, call });
         yield* use(host);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer), Effect.timeout(8_000)),
     );
@@ -90,6 +91,35 @@ test("diagnostic frames stay private while exact samples and ordinary events rem
       yield* host.diagnostics.stopped(identity);
     }),
   ));
+
+test("concurrent graceful stops cancel an in-flight call and await one broker stop", async () => {
+  const entered = Effect.runSync(Deferred.make<void>());
+  let canceled = false;
+  await withDiagnostics(
+    "reply();send({event:'plugin.call',params:{callId:1,method:'pending',params:{}}});",
+    (host) =>
+      Effect.gen(function* () {
+        yield* host.activate("");
+        const identity = yield* host.diagnostics.started;
+        yield* host.diagnostics.sample(identity);
+        yield* Deferred.await(entered);
+        yield* Effect.all([host.stop, host.stop], { concurrency: 2 });
+        assert(canceled, "the in-flight call cannot resolve into the exited worker");
+        yield* host.diagnostics.stopped(identity);
+        yield* host.stop;
+      }),
+    true,
+    () =>
+      Deferred.succeed(entered, undefined).pipe(
+        Effect.andThen(Effect.never),
+        Effect.ensuring(
+          Effect.sync(() => {
+            canceled = true;
+          }),
+        ),
+      ),
+  );
+});
 
 for (const [name, body] of [
   ["duplicate start", "send({hostControl:{event:'worker.started',identity}});"],

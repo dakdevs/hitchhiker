@@ -21,8 +21,8 @@ import type { PluginArtifactStore } from "./plugin-artifacts.ts";
 import type { PluginManager } from "./plugin-manager.ts";
 import type { ProfileWriteLease } from "./profile-write-lease.ts";
 
-const JournalId = "default-browser-v3";
-const JournalVersion = 3;
+const JournalId = "default-browser-v4";
+const JournalVersion = 4;
 const JournalLimit = 64 * 1024;
 const coordinatorLocks = new Map<string, Semaphore.Semaphore>();
 const poisonedProfiles = new Set<string>();
@@ -34,16 +34,17 @@ const previousIds = [
   "default-top-tabs",
 ] as const;
 const v2Ids = [...previousIds, "default-devtools"] as const;
-const ids = [...v2Ids, "default-extension-management"] as const;
-const cohortIds = (version: 1 | 2 | 3) =>
-  version === 1 ? previousIds : version === 2 ? v2Ids : ids;
+const v3Ids = [...v2Ids, "default-extension-management"] as const;
+const ids = [...v3Ids, "default-settings", "default-plugin-management"] as const;
+const cohortIds = (version: 1 | 2 | 3 | 4) =>
+  version === 1 ? previousIds : version === 2 ? v2Ids : version === 3 ? v3Ids : ids;
 type DefaultPluginId = (typeof ids)[number];
 type LegacyPluginId = (typeof previousIds)[number];
 type AbandonReason = "profile-customized" | "bootstrap-state-diverged";
 const isLegacyPluginId = (id: DefaultPluginId): id is LegacyPluginId =>
   (previousIds as readonly string[]).includes(id);
 
-const capabilities = {
+const v3Capabilities = {
   "default-tab-model": ["pages.list", "pages.manage", "storage.local"],
   "default-tab-pins": ["pages.list", "storage.local"],
   "default-browser-layout": ["ui.compose", "configuration.read"],
@@ -81,6 +82,37 @@ const capabilities = {
     "extensions.manage",
     "extensions.install",
     "configuration.read",
+  ],
+} satisfies Readonly<Record<(typeof v3Ids)[number], readonly Capability[]>>;
+
+const capabilities = {
+  ...v3Capabilities,
+  "default-sidebar-tabs": [
+    "ui.compose",
+    "pages.list",
+    "pages.manage",
+    "storage.local",
+    "configuration.read",
+  ],
+  "default-top-tabs": [
+    "ui.compose",
+    "pages.list",
+    "pages.manage",
+    "storage.local",
+    "configuration.read",
+  ],
+  "default-settings": [
+    "ui.compose",
+    "configuration.read",
+    "configuration.write",
+    "plugins.read",
+    "plugins.manage",
+  ],
+  "default-plugin-management": [
+    "ui.compose",
+    "configuration.read",
+    "plugins.read",
+    "plugins.manage",
   ],
 } satisfies Readonly<Record<DefaultPluginId, readonly Capability[]>>;
 
@@ -136,7 +168,7 @@ export interface DefaultPluginBootstrapOptions {
 
 const planFor = (
   placement: "sidebar" | "top",
-  version: 1 | 2 | 3 = JournalVersion,
+  version: 1 | 2 | 3 | 4 = JournalVersion,
 ): InstalledPluginPlanInput => {
   const presenter = `default-${placement}-tabs`;
   return {
@@ -146,7 +178,8 @@ const planFor = (
       "default-browser-layout",
       presenter,
       ...(version >= 2 ? ["default-devtools"] : []),
-      ...(version === 3 ? ["default-extension-management"] : []),
+      ...(version >= 3 ? ["default-extension-management"] : []),
+      ...(version === 4 ? ["default-settings", "default-plugin-management"] : []),
     ],
     composition: {
       layout: "default-browser-layout",
@@ -157,7 +190,7 @@ const planFor = (
           ...(version >= 2 && key === "toolbar"
             ? [{ pluginId: "default-devtools", id: "toolbar" }]
             : []),
-          ...(version === 3 && key === "toolbar"
+          ...(version >= 3 && key === "toolbar"
             ? [
                 {
                   pluginId: "default-extension-management",
@@ -166,10 +199,14 @@ const planFor = (
                 },
               ]
             : []),
-          ...(version === 3 && key === "content"
+          ...(version >= 3 && key === "content"
             ? [
-                { pluginId: presenter, id: "settings", optional: true as const },
-                { pluginId: presenter, id: "plugins", optional: true as const },
+                ...(version === 3
+                  ? [
+                      { pluginId: presenter, id: "settings", optional: true as const },
+                      { pluginId: presenter, id: "plugins", optional: true as const },
+                    ]
+                  : []),
                 {
                   pluginId: "default-extension-management",
                   id: "main",
@@ -177,8 +214,15 @@ const planFor = (
                 },
               ]
             : []),
+          ...(version === 4 && (key === "toolbar" || key === "content")
+            ? ["default-settings", "default-plugin-management"].map((pluginId) => ({
+                pluginId,
+                id: key === "toolbar" ? "launcher" : "main",
+                optional: true as const,
+              }))
+            : []),
         ],
-        ...(version === 3 && key === "content"
+        ...(version >= 3 && key === "content"
           ? { route: { fallback: { pluginId: presenter, id: "content" } } }
           : {}),
       })),
@@ -266,8 +310,13 @@ const DescriptorSchema = Schema.Struct({
   grantKey: Schema.String,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const PendingSchema = Schema.Struct({
-  version: Schema.Literals([1, 2, 3]),
-  id: Schema.Literals(["default-browser-v1", "default-browser-v2", "default-browser-v3"]),
+  version: Schema.Literals([1, 2, 3, 4]),
+  id: Schema.Literals([
+    "default-browser-v1",
+    "default-browser-v2",
+    "default-browser-v3",
+    "default-browser-v4",
+  ]),
   state: Schema.Literal("pending"),
   placement: Schema.Literals(["sidebar", "top"]),
   artifacts: Schema.Array(DescriptorSchema).check(Schema.isMaxLength(ids.length)),
@@ -281,14 +330,24 @@ const PendingSchema = Schema.Struct({
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const JournalSchema = Schema.Union([
   Schema.Struct({
-    version: Schema.Literals([1, 2, 3]),
-    id: Schema.Literals(["default-browser-v1", "default-browser-v2", "default-browser-v3"]),
+    version: Schema.Literals([1, 2, 3, 4]),
+    id: Schema.Literals([
+      "default-browser-v1",
+      "default-browser-v2",
+      "default-browser-v3",
+      "default-browser-v4",
+    ]),
     state: Schema.Literal("completed"),
     revision: RevisionSchema,
   }).annotate({ parseOptions: { onExcessProperty: "error" } }),
   Schema.Struct({
-    version: Schema.Literals([1, 2, 3]),
-    id: Schema.Literals(["default-browser-v1", "default-browser-v2", "default-browser-v3"]),
+    version: Schema.Literals([1, 2, 3, 4]),
+    id: Schema.Literals([
+      "default-browser-v1",
+      "default-browser-v2",
+      "default-browser-v3",
+      "default-browser-v4",
+    ]),
     state: Schema.Literal("abandoned"),
     reason: Schema.Literals(["profile-customized", "bootstrap-state-diverged"]),
   }).annotate({ parseOptions: { onExcessProperty: "error" } }),
@@ -325,7 +384,10 @@ const decodeJournal = (value: unknown): Journal | undefined => {
     return journal.revision === expectedIds.length + 1 ? journal : undefined;
   if (journal.state === "abandoned") return journal;
   const currentAuthority = journal.artifacts.every((descriptor) =>
-    same(descriptor.capabilities, capabilities[descriptor.id]),
+    journal.version === 4
+      ? same(descriptor.capabilities, capabilities[descriptor.id])
+      : (v3Ids as readonly string[]).includes(descriptor.id) &&
+        same(descriptor.capabilities, v3Capabilities[descriptor.id as (typeof v3Ids)[number]]),
   );
   const legacyAuthority =
     journal.version === 1 &&

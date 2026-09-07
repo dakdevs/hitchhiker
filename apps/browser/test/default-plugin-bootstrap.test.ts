@@ -41,8 +41,133 @@ const ids = [
   "default-top-tabs",
   "default-devtools",
   "default-extension-management",
+  "default-settings",
+  "default-plugin-management",
 ] as const;
 const caps = [
+  ["pages.list", "pages.manage", "storage.local"],
+  ["pages.list", "storage.local"],
+  ["ui.compose", "configuration.read"],
+  ["ui.compose", "pages.list", "pages.manage", "storage.local", "configuration.read"],
+  ["ui.compose", "pages.list", "pages.manage", "storage.local", "configuration.read"],
+  [
+    "ui.compose",
+    "devtools.manage",
+    "pages.list",
+    "pages.manage",
+    "storage.local",
+    "configuration.read",
+  ],
+  [
+    "ui.compose",
+    "extensions.read",
+    "extensions.manage",
+    "extensions.install",
+    "configuration.read",
+  ],
+  ["ui.compose", "configuration.read", "configuration.write", "plugins.read", "plugins.manage"],
+  ["ui.compose", "configuration.read", "plugins.read", "plugins.manage"],
+] as const;
+const plan = (
+  placement: "sidebar" | "top",
+  version: 1 | 2 | 3 | 4 = 4,
+): InstalledPluginPlanInput => {
+  const presenter = `default-${placement}-tabs`;
+  return {
+    enabled: [
+      "default-tab-model",
+      "default-tab-pins",
+      "default-browser-layout",
+      presenter,
+      ...(version >= 2 ? ["default-devtools"] : []),
+      ...(version >= 3 ? ["default-extension-management"] : []),
+      ...(version === 4 ? ["default-settings", "default-plugin-management"] : []),
+    ],
+    composition: {
+      layout: "default-browser-layout",
+      slots: ["tabs", "toolbar", "content"].map((key) => ({
+        key,
+        contributions: [
+          { pluginId: presenter, id: key },
+          ...(version === 2 && key === "toolbar"
+            ? [{ pluginId: "default-devtools", id: "toolbar" }]
+            : []),
+          ...(version >= 3 && key === "toolbar"
+            ? [
+                { pluginId: "default-devtools", id: "toolbar" },
+                {
+                  pluginId: "default-extension-management",
+                  id: "launcher",
+                  optional: true as const,
+                },
+              ]
+            : []),
+          ...(version === 4 && key === "toolbar"
+            ? [
+                { pluginId: "default-settings", id: "launcher", optional: true as const },
+                { pluginId: "default-plugin-management", id: "launcher", optional: true as const },
+              ]
+            : []),
+          ...(version >= 3 && key === "content"
+            ? [
+                ...(version === 3
+                  ? [
+                      { pluginId: presenter, id: "settings", optional: true as const },
+                      { pluginId: presenter, id: "plugins", optional: true as const },
+                    ]
+                  : []),
+                {
+                  pluginId: "default-extension-management",
+                  id: "main",
+                  optional: true as const,
+                },
+                ...(version === 4
+                  ? [
+                      { pluginId: "default-settings", id: "main", optional: true as const },
+                      {
+                        pluginId: "default-plugin-management",
+                        id: "main",
+                        optional: true as const,
+                      },
+                    ]
+                  : []),
+              ]
+            : []),
+        ],
+        ...(version >= 3 && key === "content"
+          ? { route: { fallback: { pluginId: presenter, id: "content" } } }
+          : {}),
+      })),
+    },
+    serviceBindings: [
+      { consumer: presenter, dependency: "model", provider: "default-tab-model", service: "model" },
+      { consumer: presenter, dependency: "pins", provider: "default-tab-pins", service: "pins" },
+      {
+        consumer: presenter,
+        dependency: "layout",
+        provider: "default-browser-layout",
+        service: "layout",
+      },
+      ...(version >= 2
+        ? [
+            {
+              consumer: "default-devtools",
+              dependency: "model",
+              provider: "default-tab-model",
+              service: "model",
+            },
+            {
+              consumer: "default-devtools",
+              dependency: "layout",
+              provider: "default-browser-layout",
+              service: "layout",
+            },
+          ]
+        : []),
+    ],
+  } satisfies InstalledPluginPlanInput;
+};
+const preV4Caps = [
   ["pages.list", "pages.manage", "storage.local"],
   ["pages.list", "storage.local"],
   ["ui.compose", "configuration.read"],
@@ -82,81 +207,6 @@ const caps = [
     "configuration.read",
   ],
 ] as const;
-const plan = (placement: "sidebar" | "top", version: 1 | 2 | 3 = 3): InstalledPluginPlanInput => {
-  const presenter = `default-${placement}-tabs`;
-  return {
-    enabled: [
-      "default-tab-model",
-      "default-tab-pins",
-      "default-browser-layout",
-      presenter,
-      ...(version >= 2 ? ["default-devtools"] : []),
-      ...(version === 3 ? ["default-extension-management"] : []),
-    ],
-    composition: {
-      layout: "default-browser-layout",
-      slots: ["tabs", "toolbar", "content"].map((key) => ({
-        key,
-        contributions: [
-          { pluginId: presenter, id: key },
-          ...(version === 2 && key === "toolbar"
-            ? [{ pluginId: "default-devtools", id: "toolbar" }]
-            : []),
-          ...(version === 3 && key === "toolbar"
-            ? [
-                { pluginId: "default-devtools", id: "toolbar" },
-                {
-                  pluginId: "default-extension-management",
-                  id: "launcher",
-                  optional: true as const,
-                },
-              ]
-            : []),
-          ...(version === 3 && key === "content"
-            ? [
-                { pluginId: presenter, id: "settings", optional: true as const },
-                { pluginId: presenter, id: "plugins", optional: true as const },
-                {
-                  pluginId: "default-extension-management",
-                  id: "main",
-                  optional: true as const,
-                },
-              ]
-            : []),
-        ],
-        ...(version === 3 && key === "content"
-          ? { route: { fallback: { pluginId: presenter, id: "content" } } }
-          : {}),
-      })),
-    },
-    serviceBindings: [
-      { consumer: presenter, dependency: "model", provider: "default-tab-model", service: "model" },
-      { consumer: presenter, dependency: "pins", provider: "default-tab-pins", service: "pins" },
-      {
-        consumer: presenter,
-        dependency: "layout",
-        provider: "default-browser-layout",
-        service: "layout",
-      },
-      ...(version >= 2
-        ? [
-            {
-              consumer: "default-devtools",
-              dependency: "model",
-              provider: "default-tab-model",
-              service: "model",
-            },
-            {
-              consumer: "default-devtools",
-              dependency: "layout",
-              provider: "default-browser-layout",
-              service: "layout",
-            },
-          ]
-        : []),
-    ],
-  } satisfies InstalledPluginPlanInput;
-};
 const contract = (name: string) => ({ name, version: "1.0.0", digest: "a".repeat(64) });
 const bundle: DefaultPluginBundle = {
   packages: ids.map((id, index) => ({
@@ -285,9 +335,9 @@ for (const placement of ["sidebar", "top"] satisfies readonly ("sidebar" | "top"
           (yield* harness.manager.list()).map((item) => [item.id, item.enabled]),
           ids.map((id) => [id, plan(placement).enabled.includes(id)]),
         );
-        assert.deepEqual(yield* harness.manager.plan(), { ...plan(placement), revision: 8 });
+        assert.deepEqual(yield* harness.manager.plan(), { ...plan(placement), revision: 10 });
         const grants = yield* harness.grants.list();
-        assert.equal(grants.length, 7);
+        assert.equal(grants.length, 9);
         assert.deepEqual(
           [
             ...(grants.find((grant) => grant.principal === "default-extension-management")
@@ -302,15 +352,15 @@ for (const placement of ["sidebar", "top"] satisfies readonly ("sidebar" | "top"
           ].sort(),
         );
         assert.equal(harness.observed.loads, 1);
-        assert.equal(harness.observed.launches, 6);
+        assert.equal(harness.observed.launches, 8);
         assert.deepEqual(JSON.parse(yield* journalText(harness.profileRoot)), {
-          version: 3,
-          id: "default-browser-v3",
+          version: 4,
+          id: "default-browser-v4",
           state: "completed",
-          revision: 8,
+          revision: 10,
         });
 
-        yield* harness.manager.applyPlan(8, { enabled: [], serviceBindings: [] });
+        yield* harness.manager.applyPlan(10, { enabled: [], serviceBindings: [] });
         for (const id of [...ids].reverse()) yield* harness.manager.uninstall(id);
         assert.deepEqual(yield* harness.manager.list(), []);
         yield* runDefaultPluginBootstrap(harness.input);
@@ -375,9 +425,9 @@ test("resumes a fully checkpointed installed prefix without duplicate grants", (
       assert.match(yield* journalText(harness.profileRoot), /"expectedRevision":2/);
 
       yield* runDefaultPluginBootstrap(harness.input);
-      assert.equal((yield* harness.grants.list()).length, 7);
+      assert.equal((yield* harness.grants.list()).length, 9);
       assert.deepEqual((yield* harness.manager.plan()).enabled, plan("sidebar").enabled);
-      assert.equal(harness.observed.launches, 6);
+      assert.equal(harness.observed.launches, 8);
     }),
   ));
 
@@ -402,7 +452,7 @@ test("accepts an install-before-journal gap after the second artifact", () =>
 
       yield* runDefaultPluginBootstrap(harness.input);
       assert.match(yield* journalText(harness.profileRoot), /"state":"completed"/);
-      assert.equal((yield* harness.grants.list()).length, 7);
+      assert.equal((yield* harness.grants.list()).length, 9);
     }),
   ));
 
@@ -507,7 +557,7 @@ test("checkpoints model storage before a pins failure and resumes only the missi
       const pins = yield* harness.storage.forOwner(DefaultTabPinsPluginId);
       assert.equal((yield* model.read()).revision, 1);
       assert.equal((yield* pins.read()).revision, 1);
-      assert.equal(harness.observed.launches, 6);
+      assert.equal(harness.observed.launches, 8);
     }),
   ));
 
@@ -546,7 +596,7 @@ test("a CAS conflict that rereads revision zero never promotes or launches worke
       assert.deepEqual(yield* harness.manager.plan(), {
         enabled: [],
         serviceBindings: [],
-        revision: 7,
+        revision: 9,
       });
       assert.match(yield* journalText(harness.profileRoot), /"state":"pending"/);
     }),
@@ -563,13 +613,13 @@ test("recovers a promotion-before-terminal-marker gap", () =>
             .pipe(Effect.andThen(Effect.fail(injectedManagerError()))),
       } satisfies PluginManager;
       yield* expectFailure(runDefaultPluginBootstrap({ ...harness.input, manager: interrupted }));
-      assert.deepEqual(yield* harness.manager.plan(), { ...plan("top"), revision: 8 });
+      assert.deepEqual(yield* harness.manager.plan(), { ...plan("top"), revision: 10 });
       assert.match(yield* journalText(harness.profileRoot), /"state":"pending"/);
 
       yield* runDefaultPluginBootstrap(harness.input);
       assert.match(yield* journalText(harness.profileRoot), /"state":"completed"/);
-      assert.equal((yield* harness.manager.plan()).revision, 8);
-      assert.equal((yield* harness.grants.list()).length, 7);
+      assert.equal((yield* harness.manager.plan()).revision, 10);
+      assert.equal((yield* harness.grants.list()).length, 9);
     }),
   ));
 
@@ -746,7 +796,7 @@ test("safe and developer modes do not load bundles or touch the journal", () =>
     }),
   ));
 
-test("preserves terminal V1/V2 journals and rejects a version and id mismatch", () =>
+test("preserves terminal V1/V2/V3 journals and rejects a version and id mismatch", () =>
   withHarness("hitchhiker-bootstrap-v1-terminal", "sidebar", (harness) =>
     Effect.gen(function* () {
       const path = join(harness.profileRoot, "hitchhiker-plugins", "default-bootstrap.json");
@@ -787,6 +837,18 @@ test("preserves terminal V1/V2 journals and rejects a version and id mismatch", 
       yield* Effect.promise(() =>
         writeFile(
           path,
+          JSON.stringify({ version: 3, id: "default-browser-v3", state: "completed", revision: 8 }),
+          { mode: 0o600 },
+        ),
+      );
+      yield* runDefaultPluginBootstrap(harness.input);
+      assert.equal(harness.observed.loads, 0);
+      assert.deepEqual(yield* harness.manager.list(), []);
+      assert.deepEqual(yield* harness.grants.list(), []);
+
+      yield* Effect.promise(() =>
+        writeFile(
+          path,
           JSON.stringify({
             version: 2,
             id: "default-browser-v2",
@@ -816,91 +878,89 @@ test("preserves terminal V1/V2 journals and rejects a version and id mismatch", 
     }),
   ));
 
-test("resumes a V2 cohort without loading V3 artifacts or adding extension authority", () =>
-  withHarness("hitchhiker-bootstrap-v2-current", "sidebar", (harness) =>
-    Effect.gen(function* () {
-      yield* expectFailure(
-        runDefaultPluginBootstrap({
+for (const version of [1, 2, 3] as const) {
+  test(`resumes frozen V${version} artifacts and grants without loading V4`, () =>
+    withHarness(`hitchhiker-bootstrap-v${version}-frozen`, "sidebar", (harness) =>
+      Effect.gen(function* () {
+        yield* expectFailure(
+          runDefaultPluginBootstrap({
+            ...harness.input,
+            grants: {
+              ...harness.grants,
+              ensureManaged: () =>
+                Effect.fail(
+                  new GrantStoreError({ code: "injected", message: "injected boundary" }),
+                ),
+            },
+          }),
+        );
+        const pending = JSON.parse(yield* journalText(harness.profileRoot));
+        const count = version + 4;
+        pending.version = version;
+        pending.id = `default-browser-v${version}`;
+        pending.artifacts = pending.artifacts.slice(0, count);
+        pending.plan = plan("sidebar", version);
+        const originalHashes: string[] = [];
+        for (const [index, item] of bundle.packages.slice(0, count).entries()) {
+          const manifest = yield* Schema.decodeUnknownEffect(LivePluginManifest)(item.manifest);
+          const artifact = yield* harness.artifacts.stage({
+            manifest: { ...manifest, capabilities: preV4Caps[index] },
+            code: `/* frozen V${version} */ ${item.code}`,
+          });
+          originalHashes.push(artifact.hash);
+          pending.artifacts[index] = {
+            id: artifact.manifest.id,
+            hash: artifact.hash,
+            capabilities: preV4Caps[index],
+            grantKey: `default-bootstrap/${version}/${artifact.manifest.id}`,
+          };
+          if (index < 3) {
+            const grant = yield* harness.grants.ensureManaged(pending.artifacts[index].grantKey, {
+              principal: artifact.manifest.id,
+              profileId: "default",
+              origins: [],
+              capabilities: artifact.manifest.capabilities,
+            });
+            yield* harness.manager.install(artifact.hash, grant.id, { staged: true });
+          }
+        }
+        const originalGrants = yield* harness.grants.list();
+        pending.expectedRevision = 3;
+        pending.installedPrefix = ids.slice(0, 3);
+        yield* Effect.promise(() =>
+          writeFile(
+            join(harness.profileRoot, "hitchhiker-plugins", "default-bootstrap.json"),
+            JSON.stringify(pending),
+          ),
+        );
+        yield* runDefaultPluginBootstrap({
           ...harness.input,
-          grants: {
-            ...harness.grants,
-            ensureManaged: () =>
-              Effect.fail(new GrantStoreError({ code: "injected", message: "injected boundary" })),
-          },
-        }),
-      );
-      const pending = JSON.parse(yield* journalText(harness.profileRoot));
-      pending.version = 2;
-      pending.id = "default-browser-v2";
-      pending.artifacts = pending.artifacts.slice(0, 6);
-      pending.artifacts.forEach((artifact: { id: string; grantKey: string }) => {
-        artifact.grantKey = `default-bootstrap/2/${artifact.id}`;
-      });
-      pending.plan = plan("sidebar", 2);
-      pending.expectedRevision = 0;
-      pending.installedPrefix = [];
-      yield* Effect.promise(() =>
-        writeFile(
-          join(harness.profileRoot, "hitchhiker-plugins", "default-bootstrap.json"),
-          JSON.stringify(pending),
-        ),
-      );
-
-      yield* runDefaultPluginBootstrap({
-        ...harness.input,
-        loadBundle: Effect.die("must not load V3 bundle"),
-      });
-      assert.deepEqual(yield* harness.manager.plan(), { ...plan("sidebar", 2), revision: 7 });
-      assert.equal((yield* harness.grants.list()).length, 6);
-      assert.equal(harness.observed.launches, 5);
-      assert.equal(
-        (yield* harness.manager.list()).some(
-          (plugin) => plugin.id === "default-extension-management",
-        ),
-        false,
-      );
-    }),
-  ));
-
-test("resumes a V1 current-capability cohort without loading the V3 bundle", () =>
-  withHarness("hitchhiker-bootstrap-v1-current", "top", (harness) =>
-    Effect.gen(function* () {
-      yield* expectFailure(
-        runDefaultPluginBootstrap({
-          ...harness.input,
-          grants: {
-            ...harness.grants,
-            ensureManaged: () =>
-              Effect.fail(new GrantStoreError({ code: "injected", message: "injected boundary" })),
-          },
-        }),
-      );
-      const pending = JSON.parse(yield* journalText(harness.profileRoot));
-      pending.version = 1;
-      pending.id = "default-browser-v1";
-      pending.artifacts = pending.artifacts.slice(0, 5);
-      pending.artifacts.forEach((artifact: { id: string; grantKey: string }) => {
-        artifact.grantKey = `default-bootstrap/1/${artifact.id}`;
-      });
-      pending.plan = plan("top", 1);
-      pending.expectedRevision = 0;
-      pending.installedPrefix = [];
-      yield* Effect.promise(() =>
-        writeFile(
-          join(harness.profileRoot, "hitchhiker-plugins", "default-bootstrap.json"),
-          JSON.stringify(pending),
-        ),
-      );
-      yield* runDefaultPluginBootstrap({
-        ...harness.input,
-        loadBundle: Effect.die("must not reload"),
-      });
-      assert.match(yield* journalText(harness.profileRoot), /"state":"completed"/);
-      assert.deepEqual(yield* harness.manager.plan(), { ...plan("top", 1), revision: 6 });
-      assert.equal((yield* harness.grants.list()).length, 5);
-      assert.equal(harness.observed.launches, 4);
-    }),
-  ));
+          loadBundle: Effect.die("must not load V4"),
+        });
+        assert.deepEqual(yield* harness.manager.plan(), {
+          ...plan("sidebar", version),
+          revision: count + 1,
+        });
+        const installed = yield* harness.manager.list();
+        assert.equal(installed.length, count);
+        for (const [index, id] of ids.slice(0, count).entries()) {
+          assert.equal(installed.find((entry) => entry.id === id)?.hash, originalHashes[index]);
+          const grant = (yield* harness.grants.list()).find((entry) => entry.principal === id);
+          assert(grant);
+          assert.deepEqual([...grant.capabilities].sort(), [...preV4Caps[index]!].sort());
+        }
+        const grants = yield* harness.grants.list();
+        assert.equal(grants.length, count);
+        for (const grant of originalGrants)
+          assert.deepEqual(
+            grants.find((entry) => entry.id === grant.id),
+            grant,
+          );
+        assert.equal(harness.observed.launches, count - 1);
+        assert.match(yield* journalText(harness.profileRoot), /"state":"completed"/);
+      }),
+    ));
+}
 
 test("resumes a V1 frozen capability cohort without upgrading its managed grants", () =>
   withHarness("hitchhiker-bootstrap-legacy-authority", "sidebar", (harness) =>
@@ -946,6 +1006,7 @@ test("resumes a V1 frozen capability cohort without upgrading its managed grants
           yield* harness.manager.install(artifact.hash, grant.id, { staged: true });
         }
       }
+      const originalGrants = yield* harness.grants.list();
       pending.expectedRevision = 3;
       pending.installedPrefix = ids.slice(0, 3);
       yield* Effect.promise(() =>
@@ -960,6 +1021,12 @@ test("resumes a V1 frozen capability cohort without upgrading its managed grants
       });
       assert.match(yield* journalText(harness.profileRoot), /"state":"completed"/);
       assert.equal(harness.observed.loads, 1);
+      const recoveredGrants = yield* harness.grants.list();
+      for (const grant of originalGrants)
+        assert.deepEqual(
+          recoveredGrants.find((entry) => entry.id === grant.id),
+          grant,
+        );
       for (const [index, id] of ids.slice(0, previous.length).entries()) {
         const grant = (yield* harness.grants.list()).find((entry) => entry.principal === id);
         assert(grant);

@@ -55,6 +55,7 @@ const withExtensionEngine = async (
     engine: EngineConnection["Service"],
     artifacts: Readonly<Record<string, string>>,
   ) => Effect.Effect<void, unknown, Scope.Scope>,
+  requestTimeoutMs = 150,
 ) => {
   const profileRoot = await mkdtemp(join(tmpdir(), "hitchhiker-extension-transport-"));
   const root = join(profileRoot, "hitchhiker-extensions", "artifacts");
@@ -80,7 +81,7 @@ const withExtensionEngine = async (
             executable: fixture,
             profileRoot,
             extensionManagement: true,
-            requestTimeoutMs: 150,
+            requestTimeoutMs,
           }),
         ),
         Effect.scoped,
@@ -92,42 +93,45 @@ const withExtensionEngine = async (
 };
 
 test("extension management is typed, bounded to profile artifacts, and exclusive with raw CDP", async () => {
-  await withExtensionEngine((engine, artifacts) =>
-    Effect.gen(function* () {
-      const ready = yield* engine.ready;
-      assert.equal(
-        (ready.params.args as Schema.Json[]).includes("--enable-unsafe-extension-debugging"),
-        true,
-      );
-      assert.equal(yield* engine.loadUnpacked(artifacts.a), "a".repeat(32));
-      const rejected = yield* engine.loadUnpacked(artifacts.b).pipe(Effect.flip);
-      assert.equal(rejected.code, "extension-rejected");
-      assert.equal(rejected.message.includes(artifacts.b), false);
-      yield* engine.uninstall("a".repeat(32));
-      assert.equal(
-        (yield* engine.loadUnpacked("/tmp/not-an-artifact").pipe(Effect.flip)).code,
-        "extension-path",
-      );
+  await withExtensionEngine(
+    (engine, artifacts) =>
+      Effect.gen(function* () {
+        const ready = yield* engine.ready;
+        assert.equal(
+          (ready.params.args as Schema.Json[]).includes("--enable-unsafe-extension-debugging"),
+          true,
+        );
+        assert.equal(yield* engine.loadUnpacked(artifacts.a), "a".repeat(32));
+        const rejected = yield* engine.loadUnpacked(artifacts.b).pipe(Effect.flip);
+        assert.equal(rejected.code, "extension-rejected");
+        assert.equal(rejected.message.includes(artifacts.b), false);
+        yield* engine.uninstall("a".repeat(32));
+        assert.equal(
+          (yield* engine.loadUnpacked("/tmp/not-an-artifact").pipe(Effect.flip)).code,
+          "extension-path",
+        );
 
-      const pending = yield* engine.loadUnpacked(artifacts.f).pipe(Effect.forkScoped);
-      yield* Effect.sleep(10);
-      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
-      assert.equal(yield* Fiber.join(pending), "a".repeat(32));
-      const cdp = yield* engine.claimRawCdp;
-      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
-      assert.equal(
-        (yield* cdp.send({ id: 2_147_483_647, method: "Browser.getVersion" }).pipe(Effect.flip))
-          .code,
-        "cdp-reserved-id",
-      );
-      assert.equal(
-        (yield* cdp
-          .send({ id: 31, method: "Extensions.uninstall", params: { id: "a".repeat(32) } })
-          .pipe(Effect.flip)).code,
-        "cdp-reserved-method",
-      );
-      assert.equal((yield* engine.uninstall("a".repeat(32)).pipe(Effect.flip)).code, "cdp-owned");
-    }),
+        const pending = yield* engine.loadUnpacked(artifacts.f).pipe(Effect.forkScoped);
+        yield* Effect.sleep(10);
+        assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+        assert.equal(yield* Fiber.join(pending), "a".repeat(32));
+        const cdp = yield* engine.claimRawCdp;
+        assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+        assert.equal(
+          (yield* cdp.send({ id: 2_147_483_647, method: "Browser.getVersion" }).pipe(Effect.flip))
+            .code,
+          "cdp-reserved-id",
+        );
+        assert.equal(
+          (yield* cdp
+            .send({ id: 31, method: "Extensions.uninstall", params: { id: "a".repeat(32) } })
+            .pipe(Effect.flip)).code,
+          "cdp-reserved-method",
+        );
+        assert.equal((yield* engine.uninstall("a".repeat(32)).pipe(Effect.flip)).code, "cdp-owned");
+      }),
+    // This checks capability/transport behavior; dedicated timeout cases retain the short deadline.
+    3_000,
   );
 });
 

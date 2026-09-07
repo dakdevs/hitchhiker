@@ -546,7 +546,7 @@ test("a sidebar replacement admitted through its management port survives the ca
   );
 });
 
-test("six-worker plans are admitted, while a seventh and failed replacement preserve the live plan", async () => {
+test("eight-worker plans are admitted, while a ninth and failed replacement preserve the live plan", async () => {
   await withProfile((root) =>
     Effect.runPromise(
       Effect.gen(function* () {
@@ -558,6 +558,8 @@ test("six-worker plans are admitted, while a seventh and failed replacement pres
           "fourth-plugin",
           "fifth-plugin",
           "sixth-plugin",
+          "seventh-plugin",
+          "eighth-plugin",
           "bad-plugin",
         ])
           yield* f.stage(id);
@@ -570,11 +572,13 @@ test("six-worker plans are admitted, while a seventh and failed replacement pres
             "fourth-plugin",
             "fifth-plugin",
             "sixth-plugin",
+            "seventh-plugin",
+            "eighth-plugin",
           ],
           serviceBindings: [],
         });
-        assert.equal(f.active.size, 6);
-        assert.equal(f.peak(), 6);
+        assert.equal(f.active.size, 8);
+        assert.equal(f.peak(), 8);
         const before = yield* Effect.promise(() => readFile(path(root), "utf8"));
         const retained = new Map(f.active);
         const attempt = {
@@ -585,6 +589,8 @@ test("six-worker plans are admitted, while a seventh and failed replacement pres
             "fourth-plugin",
             "fifth-plugin",
             "sixth-plugin",
+            "seventh-plugin",
+            "eighth-plugin",
             "bad-plugin",
           ],
           serviceBindings: [],
@@ -595,7 +601,7 @@ test("six-worker plans are admitted, while a seventh and failed replacement pres
         );
         assert.match(
           (yield* f.manager.applyPlan(current.revision, attempt).pipe(Effect.flip)).message,
-          /6/,
+          /8/,
         );
         assert.deepEqual(yield* f.manager.plan(), current);
         assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
@@ -611,6 +617,8 @@ test("six-worker plans are admitted, while a seventh and failed replacement pres
                   "third-plugin",
                   "fourth-plugin",
                   "fifth-plugin",
+                  "seventh-plugin",
+                  "eighth-plugin",
                   "bad-plugin",
                 ],
                 serviceBindings: [],
@@ -620,7 +628,7 @@ test("six-worker plans are admitted, while a seventh and failed replacement pres
         );
         assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
         assert.deepEqual(yield* f.manager.plan(), current);
-        assert.equal(f.active.size, 6);
+        assert.equal(f.active.size, 8);
         assert.equal(f.active.has("bad-plugin"), false);
         for (const id of [
           "first-plugin",
@@ -628,11 +636,13 @@ test("six-worker plans are admitted, while a seventh and failed replacement pres
           "third-plugin",
           "fourth-plugin",
           "fifth-plugin",
+          "seventh-plugin",
+          "eighth-plugin",
         ])
           assert.equal(f.active.get(id), retained.get(id));
         assert.equal(f.active.has("sixth-plugin"), true);
         assert.equal((yield* readRegistry(root)).pendingPlan, undefined);
-        assert.equal(f.peak(), 6);
+        assert.equal(f.peak(), 8);
       }).pipe(Effect.scoped),
     ),
   );

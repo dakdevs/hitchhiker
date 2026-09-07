@@ -19,6 +19,8 @@ const artifactIds = [
   "default-top-tabs",
   "default-devtools",
   "default-extension-management",
+  "default-settings",
+  "default-plugin-management",
 ];
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -34,7 +36,7 @@ test("build emits the fixed, digest-bound default plugin bundle", async () => {
     "repeated builds must preserve the index",
   );
   assert.deepEqual(Object.keys(index).sort(), ["artifacts", "digest", "format", "plans"]);
-  assert.equal(index.format, 3);
+  assert.equal(index.format, 4);
   assert.equal(
     index.digest,
     sha256(
@@ -93,15 +95,17 @@ test("build emits the fixed, digest-bound default plugin bundle", async () => {
             { pluginId: presenter, id: "toolbar" },
             { pluginId: "default-devtools", id: "toolbar" },
             { pluginId: "default-extension-management", id: "launcher", optional: true },
+            { pluginId: "default-settings", id: "launcher", optional: true },
+            { pluginId: "default-plugin-management", id: "launcher", optional: true },
           ],
         ],
         [
           "content",
           [
             { pluginId: presenter, id: "content" },
-            { pluginId: presenter, id: "settings", optional: true },
-            { pluginId: presenter, id: "plugins", optional: true },
             { pluginId: "default-extension-management", id: "main", optional: true },
+            { pluginId: "default-settings", id: "main", optional: true },
+            { pluginId: "default-plugin-management", id: "main", optional: true },
           ],
         ],
       ],

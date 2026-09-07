@@ -21,6 +21,8 @@ const ids = [
   "default-top-tabs",
   "default-devtools",
   "default-extension-management",
+  "default-settings",
+  "default-plugin-management",
 ] as const;
 const placements = ["sidebar", "top"] as const;
 type Placement = (typeof placements)[number];
@@ -39,7 +41,7 @@ const PlanIndex = Schema.Struct({
   servicesSha256: Digest,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const BundleIndex = Schema.Struct({
-  format: Schema.Literal(3),
+  format: Schema.Literal(4),
   artifacts: Schema.Array(ArtifactIndex).check(Schema.isMaxLength(ids.length)),
   plans: Schema.Struct({ sidebar: PlanIndex, top: PlanIndex }).annotate({
     parseOptions: { onExcessProperty: "error" },
@@ -64,7 +66,7 @@ export const packagedDefaultPluginBundleDirectory = (controllerModule: URL): str
 const expectedPlan = (placement: Placement): InstalledPluginPlanInput => {
   const presenter = `default-${placement}-tabs`;
   return {
-    enabled: [ids[0], ids[1], ids[2], presenter, ids[5], ids[6]],
+    enabled: [ids[0], ids[1], ids[2], presenter, ids[5], ids[6], ids[7], ids[8]],
     composition: {
       layout: ids[2],
       slots: ["tabs", "toolbar", "content"].map((key) => ({
@@ -75,13 +77,15 @@ const expectedPlan = (placement: Placement): InstalledPluginPlanInput => {
                 { pluginId: presenter, id: key },
                 { pluginId: ids[5], id: key },
                 { pluginId: ids[6], id: "launcher", optional: true as const },
+                { pluginId: ids[7], id: "launcher", optional: true as const },
+                { pluginId: ids[8], id: "launcher", optional: true as const },
               ]
             : key === "content"
               ? [
                   { pluginId: presenter, id: key },
-                  { pluginId: presenter, id: "settings", optional: true as const },
-                  { pluginId: presenter, id: "plugins", optional: true as const },
                   { pluginId: ids[6], id: "main", optional: true as const },
+                  { pluginId: ids[7], id: "main", optional: true as const },
+                  { pluginId: ids[8], id: "main", optional: true as const },
                 ]
               : [{ pluginId: presenter, id: key }],
         ...(key === "content"

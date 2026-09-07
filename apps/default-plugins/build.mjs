@@ -17,6 +17,8 @@ const artifactIds = [
   "default-top-tabs",
   "default-devtools",
   "default-extension-management",
+  "default-settings",
+  "default-plugin-management",
 ];
 const placements = ["sidebar", "top"];
 const compositionFor = (presenter) => ({
@@ -29,6 +31,8 @@ const compositionFor = (presenter) => ({
         { pluginId: presenter, id: "toolbar" },
         { pluginId: "default-devtools", id: "toolbar" },
         { pluginId: "default-extension-management", id: "launcher", optional: true },
+        { pluginId: "default-settings", id: "launcher", optional: true },
+        { pluginId: "default-plugin-management", id: "launcher", optional: true },
       ],
     },
     {
@@ -36,9 +40,9 @@ const compositionFor = (presenter) => ({
       route: { fallback: { pluginId: presenter, id: "content" } },
       contributions: [
         { pluginId: presenter, id: "content" },
-        { pluginId: presenter, id: "settings", optional: true },
-        { pluginId: presenter, id: "plugins", optional: true },
         { pluginId: "default-extension-management", id: "main", optional: true },
+        { pluginId: "default-settings", id: "main", optional: true },
+        { pluginId: "default-plugin-management", id: "main", optional: true },
       ],
     },
   ],
@@ -64,7 +68,6 @@ for (const name of ["model", "pins", "layout"]) {
   };
 }
 const artifacts = [
-  // Standalone management artifacts await the measured V4 default cohort.
   {
     id: "default-settings",
     entry: "settings-entry",
@@ -126,9 +129,6 @@ const artifacts = [
       "pages.manage",
       "storage.local",
       "configuration.read",
-      "configuration.write",
-      "plugins.read",
-      "plugins.manage",
     ],
     requires: [
       { id: "model", contract: contracts.model },
@@ -285,7 +285,7 @@ for (const placement of placements) {
     servicesSha256: sha256(servicesBytes),
   };
 }
-const index = { format: 3, artifacts: bundleArtifacts, plans };
+const index = { format: 4, artifacts: bundleArtifacts, plans };
 await writeFile(
   new URL("bundle.json", out),
   JSON.stringify({ ...index, digest: indexDigest(index) }, null, 2) + "\n",

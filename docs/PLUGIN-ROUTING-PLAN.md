@@ -287,7 +287,7 @@ independent default extension management as shipped until those items and the ac
 
 ## V3 integration checkpoint
 
-The current worktree builds seven default artifacts and admits six active workers, including the
+The V3 checkpoint built seven default artifacts and admitted six active workers, including the
 independent extension-management plugin. Strict V3 bootstrap and packaging validation preserve
 predecessor journals without adding grants. The combined portable check passes; the public SDK now
 includes the picker's existing `choosing` state, with a typed fixture instead of an unsafe cast.

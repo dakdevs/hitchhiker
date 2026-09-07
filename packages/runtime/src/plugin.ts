@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { Deferred, Effect, PubSub, Queue, Schema, Stream } from "effect";
+import { Deferred, Effect, Fiber, PubSub, Queue, Schema, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { FrameDecoder } from "./framing.ts";
 import { PluginCallError } from "./plugin-dispatch.ts";
@@ -149,6 +149,7 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
   let outgoingBytes = 0;
   let callBytes = 0;
   let stopped: PluginHostError | undefined;
+  let stopping = false;
   const termination = yield* Deferred.make<never, PluginHostError>();
   const child = yield* spawner
     .spawn(
@@ -326,7 +327,7 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
     yield* Deferred.succeed(deferred, value.result);
   });
   // Never await a plugin call while reading its replies: resolving a Promise can itself issue calls.
-  yield* Stream.fromQueue(calls).pipe(
+  const dispatchFiber = yield* Stream.fromQueue(calls).pipe(
     Stream.runForEach(({ call, bytes }) =>
       Effect.sync(() => {
         callPhase = "dispatch";
@@ -396,6 +397,7 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
               : fail("crash", "Plugin worker exited unexpectedly"),
           );
         } else if (message.event === "plugin.call") {
+          if (stopping) return;
           const call = yield* decodeCall(message.params).pipe(
             Effect.mapError(() => fail("protocol", "Invalid plugin call")),
           );
@@ -429,6 +431,17 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
     activated = true;
     return yield* request("activate", { code });
   });
+  const gracefulStop = yield* Effect.cached(
+    Effect.gen(function* () {
+      stopping = true;
+      // Cancel host-call work before the worker exits; no late resolve may poison its stop event.
+      yield* Fiber.interrupt(dispatchFiber);
+      const identity = workerIdentity;
+      yield* request("stop");
+      // The reply acknowledges the command; the broker separately confirms process exit.
+      if (identity !== undefined) yield* observeStopped(identity);
+    }),
+  );
   return {
     events: Stream.fromPubSub(events),
     failure: Deferred.await(termination),
@@ -445,6 +458,6 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
     },
     activate,
     sendEvent: (event: string, payload: Schema.Json) => request("event", { event, payload }),
-    stop: request("stop"),
+    stop: gracefulStop,
   };
 });

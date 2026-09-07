@@ -26,7 +26,6 @@ import type { Schema } from "effect";
 import { PinState, TabState, decode } from "./contracts.ts";
 import { Input, Press, ServiceStateEvent, UiEvent } from "./input-contracts.ts";
 import { readPages, serial } from "./state-io.ts";
-import { pluginsSurface, settingsSurface, type PresenterRoute } from "./routes.ts";
 
 const initialInput = (): NativeTextInputState => ({
   text: "",
@@ -72,6 +71,16 @@ const fragments = (
   });
 };
 
+const withoutManagementLaunchers = (node: NativeNode): NativeNode => {
+  if (!("children" in node)) return node;
+  return {
+    ...node,
+    children: node.children
+      .filter((child) => child.key !== "settings" && child.key !== "plugins")
+      .map(withoutManagementLaunchers),
+  };
+};
+
 const withoutPinControls = (node: NativeNode): NativeNode => {
   if (!("children" in node)) return node;
   return {
@@ -102,10 +111,6 @@ const addressUrl = (draft: string): string | undefined => {
   return scheme === undefined ? `https://${trimmed}` : trimmed;
 };
 
-type ManagementSnapshot = Awaited<ReturnType<PluginApi["plugins"]["snapshot"]>>;
-const failureText = (error: unknown) =>
-  error instanceof PluginApiError ? "This action was denied." : "This action could not complete.";
-
 /** A real isolated presentation assembled entirely through public page, service, and UI APIs. */
 export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
   let api: PluginApi | undefined;
@@ -116,9 +121,6 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
   let pageOffset = 0;
   let input = initialInput();
   let inputDirty = false;
-  let route: PresenterRoute = "browser";
-  let management: ManagementSnapshot | undefined;
-  let managementError: string | undefined;
   let refreshDirty = false;
   let refreshing: Promise<void> | undefined;
   const runCommand = serial();
@@ -178,15 +180,10 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
         : parts.tabs;
     await api.ui.publishContribution("tabs", tabSurface);
     await api.ui.publishContribution("content", parts.content);
-    await api.ui.publishContribution(
-      "settings",
-      settingsSurface(configuration, presentation, managementError),
-    );
-    await api.ui.publishContribution(
-      "plugins",
-      pluginsSurface(management, configuration, presentation, managementError),
-    );
-    await api.ui.publishContribution("toolbar", parts.toolbar);
+    await api.ui.publishContribution("toolbar", {
+      ...parts.toolbar,
+      root: withoutManagementLaunchers(parts.toolbar.root),
+    });
   };
 
   const requestRefresh = (): Promise<void> => {
@@ -210,139 +207,57 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
     return api.services.call("model", method, params);
   };
 
-  const refreshManagement = async () => {
-    if (!api) throw new Error("Presenter plugin has not activated");
-    try {
-      management = await api.plugins.snapshot();
-      managementError = undefined;
-    } catch (error) {
-      management = undefined;
-      managementError = failureText(error);
-    }
-  };
-
-  const replacePresenter = async () => {
-    if (!api) throw new Error("Presenter plugin has not activated");
-    try {
-      const current = await api.plugins.snapshot();
-      await api.plugins.replaceSelf(
-        presentation === "sidebar" ? "default-top-tabs" : "default-sidebar-tabs",
-        current.revision,
-      );
-      managementError = undefined;
-    } catch (error) {
-      managementError = failureText(error);
-    }
-  };
-
   const handlePress = async (action: string): Promise<void> => {
     if (!api) throw new Error("Presenter plugin has not activated");
-    let revealRoute = false;
-    if (action === defaultSurfaceActions.settings || action === defaultSurfaceActions.plugins) {
-      revealRoute = true;
-      route = action === defaultSurfaceActions.settings ? "settings" : "plugins";
-      managementError = undefined;
-      if (route === "plugins") await refreshManagement();
-    } else if (action === "management.back") {
-      revealRoute = true;
-      route = "browser";
-      managementError = undefined;
-    } else if (action.startsWith("settings.color:")) {
-      const colorScheme = action.slice("settings.color:".length);
-      if (colorScheme === "light" || colorScheme === "dark" || colorScheme === "system") {
-        const configuration = await api.configuration.get();
-        await api.configuration.set({ ...configuration, colorScheme });
-        await api.services.call("layout", "setPresentation", {
-          presentation: presentation === "sidebar" && !tabsVisible ? "top" : presentation,
-        });
-        managementError = undefined;
-      }
-    } else if (action.startsWith("settings.sleep:")) {
-      const sleepAfterMs = Number(action.slice("settings.sleep:".length));
-      if ([60_000, 300_000, 900_000].includes(sleepAfterMs)) {
-        const configuration = await api.configuration.get();
-        await api.configuration.set({ ...configuration, sleepAfterMs });
-        managementError = undefined;
-      }
-    } else if (action === "settings.replace-self" || action === "plugins.replace-self") {
-      await replacePresenter();
-    } else if (action === "plugins.refresh") {
-      await refreshManagement();
-    } else {
-      const lifecycle =
-        /^plugins\.(enable|disable|rollback|uninstall):([a-z][a-z0-9-]{1,62})$/.exec(action);
-      if (lifecycle !== null) {
-        const [operation, id] = [lifecycle[1], lifecycle[2]];
-        try {
-          if (operation === "enable") management = await api.plugins.enable(id!);
-          else if (operation === "disable") management = await api.plugins.disable(id!);
-          else if (operation === "rollback") management = await api.plugins.rollback(id!);
-          else management = await api.plugins.uninstall(id!);
-          managementError = undefined;
-        } catch (error) {
-          managementError = failureText(error);
-        }
-      } else if (action === defaultSurfaceActions.toggleTabs) {
-        tabsVisible = !tabsVisible;
-        await api.services.call("layout", "setPresentation", {
-          presentation: presentation === "sidebar" && !tabsVisible ? "top" : presentation,
-        });
-      } else if (action === defaultSurfaceActions.newPage) {
-        revealRoute = true;
-        route = "browser";
-        await callModel("new", {});
-        input = initialInput();
+    if (action === defaultSurfaceActions.toggleTabs) {
+      tabsVisible = !tabsVisible;
+      await api.services.call("layout", "setPresentation", {
+        presentation: presentation === "sidebar" && !tabsVisible ? "top" : presentation,
+      });
+    } else if (action === defaultSurfaceActions.newPage) {
+      await callModel("new", {});
+      input = initialInput();
+      inputDirty = false;
+    } else if (action === defaultSurfaceActions.navigate) {
+      const url = addressUrl(input.text);
+      if (url !== undefined) {
+        const page = selectedPage();
+        if (page && model?.selection?.kind === "page") await api.pages.navigate(page.id, url);
+        else await callModel("open", { url });
         inputDirty = false;
-      } else if (action === defaultSurfaceActions.navigate) {
-        const url = addressUrl(input.text);
-        if (url !== undefined) {
-          revealRoute = true;
-          route = "browser";
-          const page = selectedPage();
-          if (page && model?.selection?.kind === "page") await api.pages.navigate(page.id, url);
-          else await callModel("open", { url });
+      }
+    } else if (action === defaultSurfaceActions.back) {
+      const page = selectedPage();
+      if (page) await api.pages.back(page.id);
+    } else if (action === defaultSurfaceActions.forward) {
+      const page = selectedPage();
+      if (page) await api.pages.forward(page.id);
+    } else if (action === defaultSurfaceActions.reload) {
+      const page = selectedPage();
+      if (page) await api.pages.reload(page.id);
+    } else if (action === defaultSurfaceActions.previousSlice) {
+      pageOffset = Math.max(0, pageOffset - 30);
+    } else if (action === defaultSurfaceActions.nextSlice) {
+      pageOffset += 30;
+    } else {
+      const pageAction = /^(page\.(?:select|close|pin|unpin)):([A-Za-z][A-Za-z0-9_-]{0,63})$/.exec(
+        action,
+      );
+      const reorder = /^page\.reorder:([A-Za-z][A-Za-z0-9_-]{0,63}):(\d{1,3})$/.exec(action);
+      if (pageAction) {
+        const [, operation, pageId] = pageAction;
+        if (operation === "page.select") {
+          await callModel("select", { pageId });
           inputDirty = false;
-        }
-      } else if (action === defaultSurfaceActions.back) {
-        route = "browser";
-        revealRoute = true;
-        const page = selectedPage();
-        if (page) await api.pages.back(page.id);
-      } else if (action === defaultSurfaceActions.forward) {
-        route = "browser";
-        revealRoute = true;
-        const page = selectedPage();
-        if (page) await api.pages.forward(page.id);
-      } else if (action === defaultSurfaceActions.reload) {
-        route = "browser";
-        revealRoute = true;
-        const page = selectedPage();
-        if (page) await api.pages.reload(page.id);
-      } else if (action === defaultSurfaceActions.previousSlice) {
-        pageOffset = Math.max(0, pageOffset - 30);
-      } else if (action === defaultSurfaceActions.nextSlice) {
-        pageOffset += 30;
-      } else {
-        const pageAction =
-          /^(page\.(?:select|close|pin|unpin)):([A-Za-z][A-Za-z0-9_-]{0,63})$/.exec(action);
-        const reorder = /^page\.reorder:([A-Za-z][A-Za-z0-9_-]{0,63}):(\d{1,3})$/.exec(action);
-        if (pageAction) {
-          const [, operation, pageId] = pageAction;
-          if (operation === "page.select") {
-            revealRoute = true;
-            route = "browser";
-            await callModel("select", { pageId });
-            inputDirty = false;
-          } else if (operation === "page.close") await callModel("close", { pageId });
-          else if (pins !== undefined)
-            await api.services.call("pins", "set", { pageId, pinned: operation === "page.pin" });
-        } else if (reorder) {
-          await callModel("reorder", { pageId: reorder[1]!, index: Number(reorder[2]) });
-        }
+        } else if (operation === "page.close") await callModel("close", { pageId });
+        else if (pins !== undefined)
+          await api.services.call("pins", "set", { pageId, pinned: operation === "page.pin" });
+      } else if (reorder) {
+        await callModel("reorder", { pageId: reorder[1]!, index: Number(reorder[2]) });
       }
     }
     await requestRefresh();
-    if (revealRoute) await api.ui.showRoute(route === "browser" ? "content" : route);
+    await api.ui.showRoute("content");
   };
 
   return {
@@ -374,10 +289,7 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
       if (uiEvent.event !== "press") return;
       const press = decode(Press, uiEvent.payload);
       return runCommand(() => handlePress(press.action)).catch((error) => {
-        if (error instanceof PluginApiError) {
-          managementError = failureText(error);
-          return requestRefresh();
-        }
+        if (error instanceof PluginApiError) return requestRefresh();
         throw error;
       });
     },

@@ -56,7 +56,7 @@ const memory = Effect.fn("DefaultExtensions.memory")(function* (
   phase: string,
   bindings: ReadonlyMap<string, WorkerBinding>,
 ) {
-  assert.equal(bindings.size, 6);
+  assert.equal(bindings.size, 8);
   const workers = yield* Effect.forEach(
     [...bindings],
     ([pluginId, binding]) =>
@@ -68,9 +68,9 @@ const memory = Effect.fn("DefaultExtensions.memory")(function* (
         assert.ok(usage.residentBytes > 0);
         return { pluginId, activationGeneration: binding.generation, ...usage };
       }),
-    { concurrency: 6 },
+    { concurrency: 8 },
   );
-  assert.equal(new Set(workers.map((worker) => worker.identity.pid)).size, 6);
+  assert.equal(new Set(workers.map((worker) => worker.identity.pid)).size, 8);
   process.stdout.write(
     `HITCHHIKER_DEFAULT_EXTENSIONS_MEMORY=${JSON.stringify({ phase, workers, physicalFootprintBytes: workers.reduce((sum, item) => sum + item.physicalFootprintBytes, 0), residentBytes: workers.reduce((sum, item) => sum + item.residentBytes, 0) })}\n`,
   );
@@ -255,13 +255,13 @@ test(
               });
               yield* management.enableMutations();
               yield* wait(
-                "six default workers did not start",
+                "eight default workers did not start",
                 manager
                   .list()
                   .pipe(
                     Effect.map(
                       (items) =>
-                        items.length === 7 && items.filter((item) => item.running).length === 6,
+                        items.length === 9 && items.filter((item) => item.running).length === 8,
                     ),
                   ),
               );

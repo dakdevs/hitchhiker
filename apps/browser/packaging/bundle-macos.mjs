@@ -73,6 +73,8 @@ const defaultArtifactIds = [
   "default-top-tabs",
   "default-devtools",
   "default-extension-management",
+  "default-settings",
+  "default-plugin-management",
 ];
 const defaultPlacements = ["sidebar", "top"];
 const modelContract = {
@@ -96,9 +98,6 @@ const presenterCapabilities = [
   "pages.manage",
   "storage.local",
   "configuration.read",
-  "configuration.write",
-  "plugins.read",
-  "plugins.manage",
 ];
 const presenterRequirements = [
   { id: "model", contract: modelContract },
@@ -106,6 +105,24 @@ const presenterRequirements = [
   { id: "pins", contract: pinsContract, optional: true },
 ];
 const defaultArtifactManifests = {
+  "default-settings": {
+    id: "default-settings",
+    name: "Settings",
+    version: "1.0.0",
+    capabilities: [
+      "ui.compose",
+      "configuration.read",
+      "configuration.write",
+      "plugins.read",
+      "plugins.manage",
+    ],
+  },
+  "default-plugin-management": {
+    id: "default-plugin-management",
+    name: "Plugins",
+    version: "1.0.0",
+    capabilities: ["ui.compose", "configuration.read", "plugins.read", "plugins.manage"],
+  },
   "default-tab-model": {
     id: "default-tab-model",
     name: "Tabs",
@@ -229,6 +246,8 @@ const isDefaultPlan = (placement, composition, services) => {
           { pluginId: presenter, id: "toolbar" },
           { pluginId: "default-devtools", id: "toolbar" },
           { pluginId: "default-extension-management", id: "launcher", optional: true },
+          { pluginId: "default-settings", id: "launcher", optional: true },
+          { pluginId: "default-plugin-management", id: "launcher", optional: true },
         ],
       },
       {
@@ -236,9 +255,9 @@ const isDefaultPlan = (placement, composition, services) => {
         route: { fallback: { pluginId: presenter, id: "content" } },
         contributions: [
           { pluginId: presenter, id: "content" },
-          { pluginId: presenter, id: "settings", optional: true },
-          { pluginId: presenter, id: "plugins", optional: true },
           { pluginId: "default-extension-management", id: "main", optional: true },
+          { pluginId: "default-settings", id: "main", optional: true },
+          { pluginId: "default-plugin-management", id: "main", optional: true },
         ],
       },
     ],
@@ -290,7 +309,7 @@ const validateDefaultPluginBundle = (directory) => {
   } catch {
     fail("Default plugin index is not valid JSON");
   }
-  if (!exactKeys(index, ["format", "artifacts", "plans", "digest"]) || index.format !== 3) {
+  if (!exactKeys(index, ["format", "artifacts", "plans", "digest"]) || index.format !== 4) {
     fail("Default plugin index has an invalid schema");
   }
   const unsigned = { format: index.format, artifacts: index.artifacts, plans: index.plans };
@@ -301,7 +320,7 @@ const validateDefaultPluginBundle = (directory) => {
     fail("Default plugin index digest does not match its contents");
   }
   if (!Array.isArray(index.artifacts) || index.artifacts.length !== defaultArtifactIds.length) {
-    fail("Default plugin index does not contain the seven required artifacts");
+    fail("Default plugin index does not contain the nine required artifacts");
   }
   for (const [position, id] of defaultArtifactIds.entries()) {
     const artifact = index.artifacts[position];
@@ -332,7 +351,7 @@ const validateDefaultPluginBundle = (directory) => {
       fail(`Default plugin ${id} manifest is not valid JSON`);
     }
     if (!isDeepStrictEqual(parsedManifest, defaultArtifactManifests[id])) {
-      fail(`Default plugin ${id} manifest does not match the fixed V3 declaration`);
+      fail(`Default plugin ${id} manifest does not match the fixed V4 declaration`);
     }
   }
   if (!exactKeys(index.plans, defaultPlacements))

@@ -26,6 +26,8 @@ const ids = [
   "default-top-tabs",
   "default-devtools",
   "default-extension-management",
+  "default-settings",
+  "default-plugin-management",
 ];
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 let fixtureRoot: string;
@@ -133,6 +135,8 @@ test("reads a real isolated build after resource relocation and stages its compl
         { pluginId: `default-${placement}-tabs`, id: "toolbar" },
         { pluginId: "default-devtools", id: "toolbar" },
         { pluginId: "default-extension-management", id: "launcher", optional: true },
+        { pluginId: "default-settings", id: "launcher", optional: true },
+        { pluginId: "default-plugin-management", id: "launcher", optional: true },
       ]);
       assert.deepEqual(plan.composition?.slots[2], {
         key: "content",
@@ -141,15 +145,15 @@ test("reads a real isolated build after resource relocation and stages its compl
         },
         contributions: [
           { pluginId: `default-${placement}-tabs`, id: "content" },
-          { pluginId: `default-${placement}-tabs`, id: "settings", optional: true },
-          { pluginId: `default-${placement}-tabs`, id: "plugins", optional: true },
           { pluginId: "default-extension-management", id: "main", optional: true },
+          { pluginId: "default-settings", id: "main", optional: true },
+          { pluginId: "default-plugin-management", id: "main", optional: true },
         ],
       });
     }
   }));
 
-test("packaging accepts the complete fixed V3 manifest inventory", () =>
+test("packaging accepts the complete fixed V4 manifest inventory", () =>
   withBundle(async (directory) => {
     const result = await verifyPackagedDefaults(directory);
     assert.match(result.stdout, /Verified default plugin distribution/);
@@ -171,7 +175,7 @@ test("packaging rejects rehashed excess extension authority", () =>
     await writeIndex(directory, index);
     await assert.rejects(
       verifyPackagedDefaults(directory),
-      /manifest does not match the fixed V3 declaration/,
+      /manifest does not match the fixed V4 declaration/,
     );
   }));
 
@@ -208,7 +212,7 @@ test("rejects missing or duplicated artifact identities even with a matching dig
 test("rejects a predecessor bundle format even when its index is rehashed", () =>
   withBundle(async (directory) => {
     const index = await readIndex(directory);
-    index.format = 2;
+    index.format = 3;
     await writeIndex(directory, index);
     await assert.rejects(Effect.runPromise(loadDefaultPluginBundle(directory)), /index is invalid/);
   }));

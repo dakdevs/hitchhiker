@@ -834,5 +834,7 @@ APIs. Bounded `plugins.changed` invalidations refresh inventory without polling.
 artifacts pass Native configuration edits, bidirectional presenter switching, management-worker
 retention, route/launcher cleanup and retained-document checks. Full repository checks pass 508
 portable tests with 46 Native-gated skips; both separate Native management/observer fixtures pass.
-The artifacts are built outside the current V3 index. V4 bootstrap compatibility, presenter cleanup
-and eight-worker resource acceptance must precede installing them as the default composition.
+The subsequent [V4 checkpoint](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md#v4-integration-checkpoint)
+integrates both artifacts into fresh defaults, removes presenter management authority, preserves old
+cohorts, and verifies eight-worker Native startup and restart. Worker-only memory and exact exit
+observations are recorded there; broader performance and production release acceptance remain open.

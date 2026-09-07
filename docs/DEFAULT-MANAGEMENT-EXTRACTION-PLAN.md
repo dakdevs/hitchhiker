@@ -116,3 +116,44 @@ cohort or production application startup.
 The full repository check passes 508 portable tests with 46 Native-gated skips, plus typecheck,
 lint, formatting and builds. The independent management Native fixture separately passes without
 skips. These results leave the global six-worker limit and the current V3 default cohort unchanged.
+
+V4 integration is now in progress. Freeze the V1/V2/V3 authority maps before changing the current
+presenter manifests; retain their exact versioned plans and staged artifacts on recovery. Fresh
+bundles must index nine artifacts, enable eight, and route Settings and Plugins to independent owners.
+Remove legacy management behavior from new presenters. The proposed eight-worker admission bound
+requires exact-identity Native memory and lifecycle evidence before this cohort is published.
+
+## V4 integration checkpoint
+
+The V4 builder, runtime loader and macOS packaging validator now agree on nine fixed artifacts and
+eight active workers. Settings and Plugins own optional launcher/main contributions. New presenters
+publish only tabs, toolbar and page content and no longer declare configuration-write or plugin
+management authority. Existing V1/V2/V3 journals keep their exact versioned plans and authority maps;
+pending recovery tests stage historical manifests and hashes and retain already-issued grant objects.
+
+The Native startup test passes the complete eight-worker cohort, configuration changes, Settings-driven
+presenter replacement in both directions, unchanged independent worker generations, page/document/pin
+retention, DevTools controls and grant-revocation recovery. The sidebar/top restart fixtures also pass
+with eight workers, failed-replacement rollback and a fresh Chromium process. These use disposable
+profiles and test Keychains, not production Keychain or signed application acceptance.
+
+Exact worker identity sampling measured these sums in bytes:
+
+| Phase             | Physical footprint | Resident bytes |
+| ----------------- | -----------------: | -------------: |
+| Startup           |         42,766,560 |     86,065,152 |
+| Top presenter     |         43,471,120 |     78,856,192 |
+| Sidebar presenter |         43,831,568 |     79,478,784 |
+
+These measurements exclude Chromium, GPU and broker/client processes and do not establish total
+browser memory, frame latency or long-idle performance. All ten worker generations used by the
+startup/replacement/revocation test have broker-confirmed exit. The new graceful shutdown cancels
+in-flight host-call dispatch before sending stop, keeps the reader alive for the broker's exit event,
+and coalesces concurrent stop requests. Session teardown allows two seconds before forced cleanup.
+An unresponsive worker may therefore exit through forced cleanup without a broker-confirmed event.
+
+Full repository verification passes 510 portable tests with 46 Native-gated skips, plus typecheck,
+lint, formatting and builds. Separate Native startup and sidebar/top restart runs pass all three
+cases without skips. Portable shutdown tests cover coalesced concurrent stops, cancellation of an
+in-flight call, broker-confirmed cooperative exit before trusted release, and forced cleanup after
+an ignored stop while preserving the original session failure.

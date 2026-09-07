@@ -15,6 +15,7 @@ import {
   createGrantStore,
   createPluginStorage,
   type SurfaceEvent,
+  type TrustedPluginWorkerDiagnostics,
 } from "@hitchhiker/runtime";
 import { Effect, Layer, PubSub, Schedule, Schema, Stream } from "effect";
 import { runDefaultPluginBootstrap } from "../src/default-plugin-bootstrap.ts";
@@ -65,6 +66,11 @@ test(
     const profile = await realpath(
       await mkdtemp(join(tmpdir(), "hitchhiker-native-default-startup-")),
     );
+    const allWorkers: {
+      pluginId: string;
+      generation: number;
+      diagnostics: TrustedPluginWorkerDiagnostics;
+    }[] = [];
     const server = createServer((request, response) =>
       response.end(`<!doctype html><title>${request.url}</title><p>startup fixture</p>`),
     );
@@ -160,6 +166,14 @@ test(
             const management = yield* createPluginManagement({ startPaused: true });
             const launchWorker = yield* createInstalledPluginLauncher({
               executable: pluginHost!,
+              onWorkerDiagnostics: (owner, diagnostics) =>
+                Effect.sync(() => {
+                  allWorkers.push({
+                    pluginId: owner.pluginId,
+                    generation: owner.generation,
+                    diagnostics,
+                  });
+                }),
               grants,
               controller,
               composition,
@@ -200,9 +214,38 @@ test(
             });
             yield* management.enableMutations();
 
+            const sampleWorkers = Effect.fn("DefaultStartup.sampleWorkers")(function* (
+              phase: string,
+            ) {
+              const active = (yield* manager.list()).filter((item) => item.running);
+              assert.equal(active.length, 8);
+              const workers = yield* Effect.forEach(
+                active,
+                (plugin) =>
+                  Effect.gen(function* () {
+                    const binding = allWorkers.findLast((item) => item.pluginId === plugin.id)!;
+                    assert(binding);
+                    const identity = yield* binding.diagnostics.started.pipe(Effect.timeout(5_000));
+                    const usage = yield* binding.diagnostics.sample(identity);
+                    assert.deepEqual(usage.identity, identity);
+                    assert(usage.physicalFootprintBytes > 0);
+                    return {
+                      pluginId: plugin.id,
+                      activationGeneration: binding.generation,
+                      ...usage,
+                    };
+                  }),
+                { concurrency: 8 },
+              );
+              assert.equal(new Set(workers.map((item) => item.identity.pid)).size, 8);
+              process.stdout.write(
+                `HITCHHIKER_V4_MEMORY=${JSON.stringify({ phase, workers, physicalFootprintBytes: workers.reduce((sum, item) => sum + item.physicalFootprintBytes, 0), residentBytes: workers.reduce((sum, item) => sum + item.residentBytes, 0) })}\n`,
+              );
+            });
+            yield* sampleWorkers("startup");
             const installed = yield* manager.list();
-            assert.equal(installed.length, 7);
-            assert.equal(installed.filter((entry) => entry.running).length, 6);
+            assert.equal(installed.length, 9);
+            assert.equal(installed.filter((entry) => entry.running).length, 8);
             const model = Schema.decodeUnknownSync(ModelState)(
               (yield* (yield* storage.forOwner("default-tab-model")).read()).value,
             );
@@ -285,8 +328,7 @@ test(
                 Effect.sync(
                   () =>
                     rootBackground === (colorScheme === "dark" ? "#212121" : "#FFFFFF") &&
-                    colors.get("Settings") === (colorScheme === "dark" ? "#B4B4B4" : "#6B6B6B") &&
-                    ["Inspect selected page", "Extensions"].every(
+                    ["Settings", "Plugins", "Inspect selected page", "Extensions"].every(
                       (label) =>
                         colors.get(label) === (colorScheme === "dark" ? "#ECECEC" : "#171717"),
                     ),
@@ -322,10 +364,28 @@ test(
                         plan.enabled.includes(`default-${placement}-tabs`) &&
                         plan.enabled.includes("default-devtools") &&
                         plan.enabled.includes("default-extension-management") &&
-                        plan.enabled.length === 6,
+                        plan.enabled.length === 8,
                     ),
                   ),
               );
+              const nextLabel = `Use ${placement === "top" ? "sidebar" : "top"} tabs`;
+              yield* waitUntil(
+                "independent Settings route is restored",
+                Effect.sync(() => buttons.has(nextLabel)),
+              );
+              assert.equal((yield* controller.snapshot).viewports.length, 0);
+              for (const id of [
+                "default-settings",
+                "default-plugin-management",
+                "default-tab-model",
+                "default-tab-pins",
+                "default-browser-layout",
+                "default-devtools",
+                "default-extension-management",
+              ])
+                assert.equal(generations.get(id), generationsBeforeConfiguration.get(id));
+              yield* sampleWorkers(placement);
+              yield* press("Back");
               yield* waitUntil(
                 "replacement retains selected viewport",
                 controller.snapshot.pipe(
@@ -348,7 +408,7 @@ test(
                 yield* (yield* storage.forOwner("default-tab-pins")).read(),
                 pinsBefore,
               );
-              assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 6);
+              assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 8);
               for (const [pageId, marker] of markers) {
                 assert.deepEqual(
                   yield* evaluate(
@@ -391,7 +451,7 @@ test(
                 const state = yield* controller.snapshot;
                 const running = (yield* manager.list()).filter((item) => item.running);
                 return (
-                  running.length === 5 &&
+                  running.length === 7 &&
                   !running.some((item) => item.id === "default-extension-management") &&
                   !buttons.has("Extensions") &&
                   state.viewports.length === 1 &&
@@ -428,8 +488,8 @@ test(
               ),
             );
             assert.equal(journal.state, "completed");
-            assert.equal(journal.version, 3);
-            assert.equal(journal.revision, 8);
+            assert.equal(journal.version, 4);
+            assert.equal(journal.revision, 10);
             const persisted = JSON.parse(
               yield* Effect.promise(() =>
                 readFile(join(lease.profileRoot, "browser-state.json"), "utf8"),
@@ -455,6 +515,27 @@ test(
           );
         }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
         { signal: context.signal },
+      );
+      await Effect.runPromise(
+        Effect.forEach(
+          allWorkers,
+          (worker) =>
+            Effect.gen(function* () {
+              const identity = yield* worker.diagnostics.started;
+              yield* worker.diagnostics.stopped(identity).pipe(
+                Effect.timeout(5_000),
+                Effect.tapError(() =>
+                  Effect.sync(() =>
+                    process.stderr.write(`STOP_MISSING ${worker.pluginId} ${worker.generation}\n`),
+                  ),
+                ),
+              );
+            }),
+          { concurrency: 8 },
+        ),
+      );
+      context.diagnostic(
+        `Observed ${allWorkers.length} exact worker generations stop after replacement/revocation/shutdown`,
       );
     } finally {
       server.closeAllConnections();
