@@ -2,9 +2,9 @@
 
 This is the remaining distribution startup migration, not a tab policy in the generic host. The
 live manager plan is implemented. The state-seeding, managed-grant and exact staged-install retry
-prerequisites are published. The packaged bundle index and controller restoration barrier are now
-implemented and under verification. The coordinator is under recovery review; management routes and
-main startup cutover are not yet implemented.
+prerequisites, packaged bundle index and controller restoration barrier are published. The coordinator
+now passes its focused recovery tests, review and combined repository check. Management
+routes, the runtime bundle loader and main startup cutover are not yet implemented.
 
 ## Eligibility and ownership
 
@@ -69,12 +69,14 @@ switching to a newer application bundle halfway through bootstrap.
 
 A staged-install checkpoint gap is accepted only at exactly expected revision plus one, with an
 otherwise empty active plan, the exact expected installed prefix and the exact next disabled hash
-and grant. The manager's idempotent staged-install check validates grant identity without exposing
-it over MCP. Any extra/missing identity, incompatible enabled state, changed hash/grant or unrelated
+and grant. The manager's trusted `inspectInstallation` method verifies the exact stored identity,
+including removing/suspended state, without exposing credentials or adding an MCP endpoint. Any
+extra/missing identity, incompatible enabled state, changed hash/grant or unrelated
 revision is divergence: mark abandoned rather than repairing user choices.
 
 A promotion checkpoint gap is accepted only when the exact target plan is active at expected revision
-plus one. Finish the terminal marker. If manager recovery restored the prior empty plan at the expected
+plus one, all five installations retain the expected hash/grant/enablement, and both checkpointed
+stores remain nonempty. Finish the terminal marker. If manager recovery restored the prior empty plan at the expected
 revision, resume the pending operation. Any later or different plan means abandonment, never replay.
 Unused managed grants may remain after abandonment; they have no returned bearer. Do not delete
 possibly user-edited plugin storage as cleanup.
@@ -103,7 +105,7 @@ preservation, CAS races, split failure and cancellation recovery. Managed issuan
 tests covering independent stores/restart, a failed acknowledgement after durable rename, request/key
 mismatch, malformed managed metadata, and an existing grant expiring without renewal. Exact staged
 retry retains registry bytes/revision and launches no worker; changed grant/hash or enabled identity
-is rejected. These portable tests do not prove the unimplemented bootstrap coordinator.
+is rejected. These prerequisite tests are supplemented by the coordinator cases below.
 
 The first full check exposed two existing engine interruption fixtures racing a real 150 ms timeout.
 They now wait for a fixture receipt and freeze only the pending operation's test clock; the separate
@@ -112,3 +114,24 @@ and plugin deadlines are unchanged. Final `pnpm check` passes: 328 portable test
 skips, and successful dependency validation, typecheck, lint, formatting and all builds. Evidence:
 `work/default-bootstrap-prerequisites-check-final.log`. The native gate remains failed as documented
 in [LIVE-PLUGIN-PLAN.md](LIVE-PLUGIN-PLAN.md).
+
+## Coordinator verification
+
+Sixteen focused tests now cover both exact presentation plans, permanent completion after every
+default is removed, checkpointed prefix recovery, interruption after the second durable install,
+artifact/grant/extra-plugin divergence, separate model/pins checkpoints, CAS conflicts that remain at
+revision zero, promotion checkpoint gaps, enabled grant identity, frozen artifacts across bundle
+changes, malformed/incoherent/private-file checks, customized profiles and safe/developer bypass.
+A lease acknowledgement failure after a durable journal write also verifies that the current
+process must restart before retrying. The fixtures use the real portable artifact, grant, storage
+and manager services with controlled failures and mock workers; they are not native cutover evidence.
+
+Read-only review accepted the material recovery decisions. Concurrent double-bootstrap calls and
+an actual filesystem sync failure remain useful additional coverage; promotion-gap tests simulate
+the durable state through the manager. Normal startup is deliberately not wired yet: it still needs
+the runtime bundle reader and functional public Settings/Plugins routes before the default cutover.
+
+The combined `pnpm check` passes 346 portable tests with 29 native-gated skips, including dependency
+validation, typecheck, lint, formatting and all builds. Evidence:
+`work/default-bootstrap-coordinator-check.log`. Native startup and clean shutdown remain unverified
+for this coordinator; previous failed native gates remain open.

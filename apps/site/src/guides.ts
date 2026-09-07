@@ -24,6 +24,7 @@ export const pluginGuide: readonly GuideSection[] = [
     paragraphs: [
       "Chromium runs the pages; the plugin host controls access to its services. A private native command, an MCP tool, and a plugin SDK method are different entry points. This table describes the current implementation, not the full planned API.",
       "Hitchhiker capability grants are separate from Chromium site permissions. Raw CDP uses an explicitly authorized relay; browser.full-control does not include cdp.connect. Although a plugin manifest can declare cdp.connect, the plugin dispatcher does not yet expose a CDP method.",
+      "The current configuration service exposes colorScheme, sleepAfterMs, and alwaysAwakeOrigins for appearance and page sleeping. Chromium site permission queries and decisions require a separate service, which is still planned. The API reference lists the exact public methods and grants available today.",
       "The planned DevTools plugin will use public inspection and presentation APIs. Customizing its Native controls, extending the DevTools frontend, and changing Chromium itself are different capabilities; each will be documented separately as it becomes available. Security controls will document their defaults, profile or origin scope, persistence, and restart requirements alongside the grant needed to change them.",
     ],
     table: {

@@ -578,3 +578,12 @@ The Chromium documentation contract now explicitly requires API ownership, execu
 examples, replacement hooks, security defaults, denial and revocation behavior, persistence and restart
 requirements. DevTools UI and its default plugin remain unfinished. Codex project registration remains
 manual: the available app API has no add-project operation, and computer use denies access to Codex.
+
+The distribution bootstrap coordinator now has 16 portable recovery tests and an accepted review.
+It validates exact stored installation identities, resumes durable install/promotion checkpoint gaps,
+preserves nonzero owner state, checkpoints model/pins independently, and permanently respects removal
+or profile customization. An uncertain journal write requires restart. The combined check passes 346
+tests and all builds, with 29 native-gated skips (`work/default-bootstrap-coordinator-check.log`). The
+runtime bundle reader, public management routes and normal startup cutover remain unfinished; this
+coordinator has not passed native acceptance. The public guide also names the currently exposed
+appearance/sleep configuration fields separately from planned Chromium site-permission controls.
