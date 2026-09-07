@@ -383,3 +383,32 @@ test("thirty-two concurrent official SDK calls all progress", async () => {
     await transport.close();
   }
 });
+
+test("DevTools MCP tools are optional, profile-wide, strict, and grant-checked", async () => {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["--experimental-strip-types", fixture],
+    env: { ...process.env, MCP_CAPABILITIES: "devtools", MCP_DEVTOOLS: "yes" },
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "devtools", version: "1.0.0" });
+  await client.connect(transport);
+  try {
+    const tools = await client.listTools();
+    assert.ok(tools.tools.some((tool) => tool.name === "hitchhiker_devtools_show"));
+    const shown = await client.callTool({
+      name: "hitchhiker_devtools_show",
+      arguments: { pageId: "page", inspectAt: { x: 4, y: 5 } },
+    });
+    assert.equal(shown.isError, false);
+    await assert.rejects(
+      client.callTool({
+        name: "hitchhiker_devtools_show",
+        arguments: { pageId: "page", inspectAt: { x: -1, y: 0 } },
+      }),
+      /Invalid parameters/,
+    );
+  } finally {
+    await transport.close();
+  }
+});

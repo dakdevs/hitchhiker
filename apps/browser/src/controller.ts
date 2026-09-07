@@ -46,6 +46,7 @@ import {
   type Surface,
 } from "@hitchhiker/ui";
 import { Deferred, Effect, Option, PubSub, Schema, Semaphore, Stream, Scope } from "effect";
+import { createDevToolsController, type DevToolsController } from "./devtools.ts";
 import type { ProfileWriteLease } from "./profile-write-lease.ts";
 import {
   extensionPermissionPages,
@@ -161,6 +162,7 @@ export interface RestoredPageInventory {
 
 export interface BrowserController {
   readonly interfaceMode: "legacy" | "plugins";
+  readonly devtools: DevToolsController;
   readonly start: Effect.Effect<void, EngineError>;
   /** Initial page creation events, persistence, and rendering have settled. */
   readonly restored: Effect.Effect<void, EngineError>;
@@ -209,6 +211,7 @@ export interface BrowserController {
 }
 export interface BrowserControllerOptions {
   readonly freezeEnabled?: boolean;
+  readonly onDevToolsFailure?: Effect.Effect<void>;
   /** Plugin mode retains browser state but exposes only a trusted recovery surface until composed UI arrives. */
   readonly interfaceMode?: "legacy" | "plugins";
   /** A single predecoded load owned by startup orchestration; skips controller disk I/O. */
@@ -498,6 +501,10 @@ export const makeBrowserController = (
     let pluginOwner: string | undefined;
     let knownResources: PageResourceKnowledge = new Map();
     const pendingDomWrites = new Set<string>();
+    const inspectedPages = new Map<
+      string,
+      { readonly generation: number; readonly instance: number }
+    >();
     let resourceSignalsAvailable = false;
     let pageBrowserGenerationAvailable = false;
     let pageBrowsers = new Map<string, PageBrowserState>();
@@ -1322,6 +1329,7 @@ export const makeBrowserController = (
                   );
                   const clearCurrentBrowserState = () => {
                     pendingDomWrites.delete(id);
+                    inspectedPages.delete(id);
                     const remainingResources = new Map(knownResources);
                     remainingResources.delete(id);
                     knownResources = remainingResources;
@@ -1448,6 +1456,7 @@ export const makeBrowserController = (
                       };
                     }
                     pendingDomWrites.delete(id);
+                    inspectedPages.delete(id);
                     const remainingResources = new Map(knownResources);
                     remainingResources.delete(id);
                     knownResources = remainingResources;
@@ -1708,7 +1717,7 @@ export const makeBrowserController = (
                       })
                       .map(([id, resources]) => [
                         id,
-                        pendingDomWrites.has(id)
+                        pendingDomWrites.has(id) || inspectedPages.has(id)
                           ? Object.freeze({ ...resources, unsavedInput: true })
                           : resources,
                       ]),
@@ -1730,8 +1739,54 @@ export const makeBrowserController = (
         Effect.forkScoped,
       );
 
+    const devtools = yield* createDevToolsController({
+      engine,
+      onFailure: options.onDevToolsFailure,
+      protect: (status) =>
+        lock.withPermit(
+          Effect.gen(function* () {
+            const browser = pageBrowsers.get(status.pageId);
+            const page = state.browser.pages.find(
+              (entry) => entry.id === status.pageId && entry.lifecycle !== "closed",
+            );
+            if (!page || !browser?.available || browser.generation !== status.generation) return;
+            const previous = inspectedPages.get(status.pageId);
+            if (
+              previous !== undefined &&
+              previous.generation === status.generation &&
+              previous.instance > status.instance
+            )
+              return;
+            if (status.state === "closed") {
+              if (
+                previous !== undefined &&
+                previous.generation === status.generation &&
+                previous.instance === status.instance
+              )
+                inspectedPages.delete(status.pageId);
+              return;
+            }
+            inspectedPages.set(status.pageId, {
+              generation: status.generation,
+              instance: status.instance,
+            });
+            if (page.lifecycle === "sleeping") {
+              yield* activatePage(engine, status.pageId);
+              state = {
+                ...state,
+                browser: replacePage(state.browser, status.pageId, {
+                  lifecycle: "loaded",
+                  lastUsedAt: now(),
+                }),
+              };
+            }
+          }),
+        ),
+    });
+
     return {
       start,
+      devtools,
       restored: Effect.raceFirst(
         Deferred.await(restoration),
         engine.exit.pipe(

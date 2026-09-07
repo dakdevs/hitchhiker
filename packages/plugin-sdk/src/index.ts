@@ -79,6 +79,23 @@ export interface PluginManifest {
   readonly provides?: readonly ServiceDeclaration[];
   readonly requires?: readonly (ServiceDeclaration & { readonly optional?: boolean })[];
 }
+export type DevToolsState = "closed" | "opening" | "open" | "closing";
+export interface DevToolsStatus {
+  readonly pageId: string;
+  readonly generation: number;
+  /** Zero is the initial closed state; increments for each inspector in a generation. */
+  readonly instance: number;
+  readonly state: DevToolsState;
+}
+export interface DevToolsInspectPoint {
+  readonly x: number;
+  readonly y: number;
+}
+export interface DevToolsChangedEvent {
+  readonly event: "devtools.changed";
+  readonly payload: DevToolsStatus;
+}
+
 export interface PluginApi {
   readonly storage: {
     read(): Promise<{ readonly revision: number; readonly value: Json }>;
@@ -104,6 +121,11 @@ export interface PluginApi {
   readonly configuration: {
     get(): Promise<BrowserConfiguration>;
     set(configuration: BrowserConfiguration): Promise<void>;
+  };
+  readonly devtools: {
+    status(pageId: string): Promise<DevToolsStatus>;
+    show(pageId: string, inspectAt?: DevToolsInspectPoint): Promise<DevToolsStatus>;
+    close(pageId: string): Promise<DevToolsStatus>;
   };
   readonly plugins: {
     snapshot(): Promise<PluginManagementSnapshot>;
@@ -186,6 +208,15 @@ const api = (host: HostBridge): PluginApi =>
       get: () => call<BrowserConfiguration>(host, "configuration.get", {}),
       set: (configuration: BrowserConfiguration) =>
         call<void>(host, "configuration.set", { configuration }),
+    }),
+    devtools: Object.freeze({
+      status: (pageId: string) => call<DevToolsStatus>(host, "devtools.status", { pageId }),
+      show: (pageId: string, inspectAt?: DevToolsInspectPoint) =>
+        call<DevToolsStatus>(host, "devtools.show", {
+          pageId,
+          ...(inspectAt === undefined ? {} : { inspectAt }),
+        }),
+      close: (pageId: string) => call<DevToolsStatus>(host, "devtools.close", { pageId }),
     }),
     plugins: Object.freeze({
       snapshot: () => call<PluginManagementSnapshot>(host, "plugins.snapshot", {}),

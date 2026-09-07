@@ -126,6 +126,13 @@ const program = Effect.gen(function* () {
       interfaceMode: installedPluginMode ? "plugins" : "legacy",
       initialPersistence: { value: initialPersistence },
       freezeEnabled: !rawCdp,
+      onDevToolsFailure: Deferred.fail(
+        fatalRecovery,
+        new EngineError({
+          code: "devtools-recovery",
+          message: "Could not close an unauthorized DevTools window; closing the browser",
+        }),
+      ).pipe(Effect.asVoid),
       extensions,
       profileLease,
     });
@@ -329,9 +336,18 @@ const program = Effect.gen(function* () {
       const token = process.env.HITCHHIKER_MCP_TOKEN;
       if (!token) return yield* Effect.die("--mcp requires a pre-issued HITCHHIKER_MCP_TOKEN");
       const dom = yield* makeBrowserDomDriver({ protectWrite: controller.protectDomWrite });
+      const devtools = yield* controller.devtools.forOwner(
+        grants
+          .authorize(token, {
+            profileId: "default",
+            capability: "devtools.manage",
+          })
+          .pipe(Effect.asVoid),
+      );
       yield* Effect.raceFirst(
         browserExit,
         runMcpStdio({
+          devtools,
           profileId: "default",
           token,
           grants,

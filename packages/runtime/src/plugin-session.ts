@@ -49,7 +49,15 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
   const forwarding = options.events.pipe(
     Stream.runForEach((event) =>
       Effect.gen(function* () {
-        const capability = event.event === "ui.event" ? "ui.compose" : "pages.list";
+        const capability =
+          event.event === "ui.event"
+            ? "ui.compose"
+            : event.event === "devtools.changed"
+              ? "devtools.manage"
+              : event.event.startsWith("pages.")
+                ? "pages.list"
+                : undefined;
+        if (capability === undefined) return;
         if (
           !manifest.capabilities.includes(capability) &&
           !manifest.capabilities.includes("browser.full-control")

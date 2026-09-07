@@ -55,6 +55,7 @@ struct PageEvent {
     // Native, page-scoped activity signals. These are advisory protection
     // inputs for the trusted runtime; they never cause a page to be closed.
     kResourcesChanged,
+    kDevToolsChanged,
   };
 
   enum class CloseReason {
@@ -76,6 +77,8 @@ struct PageEvent {
   bool call = false;
   bool download = false;
   bool unsaved_input = false;
+  std::string devtools_state;
+  uint32_t devtools_instance = 0;
   // Valid for kClosed. The reason is captured when this particular page is
   // asked to close, so CancelCloseAll cannot retroactively relabel pages that
   // are already draining.
@@ -83,6 +86,14 @@ struct PageEvent {
   // Valid for kClosed. A value of zero means that all requested page windows
   // and browsers have finished tearing down.
   size_t remaining_pages = 0;
+};
+
+struct DevToolsStatus {
+  std::string page_id;
+  uint32_t generation = 0;
+  uint32_t instance = 0;
+  // One of closed, opening, open, or closing.
+  std::string state;
 };
 
 enum class PageCloseResult {
@@ -140,6 +151,20 @@ class PageManager : public CefBaseRefCounted {
   std::optional<PageSnapshot> SnapshotForPage(const std::string& page_id) const;
   std::optional<std::string> PageIdForBrowser(
       CefRefPtr<CefBrowser> browser) const;
+  std::optional<DevToolsStatus> DevToolsStatusForPage(
+      const std::string& page_id) const;
+  // Creates or focuses one inspector for a live original page. At most four
+  // inspector creations/open windows may exist independent of normal pages.
+  bool ShowDevTools(const std::string& page_id, const CefPoint& inspect_at,
+                    std::optional<uint32_t> expected_generation = std::nullopt,
+                    std::optional<uint32_t> expected_instance = std::nullopt,
+                    const std::string& lease_id = {});
+  // Closing an absent inspector is intentionally idempotent.
+  std::optional<DevToolsStatus> CloseDevTools(
+      const std::string& page_id,
+      std::optional<uint32_t> expected_generation = std::nullopt,
+      std::optional<uint32_t> expected_instance = std::nullopt,
+      std::optional<std::string> expected_lease_id = std::nullopt);
 
   // The shared CefDisplayHandler should forward title changes here.
   void NotifyTitleChanged(CefRefPtr<CefBrowser> browser,

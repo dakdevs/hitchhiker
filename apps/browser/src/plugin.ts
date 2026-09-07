@@ -60,7 +60,26 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
         )
           ? yield* options.controller.observePages(owner)
           : undefined;
+        const devtools = artifact.manifest.capabilities.some(
+          (capability) => capability === "devtools.manage" || capability === "browser.full-control",
+        )
+          ? yield* options.controller.devtools.forOwner(
+              boundGrants
+                .authorize("trusted-installed-grant", {
+                  profileId: activation.profileId,
+                  capability: "devtools.manage",
+                })
+                .pipe(
+                  Effect.flatMap((grant) =>
+                    grant.principal === artifact.manifest.id
+                      ? Effect.void
+                      : Effect.fail("Plugin identity no longer authorized"),
+                  ),
+                ),
+            )
+          : undefined;
         yield* runLivePlugin({
+          devtools,
           manifest: artifact.manifest,
           code: artifact.code,
           executable: options.executable,
@@ -116,7 +135,9 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
                 ? composition.events(composedOwner)
                 : options.controller.pluginEvents(owner),
               engine.events.pipe(
-                Stream.filter((event) => event.event.startsWith("pages.")),
+                Stream.filter(
+                  (event) => event.event.startsWith("pages.") || event.event === "devtools.changed",
+                ),
                 Stream.map((event) => ({ event: event.event, payload: event.params })),
               ),
             ),
@@ -185,10 +206,31 @@ export const runPluginDirectory = Effect.fn("Browser.runPluginDirectory")(functi
     : undefined;
   const engine = yield* EngineConnection;
   const pageEvents = engine.events.pipe(
-    Stream.filter((event) => event.event.startsWith("pages.")),
+    Stream.filter(
+      (event) => event.event.startsWith("pages.") || event.event === "devtools.changed",
+    ),
     Stream.map((event) => ({ event: event.event, payload: event.params })),
   );
+  const devtools = manifest.capabilities.some(
+    (capability) => capability === "devtools.manage" || capability === "browser.full-control",
+  )
+    ? yield* options.controller.devtools.forOwner(
+        options.grants
+          .authorize(options.token, {
+            profileId: "default",
+            capability: "devtools.manage",
+          })
+          .pipe(
+            Effect.flatMap((grant) =>
+              grant.principal === manifest.id
+                ? Effect.void
+                : Effect.fail("Plugin identity no longer authorized"),
+            ),
+          ),
+      )
+    : undefined;
   yield* runLivePlugin({
+    devtools,
     manifest,
     code,
     executable: options.executable,

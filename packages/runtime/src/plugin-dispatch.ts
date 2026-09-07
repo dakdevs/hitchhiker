@@ -5,6 +5,12 @@ import type { McpBrowserApi } from "./mcp.ts";
 import { ServiceProviderSchema, ServiceRequirementSchema } from "./service-contracts.ts";
 import { PageWatchRequestSchema, type PageWatchSubscription } from "./page-observations.ts";
 import { EngineError } from "./engine.ts";
+import {
+  DevToolsInspectPointSchema,
+  DevToolsPageIdSchema,
+  DevToolsStatusSchema,
+  type DevToolsApi,
+} from "./devtools.ts";
 import { PluginStorageError, type PluginStorageAdapter } from "./plugin-storage.ts";
 import {
   PluginManagementIdSchema,
@@ -37,6 +43,7 @@ export const LivePluginManifest = Schema.Struct({
       "plugins.install",
       "plugins.read",
       "plugins.manage",
+      "devtools.manage",
       "browser.full-control",
       "cdp.connect",
     ]),
@@ -94,6 +101,8 @@ export interface PluginDispatchOptions {
   readonly storage?: PluginStorageAdapter;
   /** Application-owned, owner-bound lifecycle port. Absent ports fail closed. */
   readonly management?: PluginManagementApi;
+  /** Trusted profile-wide DevTools frontend adapter; absent adapters fail closed. */
+  readonly devtools?: DevToolsApi;
   /** Trusted owner-bound broker adapter; service callers never select identities or grants. */
   readonly services?: {
     readonly publish: (
@@ -265,6 +274,35 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
         const { pageId } = yield* decode(Schema.Struct({ pageId: PageId }), params);
         yield* options.browser.close(pageId).pipe(Effect.mapError(denied));
         return null;
+      }
+      case "devtools.status":
+      case "devtools.show":
+      case "devtools.close": {
+        yield* authorize("devtools.manage");
+        if (!options.devtools) return yield* denied();
+        const status =
+          method === "devtools.show"
+            ? yield* decode(
+                Schema.Struct({
+                  pageId: DevToolsPageIdSchema,
+                  inspectAt: Schema.optional(DevToolsInspectPointSchema),
+                }),
+                params,
+              ).pipe(
+                Effect.flatMap(({ pageId, inspectAt }) =>
+                  options.devtools!.show(pageId, inspectAt),
+                ),
+                Effect.mapError(denied),
+              )
+            : yield* decode(Schema.Struct({ pageId: DevToolsPageIdSchema }), params).pipe(
+                Effect.flatMap(({ pageId }) =>
+                  method === "devtools.status"
+                    ? options.devtools!.status(pageId)
+                    : options.devtools!.close(pageId),
+                ),
+                Effect.mapError(denied),
+              );
+        return yield* decode(DevToolsStatusSchema, status);
       }
       case "configuration.get": {
         // Existing writers retain read access; read-only plugins use the narrower grant.

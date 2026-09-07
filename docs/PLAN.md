@@ -641,3 +641,32 @@ retirement, a completed journal, explicit window close, and engine exit zero
 release acceptance, live public presenter switching, or a complete shutdown fix: prior intermittent
 activation/shutdown failures remain regression concerns, and this fixture logged an IPC
 request-queue-full message during shutdown.
+
+## DevTools integration in progress
+
+The startup cutover is published at `745f480`, with exact-commit CI success and a real native
+bootstrap fixture. Next, [DEVTOOLS-PLAN.md](DEVTOOLS-PLAN.md) defines public DevTools primitives,
+profile-wide frontend authority, resource ownership and a replaceable default plugin. The native
+adapter, SDK/MCP contract and application lifecycle integration are being implemented independently.
+No DevTools feature or expanded default cohort is verified yet.
+
+The DevTools working tree now passes the complete portable check: 389 tests pass, 31 native-gated
+tests skip, and dependency/type/lint/format/build checks pass (`work/devtools-full-check-final.log`).
+The corrected native target compiles. Public SDK/MCP controls, profile-wide grants, resource
+ownership/revocation tests, the standalone plugin and [API reference](DEVTOOLS.md) are implemented.
+Three native fixture runs stalled before inspector assertions in macOS Keychain access during
+`CefInitialize`; each required cleanup of its owned processes. Readiness gating and an abort signal
+did not settle startup cancellation. Default-bundle integration and native lifecycle acceptance
+remain open; these changes are not yet published. The existing controller replacement test now
+uses a revisioned page-watch sentinel rather than fixed sleeps to observe prior lifecycle events.
+
+DevTools checkpoint verification now passes the complete repository check: 395 portable tests,
+32 native-gated skips, and dependency/type/lint/format/build checks
+(`work/devtools-checkpoint-final-check.log`). The native host compiles, and two real fixtures pass
+with a disposable mock-Keychain profile: inspector ownership/revocation/document retention/capacity/
+shutdown, and compiled plugin controls with synthetic Native toolbar events. Normal Keychain
+startup still fails readiness on this machine, but bounded process cleanup now returns the startup
+error after 30 seconds with no remaining host or plugin worker. The public API reference documents
+this distinction. The default toolbar factory has five focused tests; default bundle integration,
+physical UI validation, docking/frontend extension APIs and production Keychain acceptance remain
+open. [DEVTOOLS-PLAN.md](DEVTOOLS-PLAN.md) records the evidence and versioned-cohort requirements.

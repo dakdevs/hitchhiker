@@ -25,7 +25,7 @@ export const pluginGuide: readonly GuideSection[] = [
       "Chromium runs the pages; the plugin host controls access to its services. A private native command, an MCP tool, and a plugin SDK method are different entry points. This table describes the current implementation, not the full planned API.",
       "Hitchhiker capability grants are separate from Chromium site permissions. Raw CDP uses an explicitly authorized relay; browser.full-control does not include cdp.connect. Although a plugin manifest can declare cdp.connect, the plugin dispatcher does not yet expose a CDP method.",
       "The current configuration service exposes colorScheme, sleepAfterMs, and alwaysAwakeOrigins for appearance and page sleeping. Chromium site permission queries and decisions require a separate service, which is still planned. The API reference lists the exact public methods and grants available today.",
-      "The planned DevTools plugin will use public inspection and presentation APIs. Customizing its Native controls, extending the DevTools frontend, and changing Chromium itself are different capabilities; each will be documented separately as it becomes available. Security controls will document their defaults, profile or origin scope, persistence, and restart requirements alongside the grant needed to change them.",
+      "A standalone DevTools plugin now uses public show, status and close APIs with the profile-wide devtools.manage grant. Its portable contracts and real inspector lifecycle tests pass with a disposable test Keychain. Production Keychain startup and default distribution integration remain unfinished. Customizing its Native controls, extending the DevTools frontend, and changing Chromium itself are different capabilities; each will be documented separately as it becomes available. Security controls will document their defaults, profile or origin scope, persistence, and restart requirements alongside the grant needed to change them.",
     ],
     table: {
       headings: ["Capability", "Available today", "Plugin SDK"],
@@ -57,11 +57,25 @@ export const pluginGuide: readonly GuideSection[] = [
         ],
         [
           "DevTools interface",
-          "CEF primitives are available; host integration is unfinished",
-          "Default plugin planned",
+          "Show, status and close verified with a disposable test Keychain",
+          "Standalone plugin; default integration pending",
         ],
       ],
     },
+  },
+  {
+    id: "devtools-api",
+    title: "Build your own developer tools controls",
+    paragraphs: [
+      "Declare devtools.manage and obtain a grant for the profile. This permission can inspect every page in that profile: an origins list cannot constrain the full Chromium frontend. browser.full-control includes it; cdp.connect remains separate. Add pages.list only if your plugin discovers pages, and ui.compose only if it publishes controls.",
+      "show(pageId, inspectAt?) accepts optional integer x/y coordinates from 0 through 32768. show, status and close return pageId, generation, instance and state. State is closed, opening, open or closing. Creation and closure are asynchronous; devtools.changed reports lifecycle changes, and a fresh status read avoids relying on queued stale events.",
+      "The limit is four inspectors, counting opening and closing windows. Inspection wakes a sleeping page and protects it from automatic freezing. Showing an existing inspector transfers cleanup responsibility; stopping or revoking an owner closes its windows. Explicit close is profile-wide and may close another caller's inspector.",
+      "The standalone example lives in apps/devtools-plugin. These Native controls can be replaced through the SDK. Docking and DevTools frontend extensions are not exposed yet. Real lifecycle tests pass with disposable test Keychains; production Keychain startup and default-bundle integration remain open.",
+    ],
+    code: `// Requires a declared and granted devtools.manage capability.
+await api.devtools.show(selectedPageId, { x: 12, y: 24 });
+const inspector = await api.devtools.status(selectedPageId);
+await api.devtools.close(inspector.pageId);`,
   },
   {
     id: "workspace",
@@ -323,6 +337,21 @@ export async function useOtherPresenter(api: PluginApi) {
         ["pages.forward(pageId)", "pages.manage", "void; routes Chromium history forward"],
         ["pages.reload(pageId)", "pages.manage", "void; reloads an existing page"],
         ["pages.stop(pageId)", "pages.manage", "void; stops loading an existing page"],
+        [
+          "devtools.status(pageId)",
+          "devtools.manage (profile-wide)",
+          "{ pageId, generation, instance, state }",
+        ],
+        [
+          "devtools.show(pageId, inspectAt?)",
+          "devtools.manage (profile-wide)",
+          "Inspector status; opens or focuses a standalone window",
+        ],
+        [
+          "devtools.close(pageId)",
+          "devtools.manage (profile-wide)",
+          "Inspector status; requests closure",
+        ],
         [
           "storage.read() / storage.write(expectedRevision, value)",
           "storage.local",

@@ -1,7 +1,7 @@
 # @hitchhiker/plugin-sdk
 
 Public TypeScript helpers for isolated Hitchhiker plugins. Use `definePlugin({ activate, onEvent })`
-and bundle an entry point as an IIFE. The SDK turns typed `pages`, `configuration`, and `ui` calls
+and bundle an entry point as an IIFE. The SDK turns typed `pages`, `devtools`, `configuration`, and `ui` calls
 into capability-checked broker requests; it grants no ambient filesystem, network, or Node access.
 
 ## UI publishing
@@ -99,3 +99,15 @@ combined string/key bytes. Published state shares a 1 MiB budget across the brok
 three-second response deadline and limits of 16 per consumer, 32 per provider and 128 overall.
 Notifications retain only the latest revision for each subscribed dependency. These are resource
 ceilings; they do not establish performance of the eventual default plugin set.
+
+## DevTools
+
+`devtools.status(pageId)`, `devtools.show(pageId, inspectAt?)` and `devtools.close(pageId)` require
+`devtools.manage`, a profile-wide permission. All return `{ pageId, generation, instance, state }`;
+opening and closing are asynchronous. `devtools.changed` reports lifecycle transitions. Showing an
+existing inspector transfers cleanup ownership to the caller; scope exit or revocation closes its
+owned windows. Explicit close can manage any inspector in the granted profile.
+
+Read the [complete DevTools reference](../../docs/DEVTOOLS.md) for exact coordinates, limits, grants,
+MCP equivalents, examples and verification boundaries. The [standalone plugin](../../apps/devtools-plugin/README.md)
+uses this public API. Default distribution integration, docking and frontend extensions remain open.

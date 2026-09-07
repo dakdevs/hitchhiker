@@ -1,0 +1,6 @@
+{
+  "id": "default-devtools",
+  "name": "Developer tools",
+  "version": "1.0.0",
+  "capabilities": ["pages.list", "devtools.manage", "ui.compose"]
+}

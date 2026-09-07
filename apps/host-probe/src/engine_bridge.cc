@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <climits>
 #include <cstdint>
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -52,6 +54,7 @@ constexpr size_t kMaxViewports = 32;
 constexpr int kIoPollMs = 100;
 constexpr int kCdpTimeoutMs = 15 * 1000;
 constexpr int kMaxCoordinate = 1000000;
+constexpr int kMaxDevToolsCoordinate = 32768;
 // Root teardown must not discard the session-close event that it just queued.
 // Keep this finite: a parent that has stopped reading stdout must not freeze
 // CEF's UI thread while Stop joins the writer.
@@ -110,6 +113,43 @@ bool GetInt(CefRefPtr<CefDictionaryValue> value, const char* key, int* out) {
   return true;
 }
 
+bool HasOnlyKeys(CefRefPtr<CefDictionaryValue> value,
+                 std::initializer_list<const char*> allowed) {
+  if (!value) return false;
+  CefDictionaryValue::KeyList keys;
+  if (!value->GetKeys(keys)) return false;
+  for (const auto& key : keys) {
+    bool found = false;
+    for (const char* candidate : allowed) found = found || key == candidate;
+    if (!found) return false;
+  }
+  return true;
+}
+
+bool GetExpectedUint32(CefRefPtr<CefDictionaryValue> value, const char* key,
+                       std::optional<uint32_t>* out, bool allow_zero = false) {
+  if (value->GetType(key) == VTYPE_INVALID) return true;
+  const auto type = value->GetType(key);
+  if (type != VTYPE_INT && type != VTYPE_DOUBLE) return false;
+  const double generation = type == VTYPE_INT ? value->GetInt(key) : value->GetDouble(key);
+  if (!std::isfinite(generation) || generation < (allow_zero ? 0 : 1) ||
+      generation > UINT32_MAX || generation != std::floor(generation)) return false;
+  *out = static_cast<uint32_t>(generation);
+  return true;
+}
+
+bool IsUuid(const std::string& value) {
+  if (value.size() != 36) return false;
+  for (size_t index = 0; index < value.size(); ++index) {
+    if (index == 8 || index == 13 || index == 18 || index == 23) {
+      if (value[index] != '-') return false;
+    } else if (!std::isxdigit(static_cast<unsigned char>(value[index]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void SetGeneration(CefRefPtr<CefDictionaryValue> value, uint32_t generation) {
   // CEF's integer value is signed. A double represents every uint32 exactly.
   value->SetDouble("generation", static_cast<double>(generation));
@@ -143,6 +183,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     // Runtime schedulers must treat a missing/false capability as protected.
     ready->SetBool("pageResourceSignals", true);
     ready->SetBool("pageBrowserGeneration", true);
+    ready->SetBool("devTools", true);
     if (root_) {
       const CefRect bounds = root_->GetClientAreaBoundsInScreen();
       CefRefPtr<CefDictionaryValue> client = CefDictionaryValue::Create();
@@ -257,6 +298,11 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
         params->SetBool("download", event.download);
         params->SetBool("unsavedInput", event.unsaved_input);
         SendEvent("pages.resourcesChanged", params);
+        break;
+      case PageEvent::kDevToolsChanged:
+        params->SetString("state", event.devtools_state);
+        params->SetDouble("instance", static_cast<double>(event.devtools_instance));
+        SendEvent("devtools.changed", params);
         break;
     }
   }
@@ -687,6 +733,74 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
         }
       }
       return;
+    }
+    if (method == "devtools.status" || method == "devtools.show" || method == "devtools.close") {
+      const bool valid_keys = method == "devtools.status"
+          ? HasOnlyKeys(params, {"pageId"})
+          : method == "devtools.show"
+              ? HasOnlyKeys(params, {"pageId", "inspectAt", "expectedGeneration", "expectedInstance", "leaseId"})
+              : HasOnlyKeys(params, {"pageId", "expectedGeneration", "expectedInstance", "expectedLeaseId"});
+      if (!manager_ || !valid_keys) {
+        ReplyError(request_id, -32602, "invalid DevTools parameters"); return;
+      }
+      std::string page_id;
+      if (!GetString(params, "pageId", &page_id) || !IsPageId(page_id)) {
+        ReplyError(request_id, -32602, "invalid DevTools page id"); return;
+      }
+      auto status = manager_->DevToolsStatusForPage(page_id);
+      if (!status) { ReplyError(request_id, -32001, "page is closed or unknown"); return; }
+      if (method == "devtools.status") {
+        CefRefPtr<CefDictionaryValue> result = CefDictionaryValue::Create();
+        result->SetString("pageId", status->page_id); SetGeneration(result, status->generation);
+        result->SetDouble("instance", static_cast<double>(status->instance));
+        result->SetString("state", status->state); ReplyResult(request_id, NewValue(result)); return;
+      }
+      std::optional<uint32_t> expected_generation, expected_instance;
+      if (!GetExpectedUint32(params, "expectedGeneration", &expected_generation) ||
+          !GetExpectedUint32(params, "expectedInstance", &expected_instance, true)) {
+        ReplyError(request_id, -32602, "invalid expected generation or instance"); return;
+      }
+      if ((expected_generation && *expected_generation != status->generation) ||
+          (expected_instance && *expected_instance != status->instance)) {
+        ReplyError(request_id, -32005, "DevTools identity does not match"); return;
+      }
+      if (method == "devtools.show") {
+        std::string lease_id;
+        if (!GetString(params, "leaseId", &lease_id) || !IsUuid(lease_id)) {
+          ReplyError(request_id, -32602, "invalid DevTools lease id"); return;
+        }
+        CefPoint inspect_at;
+        if (params->GetType("inspectAt") != VTYPE_INVALID) {
+          CefRefPtr<CefDictionaryValue> point = params->GetType("inspectAt") == VTYPE_DICTIONARY
+              ? params->GetDictionary("inspectAt") : nullptr;
+          int x = 0, y = 0;
+          if (!HasOnlyKeys(point, {"x", "y"}) || !GetInt(point, "x", &x) || !GetInt(point, "y", &y) ||
+              x < 0 || y < 0 || x > kMaxDevToolsCoordinate || y > kMaxDevToolsCoordinate) {
+            ReplyError(request_id, -32602, "invalid DevTools inspection point"); return;
+          }
+          inspect_at = CefPoint(x, y);
+        }
+        if (!manager_->ShowDevTools(page_id, inspect_at, expected_generation, expected_instance, lease_id)) {
+          ReplyError(request_id, -32003, "DevTools could not be shown"); return;
+        }
+      } else {
+        std::optional<std::string> expected_lease_id;
+        if (params->GetType("expectedLeaseId") != VTYPE_INVALID) {
+          std::string lease_id;
+          if (!GetString(params, "expectedLeaseId", &lease_id) || !IsUuid(lease_id)) {
+            ReplyError(request_id, -32602, "invalid expected DevTools lease id"); return;
+          }
+          expected_lease_id = lease_id;
+        }
+        status = manager_->CloseDevTools(page_id, expected_generation, expected_instance, expected_lease_id);
+        if (!status) { ReplyError(request_id, -32005, "page generation does not match"); return; }
+      }
+      status = manager_->DevToolsStatusForPage(page_id);
+      if (!status) { ReplyError(request_id, -32001, "page closed during DevTools operation"); return; }
+      CefRefPtr<CefDictionaryValue> result = CefDictionaryValue::Create();
+      result->SetString("pageId", status->page_id); SetGeneration(result, status->generation);
+      result->SetDouble("instance", static_cast<double>(status->instance));
+      result->SetString("state", status->state); ReplyResult(request_id, NewValue(result)); return;
     }
     if (method == "cdp.send") { HandleCdp(request_id, params); return; }
     ReplyError(request_id, -32601, "unknown method");

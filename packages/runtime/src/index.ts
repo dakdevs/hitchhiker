@@ -1,4 +1,6 @@
 export { EngineConnection, EngineError } from "./engine.ts";
+export { DevToolsStatusSchema, DevToolsInspectPointSchema } from "./devtools.ts";
+export type { DevToolsApi, DevToolsStatus, DevToolsInspectPoint } from "./devtools.ts";
 export { createPluginStorage, PluginStorageError } from "./plugin-storage.ts";
 export type { PluginStorageAdapter } from "./plugin-storage.ts";
 export type { EngineOptions, EngineEvent, JsonObject, RawCdpConnection } from "./engine.ts";

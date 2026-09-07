@@ -176,6 +176,10 @@ export class EngineConnection extends Context.Service<
               {
                 env: environment,
                 extendEnv: false,
+                // The process spawner otherwise waits indefinitely for SIGTERM during
+                // scoped release. A host that never reaches `host.ready` must still
+                // release its process group when startup is interrupted.
+                forceKillAfter: 100,
                 stdin: Stream.fromQueue(outgoing),
                 stdout: "pipe",
                 stderr: "inherit",

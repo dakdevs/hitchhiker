@@ -220,6 +220,15 @@ test("grants enforce origin, expiry, revocation, full control, and separate CDP"
     true,
   );
   assert.equal(
+    grantAllows(full, {
+      principal: "local",
+      profileId: "main",
+      capability: "devtools.manage",
+      now: 1,
+    }),
+    true,
+  );
+  assert.equal(
     grantAllows(full, { principal: "local", profileId: "main", capability: "cdp.connect", now: 1 }),
     false,
   );

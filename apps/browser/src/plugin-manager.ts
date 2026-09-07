@@ -58,6 +58,7 @@ const capabilities = new Set<Capability>([
   "plugins.manage",
   "storage.local",
   "browser.full-control",
+  "devtools.manage",
   "cdp.connect",
 ]);
 
@@ -204,6 +205,7 @@ const CapabilitySchema = Schema.Literals([
   "plugins.manage",
   "storage.local",
   "browser.full-control",
+  "devtools.manage",
   "cdp.connect",
 ]);
 const RevisionSchema = Schema.Struct({

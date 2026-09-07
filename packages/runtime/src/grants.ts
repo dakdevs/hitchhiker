@@ -159,6 +159,7 @@ const DelegationInput = Schema.Struct({
       "plugins.install",
       "plugins.read",
       "plugins.manage",
+      "devtools.manage",
       "storage.local",
       "browser.full-control",
       "cdp.connect",

@@ -1211,11 +1211,18 @@ test("keeps a logical page and its persistence through replacement while rejecti
             ),
           );
           const emit = (event: string, params: EngineEvent["params"]) =>
-            PubSub.publish(events, { event, params }).pipe(Effect.andThen(Effect.sleep(10)));
+            PubSub.publish(events, { event, params });
 
           yield* controller.start;
+          const observer = yield* controller.observePages("replacement-test");
           const id = yield* controller.openPage("https://one.test/");
           yield* emit("pages.created", { pageId: id, generation: 1 });
+          yield* waitUntil(
+            "page created",
+            controller.snapshot.pipe(
+              Effect.map((snapshot) => snapshot.pages.some((page) => page.id === id)),
+            ),
+          );
           yield* emit("pages.documentCommitted", { pageId: id, generation: 1 });
           yield* emit("pages.resourcesChanged", {
             pageId: id,
@@ -1260,6 +1267,25 @@ test("keeps a logical page and its persistence through replacement while rejecti
             unsavedInput: false,
           });
 
+          // A current-generation sentinel proves all preceding stale events were processed.
+          yield* emit("pages.navigationChanged", {
+            pageId: id,
+            generation: 2,
+            url: "https://current.test/",
+            loading: false,
+            canGoBack: true,
+            canGoForward: true,
+          });
+          yield* waitUntil(
+            "replacement events processed",
+            observer
+              .watch({})
+              .pipe(
+                Effect.map((snapshot) =>
+                  snapshot.pages.some((page) => page.id === id && page.canGoForward),
+                ),
+              ),
+          );
           const page = (yield* controller.snapshot).pages.find((entry) => entry.id === id);
           assert.equal(page?.url, "https://current.test/");
           assert.equal(page?.title, "https://one.test/");
@@ -1496,6 +1522,38 @@ test("freezing requires idle navigation and protects pending scoped DOM writes",
           assert.deepEqual(
             lifecycle.map((entry) => entry.state),
             ["frozen", "active", "frozen", "frozen"],
+          );
+          const inspectorEvent = (generation: number, instance: number, state: string) =>
+            PubSub.publish(engineEvents, {
+              event: "devtools.changed",
+              params: { pageId: opened[2]!, generation, instance, state },
+            });
+          yield* inspectorEvent(2, 2, "opening");
+          yield* TestClock.adjust(1_000);
+          assert.equal(lifecycle.at(-1)?.state, "active", "opening an inspector wakes its target");
+          const afterInspectorOpen = lifecycle.length;
+          testNow = 60_000;
+          yield* inspectorEvent(1, 99, "closed");
+          yield* inspectorEvent(2, 1, "closed");
+          yield* TestClock.adjust(1_000);
+          assert.equal(
+            lifecycle.length,
+            afterInspectorOpen,
+            "stale inspector events cannot release current protection",
+          );
+          yield* inspectorEvent(2, 2, "closing");
+          yield* TestClock.adjust(1_000);
+          assert.equal(
+            lifecycle.length,
+            afterInspectorOpen,
+            "closing inspectors retain protection until they drain",
+          );
+          yield* inspectorEvent(2, 2, "closed");
+          yield* TestClock.adjust(1_000);
+          assert.equal(
+            lifecycle.at(-1)?.state,
+            "frozen",
+            "closed inspectors release page protection",
           );
           assert.equal(yield* controller.lastError, undefined);
         }),

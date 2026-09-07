@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +10,7 @@ import { EngineConnection } from "../src/engine.ts";
 import { FrameDecoder } from "../src/framing.ts";
 
 const fixture = fileURLToPath(new URL("./engine-fixture.mjs", import.meta.url));
+const hungFixture = fileURLToPath(new URL("./engine-hung-fixture.mjs", import.meta.url));
 const layer = EngineConnection.layer({
   executable: fixture,
   profileRoot: "/tmp/hitchhiker-transport-fixture",
@@ -279,6 +280,85 @@ const awaitChildProcessExit = (pid: number) =>
     },
     catch: (cause) => cause,
   });
+
+const awaitFile = async (path: string) => {
+  const deadline = Date.now() + 2_000;
+  for (;;) {
+    try {
+      await access(path);
+      return;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+    }
+    if (Date.now() >= deadline) throw new Error("fixture did not start");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+};
+
+test(
+  "interrupting startup force-kills a host that ignores SIGTERM",
+  { timeout: 3_000 },
+  async () => {
+    const profileRoot = await mkdtemp(join(tmpdir(), "hitchhiker-hung-engine-"));
+    const controller = new AbortController();
+    let resolveSpawned!: (pid: number) => void;
+    const spawned = new Promise<number>((resolve) => {
+      resolveSpawned = resolve;
+    });
+    const running = Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* EngineConnection;
+        yield* Effect.sync(() => resolveSpawned(engine.pid));
+        yield* engine.ready;
+      }).pipe(
+        Effect.provide(
+          EngineConnection.layer({
+            executable: hungFixture,
+            profileRoot,
+            extensionManagement: false,
+          }),
+        ),
+        Effect.scoped,
+      ),
+      { signal: controller.signal },
+    );
+    let pid: number | undefined;
+    let exited = false;
+    try {
+      pid = await spawned;
+      await awaitFile(join(profileRoot, "hung-engine-started"));
+      controller.abort();
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error("startup interruption did not settle")),
+          1_000,
+        );
+        void running.then(
+          () => {
+            clearTimeout(timeout);
+            reject(new Error("startup unexpectedly succeeded"));
+          },
+          () => {
+            clearTimeout(timeout);
+            resolve();
+          },
+        );
+      });
+      await Effect.runPromise(awaitChildProcessExit(pid));
+      exited = true;
+    } finally {
+      if (pid !== undefined && !exited) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Preserve the test failure when the owned process already exited.
+        }
+      }
+      await running.catch(() => undefined);
+      await rm(profileRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 test("logical exit waits for ordered delivery and the final awaited handler", async () => {
   await withDrainEngine(1_000, (engine) =>

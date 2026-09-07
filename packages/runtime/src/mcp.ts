@@ -2,6 +2,12 @@ import type { BrowserConfiguration, BrowserPage, Capability } from "@hitchhiker/
 import { Effect, Schema } from "effect";
 import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import type { GrantStoreApi } from "./grants.ts";
+import {
+  DevToolsInspectPointSchema,
+  DevToolsPageIdSchema,
+  DevToolsStatusSchema,
+  type DevToolsApi,
+} from "./devtools.ts";
 import { LivePluginManifest } from "./plugin-dispatch.ts";
 import {
   InstalledPluginPlanInputSchema,
@@ -57,6 +63,8 @@ export interface McpOptions {
   readonly browser: McpBrowserApi;
   readonly plugins?: McpPluginApi;
   readonly dom?: ScopedDomDriver;
+  /** Profile-wide Chromium DevTools frontend authority; never raw CDP. */
+  readonly devtools?: DevToolsApi;
 }
 
 /** Trusted installation consumes uploaded data, never a caller-selected filesystem path. */
@@ -154,6 +162,37 @@ const tools = Toolkit.make(
   Tool.make("hitchhiker_tabs_set", {
     description: "Choose sidebar or top tabs in Hitchhiker's default interface.",
     parameters: Schema.Struct({ placement: Schema.Literals(["sidebar", "top"]) }),
+    success: Result,
+    failure: McpActionError,
+  }),
+);
+
+const devToolsTools = Toolkit.make(
+  Tool.make("hitchhiker_devtools_status", {
+    description:
+      "Read profile-wide Chromium DevTools frontend status for one page. This is not raw CDP.",
+    parameters: Schema.Struct({ pageId: DevToolsPageIdSchema }).annotate({
+      parseOptions: { onExcessProperty: "error" },
+    }),
+    success: Result,
+    failure: McpActionError,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("hitchhiker_devtools_show", {
+    description:
+      "Show Chromium DevTools for one page using profile-wide frontend authority. This is not raw CDP.",
+    parameters: Schema.Struct({
+      pageId: DevToolsPageIdSchema,
+      inspectAt: Schema.optional(DevToolsInspectPointSchema),
+    }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_devtools_close", {
+    description:
+      "Close Chromium DevTools for one page using profile-wide frontend authority. This is not raw CDP.",
+    parameters: Schema.Struct({ pageId: DevToolsPageIdSchema }).annotate({
+      parseOptions: { onExcessProperty: "error" },
+    }),
     success: Result,
     failure: McpActionError,
   }),
@@ -344,6 +383,48 @@ export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (opt
       ),
   });
   yield* McpServer.registerToolkit(tools).pipe(Effect.provide(handlers));
+  if (options.devtools !== undefined) {
+    const devtools = options.devtools;
+    const devtoolsHandlers = devToolsTools.toLayer({
+      hitchhiker_devtools_status: ({ pageId }) =>
+        authorized("devtools.manage", devtools.status(pageId)).pipe(
+          Effect.flatMap((status) =>
+            Schema.decodeUnknownEffect(DevToolsStatusSchema)(status).pipe(
+              Effect.mapError(
+                () =>
+                  new McpActionError({ message: "The browser returned invalid DevTools status." }),
+              ),
+            ),
+          ),
+          Effect.flatMap(json),
+        ),
+      hitchhiker_devtools_show: ({ pageId, inspectAt }) =>
+        authorized("devtools.manage", devtools.show(pageId, inspectAt)).pipe(
+          Effect.flatMap((status) =>
+            Schema.decodeUnknownEffect(DevToolsStatusSchema)(status).pipe(
+              Effect.mapError(
+                () =>
+                  new McpActionError({ message: "The browser returned invalid DevTools status." }),
+              ),
+            ),
+          ),
+          Effect.flatMap(json),
+        ),
+      hitchhiker_devtools_close: ({ pageId }) =>
+        authorized("devtools.manage", devtools.close(pageId)).pipe(
+          Effect.flatMap((status) =>
+            Schema.decodeUnknownEffect(DevToolsStatusSchema)(status).pipe(
+              Effect.mapError(
+                () =>
+                  new McpActionError({ message: "The browser returned invalid DevTools status." }),
+              ),
+            ),
+          ),
+          Effect.flatMap(json),
+        ),
+    });
+    yield* McpServer.registerToolkit(devToolsTools).pipe(Effect.provide(devtoolsHandlers));
+  }
   const history = options.browser.history;
   if (history !== undefined) {
     const historyHandlers = historyTools.toLayer({

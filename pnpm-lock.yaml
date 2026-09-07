@@ -115,6 +115,28 @@ importers:
         specifier: 7.0.2
         version: 7.0.2
 
+  apps/devtools-plugin:
+    dependencies:
+      '@hitchhiker/core':
+        specifier: workspace:0.1.0
+        version: link:../../packages/core
+      '@hitchhiker/plugin-sdk':
+        specifier: workspace:0.1.0
+        version: link:../../packages/plugin-sdk
+      '@hitchhiker/ui':
+        specifier: workspace:0.1.0
+        version: link:../../packages/ui
+    devDependencies:
+      '@types/node':
+        specifier: 24.10.1
+        version: 24.10.1
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+
   apps/host-probe: {}
 
   apps/plugin-host: {}

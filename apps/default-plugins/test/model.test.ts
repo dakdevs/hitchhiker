@@ -37,7 +37,11 @@ const fixture = (initial: readonly string[] = ["first", "second"]) => {
   let delayClose = false;
   let delayedCloseId: string | undefined;
   const published: { service: string; value: Json }[] = [];
+  const unexpectedDevTools = async (): Promise<never> => {
+    throw new Error("This plugin must not invoke DevTools");
+  };
   const api: PluginApi = {
+    devtools: { status: unexpectedDevTools, show: unexpectedDevTools, close: unexpectedDevTools },
     storage: {
       async read() {
         return { revision: storageRevision, value };

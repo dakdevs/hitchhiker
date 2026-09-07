@@ -21,6 +21,7 @@
 namespace {
 
 constexpr int kFallbackWindowSize = 1;
+constexpr size_t kMaxDevTools = 4;
 
 bool IsValidPageId(const std::string& page_id) {
   return !page_id.empty();
@@ -76,6 +77,15 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
   std::optional<PageSnapshot> SnapshotForPage(const std::string& page_id) const;
   std::optional<std::string> PageIdForBrowser(
       CefRefPtr<CefBrowser> browser) const;
+  std::optional<DevToolsStatus> DevToolsStatusForPage(const std::string& page_id) const;
+  std::optional<DevToolsStatus> PrepareDevToolsPopup(const std::string& page_id);
+  bool ShowDevTools(const std::string& page_id, const CefPoint& inspect_at,
+                    std::optional<uint32_t> expected_generation,
+                    std::optional<uint32_t> expected_instance, const std::string& lease_id);
+  std::optional<DevToolsStatus> CloseDevTools(const std::string& page_id,
+                                              std::optional<uint32_t> expected_generation,
+                                              std::optional<uint32_t> expected_instance,
+                                              std::optional<std::string> expected_lease_id);
   void NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
                           const CefString& title);
   void NotifyMainDocumentCommitted(CefRefPtr<CefBrowser> browser);
@@ -100,6 +110,10 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
                         CefRefPtr<CefBrowser> browser);
   void OnBrowserDestroyed(const std::string& page_id,
                           CefRefPtr<CefBrowser> browser);
+  void OnDevToolsBrowserCreated(const std::string& page_id, uint32_t generation, uint32_t instance,
+                                CefRefPtr<CefBrowser> browser);
+  void OnDevToolsBrowserDestroyed(const std::string& page_id, uint32_t generation, uint32_t instance,
+                                  CefRefPtr<CefBrowser> browser);
 
   void DisableCallbacksAndRelease();
 
@@ -124,6 +138,12 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
     // Default to the ordinary page-close semantic for a page window that CEF
     // closes outside an explicit manager request.
     PageEvent::CloseReason close_reason = PageEvent::CloseReason::kPageClose;
+    CefRefPtr<CefBrowser> devtools_browser;
+    uint32_t devtools_generation = 0;
+    uint32_t devtools_instance = 0;
+    std::string devtools_lease_id;
+    bool devtools_opening = false;
+    bool devtools_close_requested = false;
   };
 
   using PageMap = std::map<std::string, PageRecord>;
@@ -134,6 +154,10 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
   void Emit(PageEvent event);
   void EmitResources(const std::string& page_id, CefRefPtr<CefBrowser> browser,
                      const PageRecord& page);
+  DevToolsStatus MakeDevToolsStatus(const std::string& page_id,
+                                const PageRecord& page) const;
+  void EmitDevTools(const std::string& page_id, const PageRecord& page);
+  void RequestDevToolsClose(PageRecord& page);
 
   CefRefPtr<CefWindow> root_window_;
   CefRefPtr<CefClient> shared_client_;
@@ -146,6 +170,40 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
 };
 
 namespace {
+
+class DevToolsBrowserViewDelegate : public CefBrowserViewDelegate {
+ public:
+  DevToolsBrowserViewDelegate(std::weak_ptr<PageManagerCore> manager,
+                              std::string page_id, uint32_t generation, uint32_t instance)
+      : manager_(std::move(manager)), page_id_(std::move(page_id)), generation_(generation), instance_(instance) {}
+  void OnBrowserCreated(CefRefPtr<CefBrowserView>, CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (auto manager = manager_.lock()) manager->OnDevToolsBrowserCreated(page_id_, generation_, instance_, browser);
+  }
+  void OnBrowserDestroyed(CefRefPtr<CefBrowserView>, CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    if (auto manager = manager_.lock()) manager->OnDevToolsBrowserDestroyed(page_id_, generation_, instance_, browser);
+  }
+ private:
+  std::weak_ptr<PageManagerCore> manager_;
+  const std::string page_id_;
+  const uint32_t generation_;
+  const uint32_t instance_;
+  IMPLEMENT_REFCOUNTING(DevToolsBrowserViewDelegate);
+  DISALLOW_COPY_AND_ASSIGN(DevToolsBrowserViewDelegate);
+};
+
+class RejectingDevToolsBrowserViewDelegate : public CefBrowserViewDelegate {
+ public:
+  RejectingDevToolsBrowserViewDelegate() = default;
+  void OnBrowserCreated(CefRefPtr<CefBrowserView>, CefRefPtr<CefBrowser> browser) override {
+    CEF_REQUIRE_UI_THREAD();
+    browser->GetHost()->CloseBrowser(false);
+  }
+ private:
+  IMPLEMENT_REFCOUNTING(RejectingDevToolsBrowserViewDelegate);
+  DISALLOW_COPY_AND_ASSIGN(RejectingDevToolsBrowserViewDelegate);
+};
 
 class PageWindowDelegate : public CefWindowDelegate {
  public:
@@ -273,8 +331,17 @@ class PageBrowserViewDelegate : public CefBrowserViewDelegate {
       const CefBrowserSettings& settings,
       CefRefPtr<CefClient> client,
       bool is_devtools) override {
-    // A popup is not another binding of this page. Returning no delegate keeps
-    // its lifecycle separate from the stable Hitchhiker page ID.
+    if (is_devtools) {
+      if (auto manager = manager_.lock()) {
+        auto status = manager->DevToolsStatusForPage(page_id_);
+        if (status && status->state == "closed") status = manager->PrepareDevToolsPopup(page_id_);
+        if (status && status->state != "closed")
+          return new DevToolsBrowserViewDelegate(manager, page_id_, status->generation, status->instance);
+      }
+      return new RejectingDevToolsBrowserViewDelegate();
+    }
+    // A popup is not another binding of this page. The DevTools path below
+    // returns a dedicated delegate; ordinary popups retain CEF's default UI.
     return nullptr;
   }
 
@@ -339,6 +406,9 @@ PageCloseResult PageManagerCore::Close(const std::string& page_id) {
   }
   page.close_requested = true;
   page.close_reason = PageEvent::CloseReason::kPageClose;
+  const bool had_devtools = page.devtools_opening || page.devtools_browser || page.devtools_close_requested;
+  RequestDevToolsClose(page);
+  if (had_devtools) EmitDevTools(page_id, page);
 
   if (page.browser) {
     page.browser->GetHost()->CloseBrowser(false);
@@ -371,6 +441,9 @@ size_t PageManagerCore::CloseAll() {
       page.close_reason = PageEvent::CloseReason::kWindowClose;
     }
     page.close_requested = true;
+    const bool had_devtools = page.devtools_opening || page.devtools_browser || page.devtools_close_requested;
+    RequestDevToolsClose(page);
+    if (had_devtools) EmitDevTools(page_id, page);
     if (page.browser) {
       browsers.push_back(page.browser);
     } else if (page.window) {
@@ -521,6 +594,167 @@ std::optional<std::string> PageManagerCore::PageIdForBrowser(
     }
   }
   return std::nullopt;
+}
+
+DevToolsStatus PageManagerCore::MakeDevToolsStatus(const std::string& page_id,
+                                               const PageRecord& page) const {
+  DevToolsStatus status{page_id, page.generation.generation(), page.devtools_instance, "closed"};
+  if (page.devtools_close_requested) status.state = "closing";
+  else if (page.devtools_browser) status.state = "open";
+  else if (page.devtools_opening) status.state = "opening";
+  return status;
+}
+
+void PageManagerCore::EmitDevTools(const std::string& page_id, const PageRecord& page) {
+  PageEvent event{PageEvent::Type::kDevToolsChanged, page_id};
+  const auto status = MakeDevToolsStatus(page_id, page);
+  event.generation = status.generation;
+  event.devtools_instance = status.instance;
+  event.devtools_state = status.state;
+  Emit(std::move(event));
+}
+
+std::optional<DevToolsStatus> PageManagerCore::DevToolsStatusForPage(
+    const std::string& page_id) const {
+  CEF_REQUIRE_UI_THREAD();
+  const auto it = pages_.find(page_id);
+  if (it == pages_.end()) return std::nullopt;
+  return MakeDevToolsStatus(page_id, it->second);
+}
+
+std::optional<DevToolsStatus> PageManagerCore::PrepareDevToolsPopup(const std::string& page_id) {
+  CEF_REQUIRE_UI_THREAD();
+  auto it = pages_.find(page_id);
+  if (it == pages_.end() || it->second.close_requested || !it->second.browser) return std::nullopt;
+  PageRecord& page = it->second;
+  if (page.devtools_opening || page.devtools_browser || page.devtools_close_requested)
+    return MakeDevToolsStatus(page_id, page);
+  size_t active = 0;
+  for (const auto& [_, candidate] : pages_)
+    if (candidate.devtools_opening || candidate.devtools_browser || candidate.devtools_close_requested) ++active;
+  if (active >= kMaxDevTools || page.devtools_instance == UINT32_MAX) return std::nullopt;
+  ++page.devtools_instance;
+  page.devtools_generation = page.generation.generation();
+  page.devtools_opening = true;
+  page.devtools_lease_id.clear();
+  EmitDevTools(page_id, page);
+  return MakeDevToolsStatus(page_id, page);
+}
+
+void PageManagerCore::RequestDevToolsClose(PageRecord& page) {
+  if (page.devtools_close_requested ||
+      (!page.devtools_opening && !page.devtools_browser)) return;
+  page.devtools_close_requested = true;
+  if (page.devtools_browser) page.devtools_browser->GetHost()->CloseBrowser(false);
+  else if (page.browser) page.browser->GetHost()->CloseDevTools();
+}
+
+bool PageManagerCore::ShowDevTools(const std::string& page_id, const CefPoint& inspect_at,
+                                   std::optional<uint32_t> expected_generation,
+                                   std::optional<uint32_t> expected_instance,
+                                   const std::string& lease_id) {
+  CEF_REQUIRE_UI_THREAD();
+  auto it = pages_.find(page_id);
+  if (it == pages_.end() || it->second.close_requested || !it->second.browser) return false;
+  PageRecord& page = it->second;
+  if ((expected_generation && page.generation.generation() != *expected_generation) ||
+      (expected_instance && page.devtools_instance != *expected_instance)) return false;
+  if (page.devtools_close_requested) return false;
+  if (page.devtools_browser || page.devtools_opening) {
+    page.devtools_lease_id = lease_id;
+    page.browser->GetHost()->ShowDevTools(CefWindowInfo(), shared_client_, CefBrowserSettings(), inspect_at);
+    return true;
+  }
+  if (!PrepareDevToolsPopup(page_id)) return false;
+  page.devtools_lease_id = lease_id;
+  page.browser->GetHost()->ShowDevTools(CefWindowInfo(), shared_client_, CefBrowserSettings(), inspect_at);
+  return true;
+}
+
+std::optional<DevToolsStatus> PageManagerCore::CloseDevTools(
+    const std::string& page_id, std::optional<uint32_t> expected_generation,
+    std::optional<uint32_t> expected_instance,
+    std::optional<std::string> expected_lease_id) {
+  CEF_REQUIRE_UI_THREAD();
+  auto it = pages_.find(page_id);
+  if (it == pages_.end()) return std::nullopt;
+  PageRecord& page = it->second;
+  if ((expected_generation && page.generation.generation() != *expected_generation) ||
+      (expected_instance && page.devtools_instance != *expected_instance)) return std::nullopt;
+  if (expected_lease_id && page.devtools_lease_id != *expected_lease_id) return std::nullopt;
+  if (!page.devtools_opening && !page.devtools_browser && !page.devtools_close_requested)
+    return MakeDevToolsStatus(page_id, page);
+  RequestDevToolsClose(page);
+  EmitDevTools(page_id, page);
+  return MakeDevToolsStatus(page_id, page);
+}
+
+void PageManagerCore::OnDevToolsBrowserCreated(const std::string& page_id, uint32_t generation,
+                                               uint32_t instance,
+                                               CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  auto it = pages_.find(page_id);
+  // A replacement may arrive while its old inspector is still being created.
+  // Keep that exact old instance long enough for OnBrowserDestroyed to drain
+  // its slot; a generic rejection would otherwise leave opening/closing set.
+  if (it != pages_.end() && it->second.generation.generation() != generation &&
+      it->second.devtools_generation == generation &&
+      it->second.devtools_instance == instance && it->second.devtools_opening) {
+    PageRecord& page = it->second;
+    const bool already_closing = page.devtools_close_requested;
+    page.devtools_opening = false;
+    page.devtools_browser = browser;
+    page.devtools_close_requested = true;
+    if (!already_closing) {
+      PageEvent event{PageEvent::Type::kDevToolsChanged, page_id};
+      event.generation = generation;
+      event.devtools_instance = instance;
+      event.devtools_state = "closing";
+      Emit(std::move(event));
+    }
+    browser->GetHost()->CloseBrowser(false);
+    return;
+  }
+  if (it == pages_.end() || it->second.generation.generation() != generation ||
+      it->second.devtools_generation != generation ||
+      it->second.devtools_instance != instance ||
+      !it->second.devtools_opening) {
+    browser->GetHost()->CloseBrowser(false);
+    return;
+  }
+  PageRecord& page = it->second;
+  page.devtools_opening = false;
+  page.devtools_browser = browser;
+  if (page.devtools_close_requested) {
+    browser->GetHost()->CloseBrowser(false);
+  } else {
+    EmitDevTools(page_id, page);
+  }
+}
+
+void PageManagerCore::OnDevToolsBrowserDestroyed(const std::string& page_id, uint32_t generation,
+                                                 uint32_t instance,
+                                                 CefRefPtr<CefBrowser> browser) {
+  CEF_REQUIRE_UI_THREAD();
+  auto it = pages_.find(page_id);
+  if (it == pages_.end() || it->second.devtools_generation != generation ||
+      it->second.devtools_instance != instance ||
+      !it->second.devtools_browser || !it->second.devtools_browser->IsSame(browser)) return;
+  PageRecord& page = it->second;
+  const bool current_generation = page.generation.generation() == generation;
+  page.devtools_browser = nullptr;
+  page.devtools_opening = false;
+  page.devtools_close_requested = false;
+  page.devtools_lease_id.clear();
+  if (current_generation) {
+    EmitDevTools(page_id, page);
+  } else {
+    PageEvent event{PageEvent::Type::kDevToolsChanged, page_id};
+    event.generation = generation;
+    event.devtools_instance = instance;
+    event.devtools_state = "closed";
+    Emit(std::move(event));
+  }
 }
 
 void PageManagerCore::NotifyTitleChanged(CefRefPtr<CefBrowser> browser,
@@ -697,6 +931,12 @@ void PageManagerCore::OnBrowserCreated(const std::string& page_id,
   }
 
   PageRecord& page = it->second;
+  if (page.browser && !page.browser->IsSame(browser)) {
+    const bool had_devtools = page.devtools_opening || page.devtools_browser ||
+                              page.devtools_close_requested;
+    RequestDevToolsClose(page);
+    if (had_devtools) EmitDevTools(page_id, page);
+  }
   if (page.generation.finalized() || page.generation.CanFinalize()) {
     browser->GetHost()->CloseBrowser(false);
     return;
@@ -742,6 +982,12 @@ void PageManagerCore::OnBrowserDestroyed(const std::string& page_id,
   auto it = pages_.find(page_id);
   if (it == pages_.end()) {
     return;
+  }
+  if (it->second.browser && it->second.browser->IsSame(browser)) {
+    const bool had_devtools = it->second.devtools_opening || it->second.devtools_browser ||
+                              it->second.devtools_close_requested;
+    RequestDevToolsClose(it->second);
+    if (had_devtools) EmitDevTools(page_id, it->second);
   }
   const BrowserGenerationTracker::DetachResult detached =
       it->second.generation.Detach(BrowserIdentity(browser));
@@ -890,6 +1136,23 @@ std::optional<PageSnapshot> PageManager::SnapshotForPage(
 std::optional<std::string> PageManager::PageIdForBrowser(
     CefRefPtr<CefBrowser> browser) const {
   return core_->PageIdForBrowser(browser);
+}
+
+std::optional<DevToolsStatus> PageManager::DevToolsStatusForPage(
+    const std::string& page_id) const { return core_->DevToolsStatusForPage(page_id); }
+
+bool PageManager::ShowDevTools(const std::string& page_id, const CefPoint& inspect_at,
+                               std::optional<uint32_t> expected_generation,
+                               std::optional<uint32_t> expected_instance,
+                               const std::string& lease_id) {
+  return core_->ShowDevTools(page_id, inspect_at, expected_generation, expected_instance, lease_id);
+}
+
+std::optional<DevToolsStatus> PageManager::CloseDevTools(
+    const std::string& page_id, std::optional<uint32_t> expected_generation,
+    std::optional<uint32_t> expected_instance,
+    std::optional<std::string> expected_lease_id) {
+  return core_->CloseDevTools(page_id, expected_generation, expected_instance, expected_lease_id);
 }
 
 void PageManager::NotifyTitleChanged(CefRefPtr<CefBrowser> browser,

@@ -15,7 +15,9 @@ const capabilities: readonly Capability[] =
     ? []
     : process.env.MCP_CAPABILITIES === "manage"
       ? ["pages.manage"]
-      : ["pages.list"];
+      : process.env.MCP_CAPABILITIES === "devtools"
+        ? ["devtools.manage"]
+        : ["pages.list"];
 const slowMs = Number(process.env.MCP_SLOW_MS ?? "0");
 const dispatchMarker = process.env.MCP_DISPATCH_MARKER;
 const finalizerMarker = process.env.MCP_FINALIZER_MARKER;
@@ -64,6 +66,18 @@ const program = runMcpStdio({
   profileId: "main",
   token: "preissued",
   grants,
+  ...(process.env.MCP_DEVTOOLS === "yes"
+    ? {
+        devtools: {
+          status: (pageId: string) =>
+            Effect.succeed({ pageId, generation: 1, instance: 0, state: "closed" as const }),
+          show: (pageId: string, _point?: { x: number; y: number }) =>
+            Effect.succeed({ pageId, generation: 1, instance: 1, state: "open" as const }),
+          close: (pageId: string) =>
+            Effect.succeed({ pageId, generation: 1, instance: 1, state: "closed" as const }),
+        },
+      }
+    : {}),
   browser: {
     pages: Effect.gen(function* () {
       yield* Effect.logInfo("Fixture page operation");

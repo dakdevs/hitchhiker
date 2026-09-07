@@ -14,6 +14,7 @@ const capabilityScopes = {
   "plugins.install": "originless",
   "plugins.read": "originless",
   "plugins.manage": "originless",
+  "devtools.manage": "originless",
   "storage.local": "originless",
   "browser.full-control": "wildcard",
   "cdp.connect": "cdp",

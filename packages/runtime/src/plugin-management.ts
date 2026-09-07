@@ -21,6 +21,7 @@ const CapabilitySchema = Schema.Literals([
   "plugins.install",
   "plugins.read",
   "plugins.manage",
+  "devtools.manage",
   "storage.local",
   "browser.full-control",
   "cdp.connect",

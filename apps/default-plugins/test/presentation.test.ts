@@ -88,7 +88,11 @@ const fakeApi = () => {
       canGoForward: false,
     },
   ];
+  const unexpectedDevTools = async (): Promise<never> => {
+    throw new Error("This plugin must not invoke DevTools");
+  };
   const api: PluginApi = {
+    devtools: { status: unexpectedDevTools, show: unexpectedDevTools, close: unexpectedDevTools },
     storage: {
       read: async () => ({ revision: 0, value: null }),
       write: async () => ({ revision: 1 }),

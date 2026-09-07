@@ -1,0 +1,21 @@
+{
+  "name": "@hitchhiker/devtools-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=iife --platform=browser --target=safari17 --outfile=dist/plugin.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@hitchhiker/core": "workspace:0.1.0",
+    "@hitchhiker/plugin-sdk": "workspace:0.1.0",
+    "@hitchhiker/ui": "workspace:0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

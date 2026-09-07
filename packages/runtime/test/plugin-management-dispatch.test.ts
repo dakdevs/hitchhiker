@@ -47,6 +47,7 @@ const withDispatcher = async (
     dispatch: ReturnType<typeof createPluginDispatcher>,
     grants: GrantStoreApi,
     grantId: string,
+    token: string,
   ) => Effect.Effect<unknown, unknown>,
 ) => {
   const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-management-"));
@@ -75,7 +76,7 @@ const withDispatcher = async (
           release: Effect.void,
           ...(management === undefined ? {} : { management }),
         });
-        return yield* run ? run(dispatch, grants, issued.grant.id) : Effect.void;
+        return yield* run ? run(dispatch, grants, issued.grant.id, issued.token) : Effect.void;
       }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
     );
   } finally {
@@ -206,6 +207,99 @@ test("malformed management commands never reach an available authorized port", a
         assert.equal(yield* failure(dispatch("plugins.replaceSelf", params)), true);
       assert.equal(yield* failure(dispatch("plugins.snapshot", { extra: true })), true);
       assert.equal(calls, 0);
+    }),
+  );
+});
+
+test("DevTools calls require declared profile-wide authority, validate exact inputs, and recheck revocation", async () => {
+  const calls: string[] = [];
+  const devtools = {
+    status: (pageId: string) =>
+      Effect.sync(
+        () => (
+          calls.push(`status:${pageId}`),
+          { pageId, generation: 1, instance: 1, state: "open" as const }
+        ),
+      ),
+    show: (pageId: string, inspectAt?: { readonly x: number; readonly y: number }) =>
+      Effect.sync(
+        () => (
+          calls.push(`show:${pageId}:${inspectAt?.x ?? ""}`),
+          { pageId, generation: 1, instance: 1, state: "opening" as const }
+        ),
+      ),
+    close: (pageId: string) =>
+      Effect.sync(
+        () => (
+          calls.push(`close:${pageId}`),
+          { pageId, generation: 1, instance: 1, state: "closing" as const }
+        ),
+      ),
+  };
+  await withDispatcher(["devtools.manage"], undefined, (_dispatch, grants, grantId, token) => {
+    const dispatch = createPluginDispatcher({
+      manifest: {
+        id: "presenter",
+        name: "Presenter",
+        version: "1.2.3",
+        capabilities: ["devtools.manage"],
+      },
+      profileId: "default",
+      token,
+      grants,
+      browser,
+      publish: () => Effect.succeed(1),
+      release: Effect.void,
+      devtools,
+    });
+    return Effect.gen(function* () {
+      assert.deepEqual(yield* dispatch("devtools.status", { pageId: "page" }), {
+        pageId: "page",
+        generation: 1,
+        instance: 1,
+        state: "open",
+      });
+      assert.deepEqual(
+        yield* dispatch("devtools.show", { pageId: "page", inspectAt: { x: 2, y: 3 } }),
+        { pageId: "page", generation: 1, instance: 1, state: "opening" },
+      );
+      assert.equal(
+        yield* failure(dispatch("devtools.show", { pageId: "page", inspectAt: { x: -1, y: 0 } })),
+        true,
+      );
+      assert.equal(
+        yield* failure(dispatch("devtools.status", { pageId: "page", extra: true })),
+        true,
+      );
+      yield* grants.revoke(grantId);
+      assert.equal(yield* failure(dispatch("devtools.close", { pageId: "page" })), true);
+      assert.deepEqual(calls, ["status:page", "show:page:2"]);
+    });
+  });
+  await withDispatcher(["browser.full-control"], undefined, (_dispatch, grants, _grantId, token) =>
+    Effect.gen(function* () {
+      const dispatch = createPluginDispatcher({
+        manifest: {
+          id: "presenter",
+          name: "Presenter",
+          version: "1.2.3",
+          capabilities: ["browser.full-control"],
+        },
+        profileId: "default",
+        token,
+        grants,
+        browser,
+        publish: () => Effect.succeed(1),
+        release: Effect.void,
+        devtools,
+      });
+      assert.deepEqual(yield* dispatch("devtools.close", { pageId: "page" }), {
+        pageId: "page",
+        generation: 1,
+        instance: 1,
+        state: "closing",
+      });
+      assert.equal(yield* failure(dispatch("devtools.status", { pageId: "page" })), false);
     }),
   );
 });

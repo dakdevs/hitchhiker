@@ -95,6 +95,20 @@ void SimpleHandler::OnBeforePopupAborted(CefRefPtr<CefBrowser> browser,
   FinishPendingPopup(browser->GetIdentifier());
 }
 
+void SimpleHandler::OnBeforeDevToolsPopup(
+    CefRefPtr<CefBrowser> browser,
+    CefWindowInfo&,
+    CefRefPtr<CefClient>&,
+    CefBrowserSettings&,
+    CefRefPtr<CefDictionaryValue>&,
+    bool*) {
+  CEF_REQUIRE_UI_THREAD();
+  // DevTools bypasses OnBeforePopup. The existing aggregate is keyed only by
+  // opener, so OnAfterCreated and opener teardown drain mixed popup kinds.
+  ++pending_popups_by_opener_[browser->GetIdentifier()];
+  ++pending_popup_count_;
+}
+
 void SimpleHandler::OnTitleChange(CefRefPtr<CefBrowser> browser,
                                   const CefString& title) {
   CEF_REQUIRE_UI_THREAD();
