@@ -80,3 +80,33 @@ The default plugin also needs a native local-directory picker whose public resul
 ID. The chosen path remains private. SDK and MCP upload clients use the same coordinator, and the
 default extension UI uses the same public API as third-party plugins. A new default cohort must
 preserve old grants rather than silently adding installation authority.
+
+## Durable ownership integration
+
+The internal manager now writes registry V2 source ownership. V1 records load as `legacy-local`;
+owner-bound preparation records the authenticated principal and immutable grant ID. Existing local
+review callers cannot approve public records. Owner-bound review, confirmation and cancellation
+compare the exact source after restart, as well as rechecking live authority.
+Profile identity remains bound by the manager's canonical profile and held lease.
+
+The existing profile-wide inventory and removal contract remains separate: authorized management
+can remove enabled extensions regardless of original installer, while unsubmitted reviews require
+owner-bound cancellation. Source credentials must not appear in the public inventory projection.
+
+V2 requires an explicit source on every record. V1 records with unexpected source fields are invalid;
+they are not silently downgraded to legacy ownership. A write migrates validated V1 records to V2
+without resetting installation state or recovery attempts. Principal and grant identifiers are bounded
+to 256 characters. This is an internal persistence format, not a plugin storage API.
+
+Preparation checks live authority before copying and again before recording durable review state.
+Review checks before and after artifact verification. Confirmation checks after verification inside
+the manager lock and profile lease, immediately before durable install intent. Once admitted, the
+existing installation settlement and restart recovery remain authoritative. Public coordinator wiring
+and automatic owner-revocation cleanup are still pending.
+
+Coordinator integration must use an owner-required preparation wrapper, discover only the requesting
+owner's pending records, and persist any operation-ID mapping needed after restart. A separate trusted
+abandonment path must match exact ownership while permitting cleanup after revocation; public cancel
+must continue requiring live authority. Reconcile existing grants at startup as well as watching
+revocation events. Legacy controls must suppress actions for public pending reviews. These requirements
+remain open and are not satisfied by the manager's new optional owner argument.

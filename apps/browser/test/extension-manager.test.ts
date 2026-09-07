@@ -656,3 +656,208 @@ test("successful removal clears a prior install or remove error intent", async (
     }
   }
 });
+
+test("migrates legacy records and binds public reviews to their exact persisted owner", async () => {
+  const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-extension-owner-")));
+  try {
+    const item = artifact(profile);
+    await seedRegistry(profile, item, "error", "install");
+    const legacy = await Effect.runPromise(
+      createExtensionManager({
+        profileRoot: profile,
+        lease: lease(profile),
+        artifacts: store(item),
+        engine: engine(),
+      }),
+    );
+    await Effect.runPromise(legacy.reviewPrepared(item.installationId, item.digest));
+    await assert.rejects(
+      Effect.runPromise(
+        legacy.reviewPrepared(item.installationId, item.digest, {
+          principal: "plugin-a",
+          grantId: "grant-a",
+          authorize: Effect.void,
+        }),
+      ),
+    );
+
+    const owner = { principal: "plugin-a", grantId: "g".repeat(200), authorize: Effect.void };
+    const publicItem = artifact(profile, "c".repeat(32));
+    const first = await Effect.runPromise(
+      createExtensionManager({
+        profileRoot: profile,
+        lease: lease(profile),
+        artifacts: store(publicItem),
+        engine: engine(),
+      }),
+    );
+    await Effect.runPromise(first.previewLocal("/owner-selected", owner));
+    const persisted = JSON.parse(
+      await readFile(join(profile, "hitchhiker-extensions", "extensions.json"), "utf8"),
+    );
+    assert.equal(persisted.version, 2);
+    assert.deepEqual(
+      persisted.extensions.find(
+        (entry: { artifact: { installationId: string } }) =>
+          entry.artifact.installationId === item.installationId,
+      ).source,
+      "legacy-local",
+    );
+    assert.equal(
+      persisted.extensions.find(
+        (entry: { artifact: { installationId: string } }) =>
+          entry.artifact.installationId === item.installationId,
+      ).state,
+      "error",
+    );
+    const loads: string[] = [];
+    const restarted = await Effect.runPromise(
+      createExtensionManager({
+        profileRoot: profile,
+        lease: lease(profile),
+        artifacts: store(publicItem),
+        engine: engine({ loads }),
+      }),
+    );
+    await assert.rejects(
+      Effect.runPromise(
+        restarted.reviewPrepared(publicItem.installationId, publicItem.digest, {
+          principal: "plugin-a",
+          grantId: "wrong-grant",
+          authorize: Effect.void,
+        }),
+      ),
+    );
+    const foreign = { principal: "plugin-b", grantId: owner.grantId, authorize: Effect.void };
+    for (const denied of [undefined, foreign, { ...owner, grantId: "wrong-grant" }]) {
+      await assert.rejects(
+        Effect.runPromise(
+          restarted.reviewPrepared(publicItem.installationId, publicItem.digest, denied),
+        ),
+      );
+      await assert.rejects(
+        Effect.runPromise(
+          restarted.confirmInstall(publicItem.installationId, publicItem.digest, denied),
+        ),
+      );
+      await assert.rejects(
+        Effect.runPromise(
+          restarted.cancelPreview(publicItem.installationId, publicItem.digest, denied),
+        ),
+      );
+    }
+    assert.deepEqual(loads, []);
+    assert.equal(
+      (await Effect.runPromise(restarted.list())).find(
+        (entry) => entry.installationId === publicItem.installationId,
+      )?.state,
+      "prepared",
+    );
+    await Effect.runPromise(
+      restarted.confirmInstall(publicItem.installationId, publicItem.digest, owner),
+    );
+    const enabled = JSON.parse(
+      await readFile(join(profile, "hitchhiker-extensions", "extensions.json"), "utf8"),
+    ).extensions.find(
+      (entry: { artifact: { installationId: string } }) =>
+        entry.artifact.installationId === publicItem.installationId,
+    );
+    assert.equal(enabled.state, "enabled");
+    assert.deepEqual(enabled.source, { principal: owner.principal, grantId: owner.grantId });
+  } finally {
+    await rm(profile, { recursive: true, force: true });
+  }
+});
+
+test("revoked public authority after staging or verification cannot admit installation", async () => {
+  const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-extension-revoked-")));
+  try {
+    const item = artifact(profile);
+    const discarded: string[] = [];
+    let admitted = true;
+    let revokeDuringStage = true;
+    let revokeDuringRead = false;
+    const artifacts = {
+      ...store(item),
+      stage: () =>
+        Effect.sync(() => {
+          if (revokeDuringStage) admitted = false;
+          return item;
+        }),
+      read: () =>
+        Effect.sync(() => {
+          if (revokeDuringRead) admitted = false;
+          return item;
+        }),
+      discardUnused: (id: string) => Effect.sync(() => discarded.push(id)),
+    } satisfies ExtensionArtifactStore;
+    const loads: string[] = [];
+    const owner = {
+      principal: "plugin-a",
+      grantId: "grant-a",
+      authorize: Effect.suspend(() => (admitted ? Effect.void : Effect.fail("revoked"))),
+    };
+    const manager = await Effect.runPromise(
+      createExtensionManager({
+        profileRoot: profile,
+        lease: lease(profile),
+        artifacts,
+        engine: engine({ loads }),
+      }),
+    );
+    await assert.rejects(Effect.runPromise(manager.previewLocal("/revoked", owner)));
+    assert.deepEqual(discarded, [item.installationId]);
+    admitted = true;
+    revokeDuringStage = false;
+    await Effect.runPromise(manager.previewLocal("/admitted", owner));
+    revokeDuringRead = true;
+    await assert.rejects(
+      Effect.runPromise(manager.confirmInstall(item.installationId, item.digest, owner)),
+    );
+    admitted = true;
+    await assert.rejects(
+      Effect.runPromise(manager.reviewPrepared(item.installationId, item.digest, owner)),
+    );
+    assert.equal(admitted, false);
+    assert.deepEqual(loads, []);
+    assert.equal((await Effect.runPromise(manager.list()))[0]?.state, "prepared");
+  } finally {
+    await rm(profile, { recursive: true, force: true });
+  }
+});
+
+test("rejects V2 records without source metadata and V1 records carrying public source", async () => {
+  const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-extension-schema-")));
+  try {
+    const item = artifact(profile);
+    const registryDirectory = join(profile, "hitchhiker-extensions");
+    await mkdir(registryDirectory, { mode: 0o700 });
+    const record = {
+      artifact: { ...item, directory: undefined },
+      state: "prepared",
+      recoveryAttempts: 0,
+    };
+    const writeRegistry = async (value: unknown) => {
+      const path = join(registryDirectory, "extensions.json");
+      await writeFile(path, JSON.stringify(value), { mode: 0o600 });
+      await chmod(path, 0o600);
+    };
+    const manager = await Effect.runPromise(
+      createExtensionManager({
+        profileRoot: profile,
+        lease: lease(profile),
+        artifacts: store(item),
+        engine: engine(),
+      }),
+    );
+    await writeRegistry({ version: 2, extensions: [record] });
+    await assert.rejects(Effect.runPromise(manager.list()));
+    await writeRegistry({
+      version: 1,
+      extensions: [{ ...record, source: { principal: "plugin-a", grantId: "grant-a" } }],
+    });
+    await assert.rejects(Effect.runPromise(manager.list()));
+  } finally {
+    await rm(profile, { recursive: true, force: true });
+  }
+});

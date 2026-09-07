@@ -4,9 +4,14 @@ Hitchhiker's developer build manages local unpacked Manifest V3 extensions. Chro
 Chromium; Hitchhiker plugins compose the surrounding Native interface. They have separate permission
 systems and installation controls.
 
-## Install a local extension
+## Install a local extension in the legacy developer interface
 
-1. Open **Settings → Chrome extensions** in the default interface.
+These controls currently exist only in the legacy controller interface used by developer `--plugin`
+launches. The normal composed default interface does not expose installation yet. Safe mode also
+uses the legacy interface but deliberately omits extension management. See
+[development modes](DEVELOPMENT.md) and the [public installation plan](EXTENSION-INSTALL-PLAN.md).
+
+1. Open **Settings → Chrome extensions** in the legacy developer interface.
 2. Enter the absolute path to an unpacked extension directory containing `manifest.json`.
 3. Choose **Review extension**. Hitchhiker copies the package into private profile storage and shows
    its name, version, Chromium ID, SHA-256 digest, required permissions and site access, and optional

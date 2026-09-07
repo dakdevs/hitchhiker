@@ -52,8 +52,23 @@ const Artifact = Schema.Struct({
   ),
 });
 type StoredArtifact = typeof Artifact.Type;
+const PublicSource = Schema.Struct({
+  principal: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+  grantId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+});
+const Source = Schema.Union([Schema.Literal("legacy-local"), PublicSource]);
+const StoredV1 = Schema.Struct({
+  artifact: Artifact,
+  state: State,
+  /** Number of replay attempts after a durable installing intent. */
+  recoveryAttempts: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  chromiumId: Schema.optional(Schema.String.check(Schema.isPattern(ChromiumId))),
+  error: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024))),
+  errorIntent: Schema.optional(ErrorIntent),
+});
 const Stored = Schema.Struct({
   artifact: Artifact,
+  source: Source,
   state: State,
   /** Number of replay attempts after a durable installing intent. */
   recoveryAttempts: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
@@ -63,11 +78,18 @@ const Stored = Schema.Struct({
 });
 type StoredExtension = typeof Stored.Type;
 const RegistrySchema = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literal(2),
   extensions: Schema.Array(Stored).check(Schema.isMaxLength(MaxExtensions)),
+});
+const RegistryV1Schema = Schema.Struct({
+  version: Schema.Literal(1),
+  extensions: Schema.Array(StoredV1).check(Schema.isMaxLength(MaxExtensions)),
 });
 type Registry = typeof RegistrySchema.Type;
 const decodeRegistry = Schema.decodeUnknownOption(RegistrySchema, { onExcessProperty: "error" });
+const decodeRegistryV1 = Schema.decodeUnknownOption(RegistryV1Schema, {
+  onExcessProperty: "error",
+});
 
 export interface ManagedExtension {
   readonly installationId: string;
@@ -87,24 +109,33 @@ export interface ManagedExtension {
 /** Immutable metadata shown in a native local permission review. No filesystem path is exposed. */
 export type ExtensionPreview = Omit<ExtensionArtifact, "directory">;
 
+export interface ExtensionOwner {
+  readonly principal: string;
+  readonly grantId: string;
+  readonly authorize: Effect.Effect<void, unknown>;
+}
 export interface ExtensionManager {
   /** Stage a local directory and make its immutable permission review durable. */
   readonly previewLocal: (
     sourceDirectory: string,
+    owner?: ExtensionOwner,
   ) => Effect.Effect<ExtensionPreview, ExtensionManagerError>;
   /** Re-open a persisted, unsubmitted review without accepting a new local path. */
   readonly reviewPrepared: (
     installationId: string,
     digest: string,
+    owner?: ExtensionOwner,
   ) => Effect.Effect<ExtensionPreview, ExtensionManagerError>;
   /** Explicit native confirmation only. The exact reviewed artifact identity is required. */
   readonly confirmInstall: (
     installationId: string,
     digest: string,
+    owner?: ExtensionOwner,
   ) => Effect.Effect<void, ExtensionManagerError>;
   readonly cancelPreview: (
     installationId: string,
     digest: string,
+    owner?: ExtensionOwner,
   ) => Effect.Effect<void, ExtensionManagerError>;
   readonly remove: (
     installationId: string,
@@ -175,7 +206,7 @@ const display = (stored: StoredExtension): ManagedExtension => ({
               : "Needs attention"),
 });
 const replace = (registry: Registry, entry: StoredExtension): Registry => ({
-  version: 1,
+  version: 2,
   extensions: [
     ...registry.extensions.filter(
       (item) => item.artifact.installationId !== entry.artifact.installationId,
@@ -326,19 +357,31 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
       },
       catch: () => failure("Extension registry is invalid"),
     });
-    if (text === undefined) return { version: 1, extensions: [] } satisfies Registry;
+    if (text === undefined) return { version: 2, extensions: [] } satisfies Registry;
     const parsed = yield* Effect.try({
       try: () => JSON.parse(text),
       catch: () => failure("Extension registry is invalid"),
     });
     const decoded = decodeRegistry(parsed);
+    const legacy = decodeRegistryV1(parsed);
+    const registry = Option.isSome(decoded)
+      ? decoded.value
+      : Option.isSome(legacy)
+        ? {
+            version: 2 as const,
+            extensions: legacy.value.extensions.map((entry) => ({
+              ...entry,
+              source: "legacy-local" as const,
+            })),
+          }
+        : undefined;
     if (
-      Option.isNone(decoded) ||
-      new Set(decoded.value.extensions.map((item) => item.artifact.installationId)).size !==
-        decoded.value.extensions.length
+      !registry ||
+      new Set(registry.extensions.map((item) => item.artifact.installationId)).size !==
+        registry.extensions.length
     )
       return yield* failure("Extension registry is invalid");
-    return decoded.value;
+    return registry;
   });
   const save = (registry: Registry) =>
     Effect.tryPromise({
@@ -430,6 +473,28 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
     if (!entry || (digest !== undefined && entry.artifact.digest !== digest)) return undefined;
     return entry;
   };
+  const decodePublicSource = Schema.decodeUnknownOption(PublicSource, {
+    onExcessProperty: "error",
+  });
+  const ownerSource = (owner: ExtensionOwner | undefined) =>
+    owner === undefined
+      ? Option.none()
+      : decodePublicSource({ principal: owner.principal, grantId: owner.grantId });
+  const access = (entry: StoredExtension, owner: ExtensionOwner | undefined) => {
+    if (entry.source === "legacy-local") return owner === undefined;
+    const source = ownerSource(owner);
+    return (
+      Option.isSome(source) &&
+      entry.source.principal === source.value.principal &&
+      entry.source.grantId === source.value.grantId
+    );
+  };
+  const authorizeOwner = (owner: ExtensionOwner | undefined) =>
+    owner === undefined
+      ? Effect.void
+      : owner.authorize.pipe(
+          Effect.mapError(() => failure("Extension installation is not authorized")),
+        );
   const verifyArtifact = (entry: StoredExtension) =>
     options.artifacts.read(entry.artifact.installationId, entry.artifact.digest).pipe(
       Effect.mapError((error) => failure(`Extension artifact is unavailable: ${error.message}`)),
@@ -440,18 +505,31 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
       ),
     );
 
-  const previewLocal = (sourceDirectory: string) =>
+  const previewLocal = (sourceDirectory: string, owner?: ExtensionOwner) =>
     command(
       Effect.gen(function* () {
         // Validate the durable registry before copying an untrusted tree.
         const registry = yield* load();
         if (registry.extensions.length >= MaxExtensions)
           return yield* failure("The extension registry is full");
+        const source = ownerSource(owner);
+        if (owner !== undefined && Option.isNone(source))
+          return yield* failure("Invalid extension owner");
+        yield* authorizeOwner(owner);
         const artifact = yield* options.artifacts
           .stage(sourceDirectory)
           .pipe(Effect.mapError((error) => failure(error.message)));
+        yield* authorizeOwner(owner).pipe(
+          Effect.catch((error) =>
+            options.artifacts.discardUnused(artifact.installationId, artifact.digest).pipe(
+              Effect.mapError(() => error),
+              Effect.andThen(Effect.fail(error)),
+            ),
+          ),
+        );
         const entry: StoredExtension = {
           artifact: storedArtifact(artifact),
+          source: Option.isSome(source) ? source.value : "legacy-local",
           state: "prepared",
           recoveryAttempts: 0,
         };
@@ -470,7 +548,7 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
         return preview(artifact);
       }),
     );
-  const reviewPrepared = (installationId: string, digest: string) =>
+  const reviewPrepared = (installationId: string, digest: string, owner?: ExtensionOwner) =>
     command(
       Effect.gen(function* () {
         if (!InstallationId.test(installationId) || !Digest.test(digest))
@@ -478,14 +556,18 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
         const entry = lookup(yield* load(), installationId, digest);
         if (
           !entry ||
+          !access(entry, owner) ||
           (entry.state !== "prepared" &&
             !(entry.state === "error" && entry.errorIntent === "install"))
         )
           return yield* failure("That extension is not awaiting a local install review");
-        return preview(yield* verifyArtifact(entry));
+        yield* authorizeOwner(owner);
+        const artifact = yield* verifyArtifact(entry);
+        yield* authorizeOwner(owner);
+        return preview(artifact);
       }),
     );
-  const confirmInstall = (installationId: string, digest: string) =>
+  const confirmInstall = (installationId: string, digest: string, owner?: ExtensionOwner) =>
     command(
       Effect.gen(function* () {
         if (!InstallationId.test(installationId) || !Digest.test(digest))
@@ -494,11 +576,13 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
         const entry = lookup(registry, installationId, digest);
         if (
           !entry ||
+          !access(entry, owner) ||
           (entry.state !== "prepared" &&
             !(entry.state === "error" && entry.errorIntent === "install"))
         )
           return yield* failure("That reviewed extension is no longer ready to install");
         const artifact = yield* verifyArtifact(entry);
+        yield* authorizeOwner(owner);
         const installing: StoredExtension = {
           ...entry,
           state: "installing",
@@ -550,17 +634,18 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
         );
       }),
     );
-  const cancelPreview = (installationId: string, digest: string) =>
+  const cancelPreview = (installationId: string, digest: string, owner?: ExtensionOwner) =>
     command(
       Effect.gen(function* () {
         if (!InstallationId.test(installationId) || !Digest.test(digest))
           return yield* failure("Invalid extension identity");
         const registry = yield* load();
         const entry = lookup(registry, installationId, digest);
-        if (!entry || entry.state !== "prepared")
+        if (!entry || !access(entry, owner) || entry.state !== "prepared")
           return yield* failure("Only an unsubmitted permission review can be cancelled");
+        yield* authorizeOwner(owner);
         yield* save({
-          version: 1,
+          version: 2,
           extensions: registry.extensions.filter((item) => item !== entry),
         });
         // Registry removal is the durable decision. If cleanup fails or the
@@ -660,7 +745,7 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
       )
     ) {
       latest = {
-        version: 1,
+        version: 2,
         extensions: latest.extensions.map((entry) =>
           entry.state === "removing" || (entry.state === "error" && entry.errorIntent === "remove")
             ? {
@@ -697,7 +782,7 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
       )
     ) {
       latest = {
-        version: 1,
+        version: 2,
         extensions: latest.extensions.filter(
           (entry) => entry.state !== "removed" || !collectedIds.has(entry.artifact.installationId),
         ),

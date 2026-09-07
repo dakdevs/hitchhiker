@@ -758,3 +758,14 @@ identity and clean exit. A fixture-only stdin wait was removed after it caused a
 successful approval. These primitives still require an owner-bound background coordinator, public
 SDK/MCP contracts, durable source ownership and a default extension plugin. The
 [installation plan](EXTENSION-INSTALL-PLAN.md) records those boundaries and verification evidence.
+
+The extension manager now persists V2 review ownership and strictly migrates source-free V1 records
+as legacy-local. Public-source review, confirmation and cancellation require the same principal and
+grant ID after restart; legacy calls cannot act on them. Authority is rechecked after staging and
+artifact verification, before durable preparation or installation intent. The manager suite covers
+malformed ownership records, migration, foreign and wrong-grant denial, source retention and
+revocation during staging/verification. Two real Chromium developer/installed plugin inventory and
+removal regressions pass with disposable test Keychains and clean exits
+(`work/extension-owner-native-regression.log`). Independent review found no manager blocker; owner
+pending discovery, revoked-owner abandonment, operation recovery and public/default-plugin wiring
+remain in the [installation plan](EXTENSION-INSTALL-PLAN.md).
