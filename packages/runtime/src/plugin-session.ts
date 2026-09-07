@@ -4,11 +4,17 @@ import { LivePluginManifest, createPluginDispatcher } from "./plugin-dispatch.ts
 import { spawnPluginHost } from "./plugin.ts";
 import { makePluginDomSession } from "./plugin-dom.ts";
 import type { ScopedDomDriver } from "./scoped-dom.ts";
+import type { ExtensionManagementApi } from "./extension-management.ts";
 
-export interface LivePluginOptions extends Omit<PluginDispatchOptions, "manifest" | "dom"> {
+export interface LivePluginOptions extends Omit<
+  PluginDispatchOptions,
+  "manifest" | "dom" | "extensions"
+> {
   readonly manifest: unknown;
   /** Shared trusted browser adapter. A finite reference session is created per plugin activation. */
   readonly dom?: ScopedDomDriver;
+  /** Owner-bound extension management port; installation review remains native-only. */
+  readonly extensions?: ExtensionManagementApi;
   readonly executable: string;
   readonly code: string;
   readonly events: Stream.Stream<{ readonly event: string; readonly payload: unknown }, unknown>;

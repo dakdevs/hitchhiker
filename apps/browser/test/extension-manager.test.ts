@@ -13,9 +13,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Effect } from "effect";
+import { Deferred, Effect, Fiber } from "effect";
 import { EngineError } from "@hitchhiker/runtime";
 import { createExtensionManager } from "../src/extension-manager.ts";
+import { createExtensionManagement } from "../src/extension-management.ts";
 import type { ExtensionArtifact, ExtensionArtifactStore } from "../src/extension-artifacts.ts";
 import type { ProfileWriteLease } from "../src/profile-write-lease.ts";
 
@@ -79,7 +80,7 @@ const seedRegistry = async (
   profile: string,
   item: ExtensionArtifact,
   state: "removing" | "removed" | "error",
-  errorIntent?: "remove",
+  errorIntent?: "install" | "remove",
 ) => {
   const directory = join(profile, "hitchhiker-extensions");
   await mkdir(directory, { mode: 0o700 });
@@ -245,20 +246,30 @@ test("raw CDP read-only handoff serializes after existing work and refuses exten
   const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-extension-manager-")));
   try {
     const item = artifact(profile);
+    const uninstalls: string[] = [];
     const manager = await Effect.runPromise(
       createExtensionManager({
         profileRoot: profile,
         lease: lease(profile),
         artifacts: store(item),
-        engine: engine(),
+        engine: engine({ uninstalls }),
       }),
     );
+    await Effect.runPromise(manager.previewLocal("/local/developer-selected-extension"));
+    await Effect.runPromise(manager.confirmInstall(id, digest));
     await Effect.runPromise(manager.enterReadOnly());
     assert.equal(await Effect.runPromise(manager.isReadOnly()), true);
     const denied = await Effect.runPromise(
       manager.previewLocal("/local/developer-selected-extension").pipe(Effect.result),
     );
     assert.equal(denied._tag, "Failure");
+    const api = createExtensionManagement(manager, () => Effect.void).forOwner(() => Effect.void);
+    const inventory = await Effect.runPromise(api.list());
+    assert.equal(inventory.readOnly, true);
+    assert.equal(inventory.extensions[0]?.state, "enabled");
+    await assert.rejects(Effect.runPromise(api.remove(id)), /read-only/);
+    assert.deepEqual(uninstalls, []);
+    assert.equal((await Effect.runPromise(manager.list()))[0]?.state, "enabled");
   } finally {
     await rm(profile, { recursive: true, force: true });
   }
@@ -548,5 +559,100 @@ test("a corrupt registry-directory symlink never changes the target mode", async
     assert.equal((await stat(target)).mode & 0o777, 0o755);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("removal rechecks revoked authority after the manager queue without writing intent", async () => {
+  const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-extension-manager-")));
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let hold = false;
+        let allowed = true;
+        let checks = 0;
+        const uninstalls: string[] = [];
+        const manager = yield* createExtensionManager({
+          profileRoot: profile,
+          lease: {
+            ...lease(profile),
+            withWrite: (operation) =>
+              Effect.suspend(() =>
+                hold
+                  ? Deferred.succeed(entered, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                      Effect.andThen(operation),
+                    )
+                  : operation,
+              ),
+          },
+          artifacts: store(artifact(profile)),
+          engine: engine({ uninstalls }),
+        });
+        yield* manager.previewLocal("/local/developer-selected-extension");
+        yield* manager.confirmInstall(id, digest);
+        const before = yield* Effect.promise(() =>
+          readFile(join(profile, "hitchhiker-extensions", "extensions.json"), "utf8"),
+        );
+        hold = true;
+        const reader = yield* Effect.forkChild(manager.list());
+        yield* Deferred.await(entered);
+        const removal = yield* Effect.forkChild(
+          manager
+            .remove(
+              id,
+              Effect.suspend(() => {
+                checks += 1;
+                return allowed ? Effect.void : Effect.fail("revoked");
+              }),
+            )
+            .pipe(Effect.result),
+        );
+        yield* Effect.yieldNow;
+        assert.equal(checks, 0);
+        allowed = false;
+        hold = false;
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(reader);
+        assert.equal((yield* Fiber.join(removal))._tag, "Failure");
+        assert.equal(checks, 1);
+        assert.deepEqual(uninstalls, []);
+        assert.equal(
+          yield* Effect.promise(() =>
+            readFile(join(profile, "hitchhiker-extensions", "extensions.json"), "utf8"),
+          ),
+          before,
+        );
+      }).pipe(Effect.scoped, Effect.timeout(5_000)),
+    );
+  } finally {
+    await rm(profile, { recursive: true, force: true });
+  }
+});
+
+test("successful removal clears a prior install or remove error intent", async () => {
+  for (const intent of ["install", "remove"] as const) {
+    const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-extension-manager-")));
+    try {
+      const item = artifact(profile);
+      await seedRegistry(profile, item, "error", intent);
+      const uninstalls: string[] = [];
+      const manager = await Effect.runPromise(
+        createExtensionManager({
+          profileRoot: profile,
+          lease: lease(profile),
+          artifacts: store(item),
+          engine: engine({ uninstalls }),
+        }),
+      );
+      await Effect.runPromise(manager.remove(id, Effect.void));
+      const entry = (await Effect.runPromise(manager.list()))[0];
+      assert.equal(entry?.state, "removed");
+      assert.equal(entry?.errorIntent, undefined);
+      assert.deepEqual(uninstalls, [chromiumId]);
+    } finally {
+      await rm(profile, { recursive: true, force: true });
+    }
   }
 });

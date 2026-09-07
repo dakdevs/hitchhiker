@@ -110,7 +110,8 @@ owned windows. Explicit close can manage any inspector in the granted profile.
 
 Read the [complete DevTools reference](../../docs/DEVTOOLS.md) for exact coordinates, limits, grants,
 MCP equivalents, examples and verification boundaries. The [standalone plugin](../../apps/devtools-plugin/README.md)
-uses this public API. Default distribution integration, docking and frontend extensions remain open.
+uses this public API. Fresh V2 profiles bundle a separate default DevTools plugin. Docking and
+frontend extensions remain open.
 
 ## Page content
 
@@ -118,3 +119,11 @@ uses this public API. Default distribution integration, docking and frontend ext
 Declare `pages.read` for snapshots and `pages.write` for actions. References belong to one activation
 and expire or become stale after navigation; grant revocation is checked during operations. See the
 [DOM API reference](../../docs/PLUGIN-DOM.md) for signatures, examples, errors and limits.
+
+## Chrome-extension management
+
+`api.extensions.list()` requires `extensions.read`; `api.extensions.remove(installationId)` requires
+`extensions.manage`. Both return a bounded profile inventory containing reviewed manifest metadata
+and installation state. Installation and permission review still use the trusted local controls.
+Read the [extension API reference](../../docs/EXTENSIONS.md#public-inventory-and-removal) for MCP
+equivalents, raw-CDP restrictions, revocation and recovery semantics, and the compiled Native fixture.

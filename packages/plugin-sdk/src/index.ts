@@ -75,6 +75,32 @@ export interface PluginManagementSnapshot {
   readonly revision: number;
   readonly plugins: readonly PluginManagementPluginSummary[];
 }
+export type ExtensionState =
+  | "prepared"
+  | "installing"
+  | "enabled"
+  | "removing"
+  | "removed"
+  | "error";
+/** Managed extension metadata excludes artifact paths, host errors, and review authority. */
+export interface ExtensionManagementSummary {
+  readonly installationId: string;
+  readonly digest: string;
+  readonly expectedChromiumId: string;
+  readonly chromiumId?: string;
+  readonly name: string;
+  readonly version: string;
+  readonly permissions: readonly string[];
+  readonly hostPermissions: readonly string[];
+  readonly optionalPermissions: readonly string[];
+  readonly optionalHostPermissions: readonly string[];
+  readonly state: ExtensionState;
+  readonly errorIntent?: "install" | "remove";
+}
+export interface ExtensionManagementSnapshot {
+  readonly readOnly: boolean;
+  readonly extensions: readonly ExtensionManagementSummary[];
+}
 export type ServiceSnapshot =
   | { readonly available: false }
   | {
@@ -191,6 +217,10 @@ export interface PluginApi {
     uninstall(id: string): Promise<PluginManagementSnapshot>;
     replaceSelf(targetId: string, expectedRevision: number): Promise<PluginManagementSnapshot>;
   };
+  readonly extensions: {
+    list(): Promise<ExtensionManagementSnapshot>;
+    remove(installationId: string): Promise<ExtensionManagementSnapshot>;
+  };
   readonly ui: {
     /** Legacy whole-window API; aliases publishLayout for the configured layout in composition mode. */
     publish(surface: Omit<Surface, "identity">): Promise<{ readonly revision: number }>;
@@ -299,6 +329,11 @@ const api = (host: HostBridge): PluginApi =>
           targetId,
           expectedRevision,
         }),
+    }),
+    extensions: Object.freeze({
+      list: () => call<ExtensionManagementSnapshot>(host, "extensions.list", {}),
+      remove: (installationId: string) =>
+        call<ExtensionManagementSnapshot>(host, "extensions.remove", { installationId }),
     }),
     ui: Object.freeze({
       publish: (surface: Omit<Surface, "identity">) =>

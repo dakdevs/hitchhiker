@@ -20,6 +20,24 @@ const configuration: BrowserConfiguration = {
   alwaysAwakeOrigins: [],
 };
 const artifactHash = "a".repeat(64);
+const extensionSnapshot = {
+  readOnly: false,
+  extensions: [
+    {
+      installationId: "a".repeat(32),
+      digest: "b".repeat(64),
+      expectedChromiumId: "c".repeat(32),
+      chromiumId: "c".repeat(32),
+      name: "Managed extension",
+      version: "1.0.0",
+      permissions: ["storage"],
+      hostPermissions: ["https://example.test/*"],
+      optionalPermissions: [],
+      optionalHostPermissions: [],
+      state: "enabled" as const,
+    },
+  ],
+};
 
 const program = Effect.gen(function* () {
   const grants = yield* create({ directory });
@@ -69,6 +87,29 @@ const program = Effect.gen(function* () {
                 }
               : undefined,
         };
+  const extensions =
+    process.env.MCP_EXTENSION_API === "none"
+      ? undefined
+      : {
+          list: () =>
+            record({ operation: "extensions.list" }).pipe(
+              Effect.andThen(
+                process.env.MCP_EXTENSION_OUTPUT === "invalid"
+                  ? Effect.succeed({
+                      ...extensionSnapshot,
+                      status: "raw engine detail",
+                      path: "/secret",
+                    } as never)
+                  : process.env.MCP_EXTENSION_OUTPUT === "fail"
+                    ? Effect.fail(new Error("raw engine detail"))
+                    : Effect.succeed(extensionSnapshot),
+              ),
+            ),
+          remove: (installationId: string) =>
+            record({ operation: "extensions.remove", installationId }).pipe(
+              Effect.as({ ...extensionSnapshot, extensions: [] }),
+            ),
+        };
   yield* runMcpStdio({
     profileId: "profile",
     token,
@@ -83,6 +124,7 @@ const program = Effect.gen(function* () {
       setTabPlacement: () => Effect.void,
     },
     plugins,
+    extensions,
   });
 }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 

@@ -19,6 +19,11 @@ import {
   PluginManagementSnapshotSchema,
   type PluginManagementApi,
 } from "./plugin-management.ts";
+import {
+  ExtensionManagementInstallationIdSchema,
+  ExtensionManagementSnapshotSchema,
+  type ExtensionManagementApi,
+} from "./extension-management.ts";
 
 export const LivePluginManifest = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{1,62}$/)),
@@ -44,6 +49,8 @@ export const LivePluginManifest = Schema.Struct({
       "plugins.install",
       "plugins.read",
       "plugins.manage",
+      "extensions.read",
+      "extensions.manage",
       "devtools.manage",
       "browser.full-control",
       "cdp.connect",
@@ -129,6 +136,8 @@ export interface PluginDispatchOptions {
   readonly storage?: PluginStorageAdapter;
   /** Application-owned, owner-bound lifecycle port. Absent ports fail closed. */
   readonly management?: PluginManagementApi;
+  /** Trusted profile-bound Chrome extension manager; never exposes source paths or review confirmation. */
+  readonly extensions?: ExtensionManagementApi;
   /** Trusted profile-wide DevTools frontend adapter; absent adapters fail closed. */
   readonly devtools?: DevToolsApi;
   /** Activation-scoped DOM reference namespace. It is never a raw browser protocol bridge. */
@@ -432,6 +441,27 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
         return yield* options.management.replaceSelf(targetId, expectedRevision).pipe(
           Effect.mapError(denied),
           Effect.flatMap((snapshot) => decode(PluginManagementSnapshotSchema, snapshot)),
+        );
+      }
+      case "extensions.list": {
+        yield* authorize("extensions.read");
+        yield* decode(Schema.Record(Schema.String, Schema.Never), params);
+        if (!options.extensions) return yield* denied();
+        return yield* options.extensions.list().pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((snapshot) => decode(ExtensionManagementSnapshotSchema, snapshot)),
+        );
+      }
+      case "extensions.remove": {
+        yield* authorize("extensions.manage");
+        const { installationId } = yield* decode(
+          Schema.Struct({ installationId: ExtensionManagementInstallationIdSchema }),
+          params,
+        );
+        if (!options.extensions) return yield* denied();
+        return yield* options.extensions.remove(installationId).pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((snapshot) => decode(ExtensionManagementSnapshotSchema, snapshot)),
         );
       }
       case "configuration.set": {

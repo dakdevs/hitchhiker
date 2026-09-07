@@ -60,6 +60,15 @@ export { spawnPluginHost, PluginHostError } from "./plugin.ts";
 export type { PluginHostOptions } from "./plugin.ts";
 export { LivePluginManifest, PluginCallError, createPluginDispatcher } from "./plugin-dispatch.ts";
 export type { PluginDispatchOptions } from "./plugin-dispatch.ts";
+export {
+  ExtensionManagementSnapshotSchema,
+  ExtensionManagementSummarySchema,
+} from "./extension-management.ts";
+export type {
+  ExtensionManagementApi,
+  ExtensionManagementSnapshot,
+  ExtensionManagementSummary,
+} from "./extension-management.ts";
 export type {
   PluginManagementApi,
   PluginManagementPluginSummary,

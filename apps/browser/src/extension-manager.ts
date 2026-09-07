@@ -106,7 +106,10 @@ export interface ExtensionManager {
     installationId: string,
     digest: string,
   ) => Effect.Effect<void, ExtensionManagerError>;
-  readonly remove: (installationId: string) => Effect.Effect<void, ExtensionManagerError>;
+  readonly remove: (
+    installationId: string,
+    authorize?: Effect.Effect<void, unknown>,
+  ) => Effect.Effect<void, ExtensionManagerError>;
   readonly list: () => Effect.Effect<readonly ManagedExtension[], ExtensionManagerError>;
   /** Must run after engine readiness and before persisted browser pages are restored. */
   readonly restoreBeforePages: () => Effect.Effect<void, ExtensionManagerError>;
@@ -574,7 +577,7 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
           );
       }),
     );
-  const remove = (installationId: string) =>
+  const remove = (installationId: string, authorize: Effect.Effect<void, unknown> = Effect.void) =>
     command(
       Effect.gen(function* () {
         if (!InstallationId.test(installationId))
@@ -585,7 +588,17 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
           return yield* failure("Extension is not installed");
         if (entry.state === "prepared")
           return yield* failure("Cancel the unsubmitted permission review instead");
-        const removing: StoredExtension = { ...entry, state: "removing", error: undefined };
+        // Recheck caller authority after waiting for both the manager and profile lease.
+        // Once admitted, the lease preserves the durable removal transaction on cancellation.
+        yield* authorize.pipe(
+          Effect.mapError(() => failure("Extension removal is not authorized")),
+        );
+        const removing: StoredExtension = {
+          ...entry,
+          state: "removing",
+          error: undefined,
+          errorIntent: undefined,
+        };
         yield* save(replace(registry, removing));
         const id = entry.chromiumId ?? entry.artifact.expectedChromiumId;
         yield* options.engine.uninstall(id).pipe(

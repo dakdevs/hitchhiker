@@ -26,6 +26,15 @@ type DomApi = {
     readonly value: string;
   }) => Promise<{ readonly filled: true }>;
 };
+type ExtensionsApi = {
+  readonly list: () => Promise<{
+    readonly readOnly: boolean;
+    readonly extensions: readonly unknown[];
+  }>;
+  readonly remove: (
+    installationId: string,
+  ) => Promise<{ readonly readOnly: boolean; readonly extensions: readonly unknown[] }>;
+};
 type RegisteredPlugin = {
   readonly activate: (host: {
     readonly call: <A>(method: string, params: object) => Promise<A>;
@@ -33,7 +42,7 @@ type RegisteredPlugin = {
 };
 type Sdk = {
   readonly definePlugin: (plugin: {
-    readonly activate: (api: { readonly dom: DomApi }) => void;
+    readonly activate: (api: { readonly dom: DomApi; readonly extensions: ExtensionsApi }) => void;
   }) => void;
   readonly PluginApiError: new (code: string) => Error & { readonly code: string };
 };
@@ -42,7 +51,7 @@ const loadSdk = () =>
   import(new URL("../../plugin-sdk/src/index.ts", import.meta.url).href) as Promise<Sdk>;
 
 const withRegisteredPlugin = async <A>(
-  activate: (api: { readonly dom: DomApi }) => void,
+  activate: (api: { readonly dom: DomApi; readonly extensions: ExtensionsApi }) => void,
   run: (plugin: RegisteredPlugin) => Promise<A>,
 ): Promise<A> => {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, "HitchhikerPlugin");
@@ -102,6 +111,32 @@ test("SDK DOM bridge exposes frozen snapshot, click, and fill calls", async () =
     },
     { method: "dom.click", params: { pageId: "page-a", ref: "ref-a" } },
     { method: "dom.fill", params: { pageId: "page-a", ref: "ref-a", value: "done" } },
+  ]);
+});
+
+test("SDK extension bridge exposes list and remove without install or review calls", async () => {
+  let extensions: ExtensionsApi | undefined;
+  const calls: { readonly method: string; readonly params: object }[] = [];
+  const snapshot = { readOnly: false, extensions: [] } as const;
+  await withRegisteredPlugin(
+    (api) => {
+      extensions = api.extensions;
+    },
+    async (plugin) =>
+      plugin.activate({
+        call: async <A>(method: string, params: object): Promise<A> => {
+          calls.push({ method, params });
+          return snapshot as A;
+        },
+      }),
+  );
+  assert.ok(extensions);
+  assert(Object.isFrozen(extensions));
+  assert.deepEqual(await extensions.list(), snapshot);
+  assert.deepEqual(await extensions.remove("a".repeat(32)), snapshot);
+  assert.deepEqual(calls, [
+    { method: "extensions.list", params: {} },
+    { method: "extensions.remove", params: { installationId: "a".repeat(32) } },
   ]);
 });
 

@@ -56,8 +56,8 @@ export const pluginGuide: readonly GuideSection[] = [
         ],
         [
           "Chrome extensions",
-          "Trusted review, install, remove and restart replay",
-          "Management API planned",
+          "Local review/install; SDK and MCP list/remove; restart replay",
+          "Inventory and removal implemented",
         ],
         [
           "DevTools interface",
@@ -66,6 +66,19 @@ export const pluginGuide: readonly GuideSection[] = [
         ],
       ],
     },
+  },
+  {
+    id: "extension-management-api",
+    title: "Manage installed Chrome extensions",
+    paragraphs: [
+      "api.extensions.list() requires extensions.read; api.extensions.remove(installationId) requires extensions.manage. Declare the capability and obtain a grant for the profile. These permissions are profile-wide, not origin-scoped. Both methods return {readOnly, extensions}; removal includes the updated inventory under its manage grant. MCP exposes hitchhiker_extensions_list and hitchhiker_extension_remove with the same grant requirements.",
+      "Inventory contains up to 16 managed entries: installation ID, digest, expected and optional actual Chromium ID, name, version, four reviewed manifest permission arrays, state and optional error intent. It excludes local paths and raw engine errors. This is Hitchhiker's managed inventory, not Chromium-wide enumeration or live permission state. There is no change event yet. Refresh after user actions rather than continuously polling.",
+      "Removal is permanent rather than temporary disabling. It can remove extension data, and already-running page scripts are not retroactively undone. Authority is rechecked after waiting for the manager lock. An admitted operation may finish after cancellation or revocation, so refresh state before retrying an uncertain result. Plugin failures use sanitized PluginApiError code denied; a revoked plugin may stop before its handler runs.",
+      "Local staging and permission review remain private. Safe mode omits this adapter; raw-CDP mode allows inventory but refuses removal. Compiled developer and installed plugin fixtures verify real Chromium removal and content-script absence in a new fully loaded page, using disposable test Keychains. Installation APIs, change events, CRX/Web Store support and full extension compatibility remain unfinished.",
+    ],
+    code: `const inventory = await api.extensions.list();
+// Render entries with Native primitives; invoke on the user's Remove action.
+const updated = await api.extensions.remove(selectedInstallationId);`,
   },
   {
     id: "plugin-dom",

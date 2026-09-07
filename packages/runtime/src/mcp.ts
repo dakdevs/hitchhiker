@@ -3,6 +3,11 @@ import { Effect, Schema } from "effect";
 import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import type { GrantStoreApi } from "./grants.ts";
 import {
+  ExtensionManagementInstallationIdSchema,
+  ExtensionManagementSnapshotSchema,
+  type ExtensionManagementApi,
+} from "./extension-management.ts";
+import {
   DevToolsInspectPointSchema,
   DevToolsPageIdSchema,
   DevToolsStatusSchema,
@@ -62,6 +67,8 @@ export interface McpOptions {
   readonly grants: GrantStoreApi;
   readonly browser: McpBrowserApi;
   readonly plugins?: McpPluginApi;
+  /** Trusted profile-bound extension manager. It has no filesystem-path or install-review methods. */
+  readonly extensions?: ExtensionManagementApi;
   readonly dom?: ScopedDomDriver;
   /** Profile-wide Chromium DevTools frontend authority; never raw CDP. */
   readonly devtools?: DevToolsApi;
@@ -162,6 +169,27 @@ const tools = Toolkit.make(
   Tool.make("hitchhiker_tabs_set", {
     description: "Choose sidebar or top tabs in Hitchhiker's default interface.",
     parameters: Schema.Struct({ placement: Schema.Literals(["sidebar", "top"]) }),
+    success: Result,
+    failure: McpActionError,
+  }),
+);
+
+const extensionTools = Toolkit.make(
+  Tool.make("hitchhiker_extensions_list", {
+    description:
+      "List managed unpacked Chrome extensions for this profile. Results exclude artifact paths and engine errors.",
+    parameters: EmptyParameters,
+    success: Result,
+    failure: McpActionError,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("hitchhiker_extension_remove", {
+    description:
+      "Remove one managed unpacked Chrome extension by its opaque installation identity.",
+    parameters: Schema.Struct({ installationId: ExtensionManagementInstallationIdSchema }).annotate(
+      {
+        parseOptions: { onExcessProperty: "error" },
+      },
+    ),
     success: Result,
     failure: McpActionError,
   }),
@@ -587,5 +615,39 @@ export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (opt
       });
       yield* McpServer.registerToolkit(pluginPlanTools).pipe(Effect.provide(handlers));
     }
+  }
+  const extensions = options.extensions;
+  if (extensions !== undefined) {
+    const extensionHandlers = extensionTools.toLayer({
+      hitchhiker_extensions_list: () =>
+        authorized("extensions.read", extensions.list()).pipe(
+          Effect.flatMap((snapshot) =>
+            Schema.decodeUnknownEffect(ExtensionManagementSnapshotSchema, {
+              onExcessProperty: "error",
+            })(snapshot).pipe(
+              Effect.mapError(
+                () =>
+                  new McpActionError({ message: "The extension manager returned invalid data." }),
+              ),
+            ),
+          ),
+          Effect.flatMap(json),
+        ),
+      hitchhiker_extension_remove: ({ installationId }) =>
+        authorized("extensions.manage", extensions.remove(installationId)).pipe(
+          Effect.flatMap((snapshot) =>
+            Schema.decodeUnknownEffect(ExtensionManagementSnapshotSchema, {
+              onExcessProperty: "error",
+            })(snapshot).pipe(
+              Effect.mapError(
+                () =>
+                  new McpActionError({ message: "The extension manager returned invalid data." }),
+              ),
+            ),
+          ),
+          Effect.flatMap(json),
+        ),
+    });
+    yield* McpServer.registerToolkit(extensionTools).pipe(Effect.provide(extensionHandlers));
   }
 });

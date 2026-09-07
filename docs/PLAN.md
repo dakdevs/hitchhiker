@@ -717,3 +717,29 @@ install/remove and recovery exist, but no public SDK/MCP management port exists.
 [extension reference](EXTENSIONS.md#framework-api-availability) now distinguishes those trusted
 operations from public APIs. Public installation needs a separate artifact-transfer and review
 contract; exposing the private local-directory or confirmation methods is not that contract.
+
+### Public Chrome-extension inventory and removal
+
+Implemented `extensions.read` and `extensions.manage` profile capabilities, with SDK and MCP
+inventory/removal through one bounded public metadata contract. The trusted adapter binds each
+caller to current grants and rechecks removal authority inside the manager's serialization boundary
+before writing durable intent. Native local installation and permission review remain separate.
+Public responses exclude artifact paths, credentials and raw host error messages. Existing profile
+lease, raw-CDP read-only mode, safe-mode omission and uncertain-outcome shutdown remain enforced.
+Portable verification covers malformed requests, missing adapters, revocation while queued,
+profile/principal mismatch, metadata filtering, uncertain-outcome recovery and stale error-intent
+cleanup after a successful removal retry. Two real Native cases pass without skips for compiled
+developer and installed plugins: list the actual managed extension, remove it, and verify a new
+fully loaded document does not receive its content script. Both close with exit zero and no remaining
+host processes (`work/extension-plugin-native.log`). The fixtures use disposable mock-Keychain
+profiles, not production startup. The independent security review found no boundary blocker and
+identified the corrected error-intent cleanup. Full portable validation is recorded in
+`work/extension-plugin-full-check.log`: 418 tests pass, 36 Native-gated cases skip, and dependency,
+type, lint, formatting and build checks pass. The final read-only adapter assertion also passes
+browser typecheck and all 15 manager tests (`work/extension-manager-final.log`).
+
+The [public reference](EXTENSIONS.md#public-inventory-and-removal), SDK README and marketing-site
+guide document signatures, metadata bounds, profile grants, sanitized failures, soft MCP deadline
+delivery during an admitted durable transaction and the absence of change events. Installation
+still needs a public artifact-transfer and trusted review contract; replacing the private extension
+controls with a complete default plugin remains open.

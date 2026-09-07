@@ -33,6 +33,7 @@ import { acquireProfileWriteLease } from "./profile-write-lease.ts";
 import { createExtensionArtifactStore } from "./extension-artifacts.ts";
 import { createExtensionManager, type ExtensionManagerError } from "./extension-manager.ts";
 import type { BrowserExtensionControls } from "./extension-controls.ts";
+import { createExtensionManagement, type ExtensionManagement } from "./extension-management.ts";
 
 const argument = (name: string) => {
   const prefix = `${name}=`;
@@ -71,9 +72,10 @@ const program = Effect.gen(function* () {
     const browserExit = Effect.raceFirst(engine.exit, Deferred.await(fatalRecovery));
     const rawCdp = process.argv.includes("--cdp");
     let extensions: BrowserExtensionControls | undefined;
+    let extensionManagement: ExtensionManagement | undefined;
     if (!safeMode) {
       yield* engine.ready;
-      extensions = yield* Effect.gen(function* () {
+      const extensionServices = yield* Effect.gen(function* () {
         // Engine readiness excludes a surviving previous engine. The outer
         // descriptor lease excludes any previous controller filesystem writer.
         const artifacts = yield* createExtensionArtifactStore({ profileLease });
@@ -85,28 +87,30 @@ const program = Effect.gen(function* () {
         });
         yield* manager.restoreBeforePages();
         if (rawCdp) yield* manager.enterReadOnly();
+        const onFailure = (error: ExtensionManagerError) =>
+          error.restartRequired
+            ? Deferred.fail(
+                fatalRecovery,
+                new EngineError({ code: "extensions", message: error.message }),
+              ).pipe(Effect.asVoid)
+            : Effect.void;
         const checked = <A>(operation: Effect.Effect<A, ExtensionManagerError>) =>
-          operation.pipe(
-            Effect.tapError((error) =>
-              error.restartRequired
-                ? Deferred.fail(
-                    fatalRecovery,
-                    new EngineError({ code: "extensions", message: error.message }),
-                  )
-                : Effect.void,
-            ),
-          );
+          operation.pipe(Effect.tapError(onFailure));
         return {
-          list: manager.list,
-          previewLocal: (path: string) => checked(manager.previewLocal(path)),
-          reviewPrepared: (id: string, digest: string) =>
-            checked(manager.reviewPrepared(id, digest)),
-          confirmInstall: (id: string, digest: string) =>
-            checked(manager.confirmInstall(id, digest)),
-          cancelPreview: (id: string, digest: string) => checked(manager.cancelPreview(id, digest)),
-          remove: (id: string) => checked(manager.remove(id)),
-          readOnly: rawCdp,
-        } satisfies BrowserExtensionControls;
+          management: createExtensionManagement(manager, onFailure),
+          controls: {
+            list: manager.list,
+            previewLocal: (path: string) => checked(manager.previewLocal(path)),
+            reviewPrepared: (id: string, digest: string) =>
+              checked(manager.reviewPrepared(id, digest)),
+            confirmInstall: (id: string, digest: string) =>
+              checked(manager.confirmInstall(id, digest)),
+            cancelPreview: (id: string, digest: string) =>
+              checked(manager.cancelPreview(id, digest)),
+            remove: (id: string) => checked(manager.remove(id)),
+            readOnly: rawCdp,
+          } satisfies BrowserExtensionControls,
+        };
       }).pipe(
         Effect.catch((error) =>
           "restartRequired" in error && error.restartRequired
@@ -116,6 +120,8 @@ const program = Effect.gen(function* () {
               ).pipe(Effect.as(undefined)),
         ),
       );
+      extensions = extensionServices?.controls;
+      extensionManagement = extensionServices?.management;
     }
     const installedPluginMode =
       pluginExecutable !== undefined && !safeMode && pluginDirectory === undefined;
@@ -200,6 +206,7 @@ const program = Effect.gen(function* () {
         onRecoveryFailure: recoveryFailure,
         composition,
         management,
+        extensions: extensionManagement,
       });
       const manager = yield* createPluginManager({
         profileRoot: profileLease.profileRoot,
@@ -314,6 +321,7 @@ const program = Effect.gen(function* () {
         grants,
         controller,
         dom,
+        extensions: extensionManagement,
         onRecoveryFailure: recoveryFailure,
       }).pipe(
         Effect.catchCause(() => Effect.logError("Plugin stopped.")),
@@ -346,10 +354,23 @@ const program = Effect.gen(function* () {
           })
           .pipe(Effect.asVoid),
       );
+      const mcpIdentity = yield* grants.authenticate(token, { profileId: "default" });
+      const mcpExtensions = extensionManagement?.forOwner((capability) =>
+        grants
+          .authorize(token, { profileId: "default", capability })
+          .pipe(
+            Effect.flatMap((grant) =>
+              grant.principal === mcpIdentity.principal
+                ? Effect.void
+                : Effect.fail("MCP identity no longer authorized"),
+            ),
+          ),
+      );
       yield* Effect.raceFirst(
         browserExit,
         runMcpStdio({
           devtools,
+          extensions: mcpExtensions,
           profileId: "default",
           token,
           grants,

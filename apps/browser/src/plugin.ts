@@ -15,6 +15,7 @@ import type { BrowserComposition } from "./composition.ts";
 import type { PluginArtifact } from "./plugin-artifacts.ts";
 import type { InstalledPluginActivation } from "./plugin-manager.ts";
 import type { PluginManagement } from "./plugin-management.ts";
+import type { ExtensionManagement } from "./extension-management.ts";
 
 /** Captures only trusted services; persisted grant IDs never become wire credentials. */
 export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledPluginLauncher")(
@@ -26,6 +27,7 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
     readonly onRecoveryFailure?: Effect.Effect<void>;
     readonly composition?: BrowserComposition;
     readonly management?: PluginManagement;
+    readonly extensions?: ExtensionManagement;
   }) {
     const engine = yield* EngineConnection;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -93,6 +95,20 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
           pageWatch: pageWatch?.watch,
           storage: activation.storage,
           management: options.management?.forPlugin(artifact.manifest.id, () => managementActive),
+          extensions: options.extensions?.forOwner((capability) =>
+            boundGrants
+              .authorize("trusted-installed-grant", {
+                profileId: activation.profileId,
+                capability,
+              })
+              .pipe(
+                Effect.flatMap((grant) =>
+                  grant.principal === artifact.manifest.id
+                    ? Effect.void
+                    : Effect.fail("Plugin identity no longer authorized"),
+                ),
+              ),
+          ),
           publish: (surface) => options.controller.publishPluginSurface(owner, surface),
           release: composition
             ? composition.release(composedOwner)
@@ -185,6 +201,7 @@ export const runPluginDirectory = Effect.fn("Browser.runPluginDirectory")(functi
   readonly grants: GrantStoreApi;
   readonly controller: BrowserController;
   readonly dom?: ScopedDomDriver;
+  readonly extensions?: ExtensionManagement;
   readonly onRecoveryFailure?: Effect.Effect<void>;
 }) {
   const files = yield* readPluginPackage(options.directory);
@@ -235,6 +252,17 @@ export const runPluginDirectory = Effect.fn("Browser.runPluginDirectory")(functi
     : undefined;
   yield* runLivePlugin({
     dom: options.dom,
+    extensions: options.extensions?.forOwner((capability) =>
+      options.grants
+        .authorize(options.token, { profileId: "default", capability })
+        .pipe(
+          Effect.flatMap((grant) =>
+            grant.principal === manifest.id
+              ? Effect.void
+              : Effect.fail("Plugin identity no longer authorized"),
+          ),
+        ),
+    ),
     devtools,
     manifest,
     code,

@@ -92,6 +92,14 @@ const fakeApi = () => {
     throw new Error("This plugin must not invoke DevTools");
   };
   const api: PluginApi = {
+    extensions: {
+      list: async () => {
+        throw new Error("Unexpected extension API call");
+      },
+      remove: async () => {
+        throw new Error("Unexpected extension API call");
+      },
+    },
     dom: { snapshot: unexpectedDevTools, click: unexpectedDevTools, fill: unexpectedDevTools },
     devtools: { status: unexpectedDevTools, show: unexpectedDevTools, close: unexpectedDevTools },
     storage: {
