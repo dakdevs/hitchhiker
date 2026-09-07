@@ -394,3 +394,19 @@ fixture readiness deadline while machine load exceeded 550 (`work/live-compositi
 MCP implementation or readiness deadline changed in this checkpoint. The earlier transport-only
 check and focused composition checks passed. Dedicated CI and a focused readiness rerun are needed
 before calling the combined portable validation green.
+
+Code checkpoint `0ee787ad03fce0ccdd715ddecf9686bced50f93f` passed dedicated GitHub Check
+`34086901299`. The isolated MCP rerun passes all six tests in
+`work/live-composition-mcp-focused.log`. The final three-test native rerun is not green:
+`work/live-composition-native-final.log` records a browser fixture timeout and two worker startup
+failures. The earlier three-test native run passed before the final permit/cap review fixes.
+
+After the browser fixture timed out, its host remained alive for more than three minutes after
+`HITCHHIKER_SHELL_CLOSED`. A stack sample (`work/live-composition-native-hang.sample.txt`) places the
+main thread in CEF beneath `main+1888`; disassembly maps that return address to the call to
+`CefShutdown` (`work/live-composition-native-disassembly.txt`, address `0x10000c064`). This proves the
+observed hang is during CEF shutdown, not a still-open native window. It does not establish the
+underlying CEF/macOS cause. The sample also contains a Security/Keychain cleanup thread, which needs
+investigation rather than a Keychain bypass. The failed fixture host was explicitly killed after
+sampling; the test runner completed and no owned native/plugin host processes remained. Startup and
+shutdown reliability under load remains an open gate; no timing or isolation limit was relaxed.
