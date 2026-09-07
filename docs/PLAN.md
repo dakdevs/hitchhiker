@@ -30,6 +30,11 @@ toolchains, and security-sensitive browser automation. `AGENTS.md` is the planni
   profile identity, lifecycle/protection signals and viewport bindings. Default tab order, pinning,
   sidebar/top layout and per-interface selection belong to a replaceable first-party interface.
   Several viewports may show distinct pages concurrently; replacing UI must retain page identity.
+- September 6 clarification supersedes a monolithic first-party interface: every default product
+  feature must ship as a plugin using public APIs. Tab state, horizontal/vertical presentation and
+  pinning must be independently composable. DevTools must work by default and be customizable;
+  docs must map Chromium capabilities, security controls and CDP with grants and working examples.
+  See [PLUGIN-FIRST-PLAN.md](PLUGIN-FIRST-PLAN.md) for the required architecture correction.
 
 ## Current implementation
 

@@ -11,6 +11,52 @@ export interface GuideSection {
 
 export const pluginGuide: readonly GuideSection[] = [
   {
+    id: "plugin-architecture",
+    title: "A browser assembled from plugins",
+    paragraphs: [
+      "Hitchhiker is being built as a Chromium host with a shared Native design framework. The target default browser is a composition of plugins: a tab model, vertical or horizontal presentation, optional pinning, navigation, and developer tools. Those pieces must use the same public APIs as third-party plugins.",
+      "This migration is not complete. The current SDK can replace the whole interface, while the built-in controller still owns default tab behavior. Independently composed UI contributions, plugin services, and dependency-aware activation are the next framework work. Do not rely on those planned APIs until they appear in the reference.",
+    ],
+  },
+  {
+    id: "chromium-capabilities",
+    title: "Which Chromium controls are available?",
+    paragraphs: [
+      "Chromium runs the pages; the plugin host controls access to its services. A private native command, an MCP tool, and a plugin SDK method are different entry points. This table describes the current implementation, not the full planned API.",
+      "Hitchhiker capability grants are separate from Chromium site permissions. Raw CDP uses an explicitly authorized relay; browser.full-control does not include cdp.connect. Although a plugin manifest can declare cdp.connect, the plugin dispatcher does not yet expose a CDP method.",
+    ],
+    table: {
+      headings: ["Capability", "Available today", "Plugin SDK"],
+      rows: [
+        ["Pages", "List, open, navigate, close through plugins and MCP", "Implemented"],
+        ["Back / forward / reload / stop", "Private native host and default controller", "Planned"],
+        ["DOM inspection and interaction", "Scoped MCP snapshot, click and fill", "Planned"],
+        ["CDP", "Explicitly authorized raw relay and private host adapter", "Planned"],
+        [
+          "Cookies, storage and network",
+          "Chromium/CDP capabilities; no typed Hitchhiker service",
+          "Planned",
+        ],
+        ["Site permissions", "Chromium behavior; no public query/configuration service", "Planned"],
+        [
+          "Downloads",
+          "Native handler and page activity protection signal",
+          "Management API planned",
+        ],
+        [
+          "Chrome extensions",
+          "Trusted review, install, remove and restart replay",
+          "Management API planned",
+        ],
+        [
+          "DevTools interface",
+          "CEF primitives are available; host integration is unfinished",
+          "Default plugin planned",
+        ],
+      ],
+    },
+  },
+  {
     id: "workspace",
     title: "Create a plugin workspace",
     paragraphs: [
