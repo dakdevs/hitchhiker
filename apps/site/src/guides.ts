@@ -82,17 +82,18 @@ const updated = await api.extensions.remove(selectedInstallationId);`,
   },
   {
     id: "extension-installation-api",
-    title: "Upload an extension and request permission review",
+    title: "Install an extension and request permission review",
     paragraphs: [
       "Declare extensions.install and obtain a profile grant. browser.full-control includes this capability, but cdp.connect remains separate. api.extensions.installation accepts relative files, never a host path or caller-selected identity. Each operation belongs to the authenticated principal and grant; receiving uploads also belong to the current activation or connection.",
       "Upload every package resource in contiguous chunks of at most 64 KiB. Limits are one receiving or validating upload per profile, 512 MiB total, 256 MiB per file, a 1 MiB manifest, 10,000 entries including directories, depth 64, and 4,096 UTF-8 bytes per relative path. Canonical base64 is used on MCP; the SDK accepts Uint8Array. Receiving uploads expire after 10 idle minutes or 60 total minutes.",
-      "finish starts background validation and returns promptly. Poll status from a timer or subsequent action; do not hold a plugin event callback while waiting. Once awaiting_review, requestReview opens trusted Native permission review. Only its native button can approve. Snapshots contain operationId, state, and optional upload progress, reviewed extension metadata or a sanitized error. list returns up to 32 snapshots. There is no change event yet.",
+      "finish starts background validation and returns promptly. Poll status from a timer or subsequent action; do not hold a plugin event callback while waiting. Once awaiting_review, requestReview opens trusted Native permission review. Only its native button can approve. pickLocal has no arguments and returns choosing while the local user selects a folder. The path stays private; validation still precedes separate permission review. Selection closes on cancellation, revocation, owner shutdown, or its five-minute deadline. An unsupported host settles with a sanitized failure. Snapshots contain operationId, state, and optional upload progress, reviewed extension metadata or a sanitized error. list returns up to 32 snapshots. There is no change event yet.",
       "Owner closure or revocation stops unsubmitted work. An installation already admitted to durable intent may finish; cancel does not uninstall it. Refresh status or extension inventory after an uncertain result. Receiving uploads cannot reconnect, while persisted operations can be rediscovered by the same principal and grant. Restart reconciliation removes prepared records whose grants are no longer valid. Safe mode and raw-CDP omit installation tools.",
-      "The table maps SDK methods beneath api.extensions.installation to exact MCP names. All return a snapshot except list, which returns an array. Portable protocol and lifecycle tests accompany an isolated real Chromium binary-upload, native approval and removal fixture. Full packaged startup and compiled-plugin/MCP installation acceptance remain open.",
+      "The table maps SDK methods beneath api.extensions.installation to exact MCP names. All return a snapshot except list, which returns an array. Portable protocol and lifecycle tests accompany real Chromium upload and local-picker fixtures that verify binary resources, separate native approval and removal with disposable profiles. Full packaged startup and compiled-plugin/MCP installation acceptance remain open.",
     ],
     table: {
       headings: ["SDK method", "MCP tool", "MCP arguments"],
       rows: [
+        ["pickLocal()", "hitchhiker_extension_install_pick_local", "{}"],
         ["begin()", "hitchhiker_extension_install_begin", "{}"],
         [
           "beginFile(operationId, path, size)",

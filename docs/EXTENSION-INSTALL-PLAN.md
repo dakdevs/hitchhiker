@@ -201,3 +201,47 @@ Remaining acceptance: actual compiled-plugin and MCP installation in Chromium, t
 installation isolation, the default extension UI and private native picker, legacy pending-review
 control filtering, and full packaged startup with the production Keychain. Existing default grants
 are unchanged. The browser-framework and release goals are not complete.
+
+## Native local selection and default management plugin
+
+The next implementation adds public `pickLocal()` with no caller arguments. It allocates an
+owned operation in `choosing`, returns promptly, and uses an application-scoped native picker.
+The private protocol binds a fresh nonce and operation ID to show/cancel/decision messages.
+Only the native panel can select a directory; cancellation omits the directory. The chosen path
+never enters public snapshots, plugin events, credentials or the durable registry. Selection
+continues through the existing copied-artifact validation and separate permission review.
+
+Use a directory-only, single-selection asynchronous NSOpenPanel sheet with a five-minute watchdog.
+Picker and permission prompt must not overlap. Native close, owner shutdown, grant revocation and
+adapter timeout cancel the exact picker; failed cleanup invokes recovery. SDK/MCP `pickLocal`
+requires the existing profile-scoped installation grant. It cannot supply an initial path or
+approve permissions. Apple documents the [directory selection controls](https://developer.apple.com/documentation/appkit/nsopenpanel/canchoosedirectories?language=objc)
+and [asynchronous Open panels](https://developer.apple.com/documentation/appkit/nsopenpanel).
+
+A separate default management artifact will use these public operations. Before it can own a full
+management screen, the default plugins need a generic route service so sidebar/top presenters do
+not gain extension-specific branches. New default grants require a new cohort and must preserve
+existing profile choices. This routing/cohort work is not satisfied by adding a toolbar button or
+copying controller extension screens into presenter code.
+
+Verification in progress: private picker identity/cancel lifecycle, public no-argument protocol,
+nonblocking coordinator selection/validation, rejection/revocation/owner cleanup, actual Native
+folder selection and independent native permission approval. The default management plugin remains
+open until its public composition and real browser behavior are verified.
+
+### Native picker verification
+
+The compiled host and public coordinator now pass actual NSOpenPanel folder selection followed by
+separate native permission approval, binary-resource verification in Chromium, removal and clean exit.
+The same run passes malformed and synthetic selection rejection, concurrent-prompt rejection,
+wrong-operation cancellation denial, single-fire exact cancellation and window-close cleanup
+(`work/extension-picker-native-interactive.log`, two passes, no skips). The existing permission-review
+regression passes separately (`work/extension-picker-review-regression.log`). No fixture host remains.
+
+Five adapter and eleven coordinator tests pass for exact private identity, early decisions, invalid
+paths, user cancellation, interrupted/revoked owners, cleanup recovery, prompt/validation handoff and
+existing installation lifecycle. Full dependency, type, lint, formatting, test and build validation
+passes 460 portable tests with 40 Native-gated skips (`work/extension-picker-full-check.log`).
+The SDK, MCP and marketing references document `pickLocal` as the ninth installation operation.
+The default management artifact, generic routing/cohort integration and packaged application
+acceptance remain open. This checkpoint does not claim they are complete.

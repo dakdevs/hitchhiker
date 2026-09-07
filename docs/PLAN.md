@@ -784,3 +784,10 @@ a separate real Chromium fixture passes uploaded binary-resource integrity, nati
 content-script execution, removal and clean exit. The [installation checkpoint](EXTENSION-INSTALL-PLAN.md#public-coordinator-checkpoint)
 records remaining public-transport Native acceptance, default management plugin/local picker, and
 production startup gaps. This does not complete all Chromium APIs or the browser-framework goal.
+
+Native local directory selection is now public through `api.extensions.installation.pickLocal()`
+and its MCP equivalent. Selection returns an owned operation; the path stays private and installation
+still needs a separate native permission review. The real picker/approval/binary-resource/removal
+fixture and native cancellation regression pass; the portable check passes 460 tests. The
+[latest picker evidence](EXTENSION-INSTALL-PLAN.md#native-picker-verification) retains the outstanding
+independent default management plugin, generic routing, cohort and production-startup work.

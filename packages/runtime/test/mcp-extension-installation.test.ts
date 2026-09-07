@@ -73,7 +73,18 @@ test("MCP extension installation tools are optional, strict, and grant bound", a
       const tools = await connection.client.listTools();
       assert.equal(
         tools.tools.filter((tool) => tool.name.startsWith("hitchhiker_extension_install_")).length,
-        8,
+        9,
+      );
+      const pickLocal = await connection.client.callTool({
+        name: "hitchhiker_extension_install_pick_local",
+        arguments: {},
+      });
+      assert.equal(pickLocal.isError, false);
+      await assert.rejects(
+        connection.client.callTool({
+          name: "hitchhiker_extension_install_pick_local",
+          arguments: { extra: true },
+        }),
       );
       const begin = await connection.client.callTool({
         name: "hitchhiker_extension_install_begin",
@@ -106,7 +117,7 @@ test("MCP extension installation tools are optional, strict, and grant bound", a
       assert.equal(
         (
           await blocked.client.callTool({
-            name: "hitchhiker_extension_install_begin",
+            name: "hitchhiker_extension_install_pick_local",
             arguments: {},
           })
         ).isError,
@@ -118,6 +129,7 @@ test("MCP extension installation tools are optional, strict, and grant bound", a
     const records = await readFile(marker, "utf8");
     assert.match(records, /installation\.begin/);
     assert.match(records, /installation\.append/);
+    assert.match(records, /installation\.pickLocal/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

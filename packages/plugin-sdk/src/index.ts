@@ -247,6 +247,7 @@ export interface PluginApi {
     list(): Promise<ExtensionManagementSnapshot>;
     remove(installationId: string): Promise<ExtensionManagementSnapshot>;
     readonly installation: {
+      pickLocal(): Promise<ExtensionInstallationSnapshot>;
       begin(): Promise<ExtensionInstallationSnapshot>;
       beginFile(
         operationId: string,
@@ -379,6 +380,8 @@ const api = (host: HostBridge): PluginApi =>
       remove: (installationId: string) =>
         call<ExtensionManagementSnapshot>(host, "extensions.remove", { installationId }),
       installation: Object.freeze({
+        pickLocal: () =>
+          call<ExtensionInstallationSnapshot>(host, "extensions.installation.pickLocal", {}),
         begin: () => call<ExtensionInstallationSnapshot>(host, "extensions.installation.begin", {}),
         beginFile: (operationId: string, path: string, size: number) =>
           call<ExtensionInstallationSnapshot>(host, "extensions.installation.beginFile", {

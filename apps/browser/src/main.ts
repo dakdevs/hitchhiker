@@ -40,6 +40,7 @@ import type { BrowserExtensionControls } from "./extension-controls.ts";
 import { createExtensionManagement, type ExtensionManagement } from "./extension-management.ts";
 import { createExtensionInstallation } from "./extension-installation.ts";
 import { createExtensionUploadStore } from "./extension-upload.ts";
+import { createNativeExtensionDirectoryPicker } from "./extension-directory-picker.ts";
 import { createNativeExtensionReview } from "./extension-review.ts";
 import { reconcileExtensionInstallations } from "./extension-installation-reconciliation.ts";
 
@@ -187,6 +188,10 @@ const program = Effect.gen(function* () {
               profileId: "default",
               onFailure,
               review: createNativeExtensionReview({ engine, onCleanupFailure: recoveryFailure }),
+              pickLocal: createNativeExtensionDirectoryPicker({
+                engine,
+                onCleanupFailure: recoveryFailure,
+              }),
             });
           }).pipe(
             Effect.catch(() =>

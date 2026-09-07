@@ -6,6 +6,7 @@ export const ExtensionInstallationSnapshotSchema = Schema.Struct({
   operationId: ExtensionOperationIdSchema,
   state: Schema.Literals([
     "receiving",
+    "choosing",
     "validating",
     "awaiting_review",
     "reviewing",
@@ -47,6 +48,8 @@ export const ExtensionInstallationListSchema = Schema.Array(
 
 /** Owner-bound application port. Identity, native approval and host paths never come from callers. */
 export interface ExtensionInstallationApi {
+  /** Ask the trusted local host to choose a package; unsupported hosts fail safely. */
+  readonly pickLocal: () => Effect.Effect<ExtensionInstallationSnapshot, unknown>;
   readonly begin: () => Effect.Effect<ExtensionInstallationSnapshot, unknown>;
   readonly beginFile: (
     operationId: string,

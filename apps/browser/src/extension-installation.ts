@@ -15,6 +15,7 @@ import type {
   ExtensionUploadStore,
 } from "./extension-upload.ts";
 import type { createNativeExtensionReview } from "./extension-review.ts";
+import type { NativeExtensionDirectoryPicker } from "./extension-directory-picker.ts";
 
 const OperationId = /^[a-f0-9]{32}$/;
 const MaxJobs = 32;
@@ -106,12 +107,14 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
     >;
     readonly uploads: ExtensionUploadStore;
     readonly review: Review;
+    readonly pickLocal?: NativeExtensionDirectoryPicker;
     readonly profileId: string;
     readonly onFailure: (error: unknown) => Effect.Effect<void>;
   }) {
     const applicationScope = yield* Effect.scope;
     const lock = yield* Semaphore.make(1);
     const jobs = new Map<string, Job>();
+    let pickerOperationId: string | undefined;
     const synchronized = <A, E, R>(effect: Effect.Effect<A, E, R>) => lock.withPermit(effect);
 
     yield* Effect.forkIn(
@@ -275,6 +278,89 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
               ),
             ),
           );
+
+        const pickLocal = () =>
+          Effect.gen(function* () {
+            yield* authorize;
+            const picker = options.pickLocal;
+            if (picker === undefined) return yield* Effect.fail(unavailable());
+            const operationId = crypto.randomUUID().replaceAll("-", "");
+            let validating = false;
+            const task = picker({
+              requester: owner.principal,
+              profileId: options.profileId,
+              operationId,
+              authorize,
+            }).pipe(
+              Effect.flatMap((directory) => {
+                if (directory === undefined)
+                  return synchronized(
+                    Effect.sync(() => {
+                      const job = ownedJob(operationId);
+                      if (job !== undefined) {
+                        job.state = "canceled";
+                        job.fiber = undefined;
+                      }
+                    }),
+                  );
+                validating = true;
+                return synchronized(
+                  Effect.suspend(() => {
+                    const job = ownedJob(operationId);
+                    if (job === undefined || job.state !== "choosing" || job.canceling)
+                      return Effect.fail(unavailable());
+                    job.state = "validating";
+                    return Effect.void;
+                  }),
+                ).pipe(
+                  Effect.andThen(options.manager.prepareOwned(directory, boundOwner, operationId)),
+                  Effect.flatMap((artifact) =>
+                    synchronized(
+                      Effect.sync(() => {
+                        const job = ownedJob(operationId);
+                        if (job === undefined) return;
+                        job.artifact = {
+                          installationId: artifact.installationId,
+                          digest: artifact.digest,
+                        };
+                        job.fiber = undefined;
+                        if (job.state === "validating") job.state = "awaiting_review";
+                      }),
+                    ),
+                  ),
+                );
+              }),
+              Effect.catchCause((cause) =>
+                handleFailure(operationId, validating ? "validation_failed" : "unavailable", cause),
+              ),
+              Effect.ensuring(
+                synchronized(
+                  Effect.sync(() => {
+                    if (pickerOperationId === operationId) pickerOperationId = undefined;
+                  }),
+                ),
+              ),
+            );
+            return yield* Effect.uninterruptible(
+              synchronized(
+                Effect.gen(function* () {
+                  evictTerminal();
+                  if (pickerOperationId !== undefined || jobs.size >= MaxJobs)
+                    return yield* Effect.fail(unavailable());
+                  if (jobs.has(operationId)) return yield* Effect.fail(unavailable());
+                  const job: Job = { operationId, ownerToken, state: "choosing" };
+                  jobs.set(operationId, job);
+                  pickerOperationId = operationId;
+                  const fiber = yield* Effect.forkIn(task, applicationScope, {
+                    startImmediately: true,
+                    uninterruptible: false,
+                  });
+                  job.fiber = fiber;
+                  return jobSnapshot(job);
+                }),
+              ),
+            );
+          });
 
         const updateUpload = (
           operationId: string,
@@ -606,6 +692,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
 
         return {
           begin,
+          pickLocal,
           beginFile: (operationId, path, size) =>
             updateUpload(operationId, (value) => value.beginFile(operationId, path, size)),
           append: (operationId, offset, dataBase64) =>

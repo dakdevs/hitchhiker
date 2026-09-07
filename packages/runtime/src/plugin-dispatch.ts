@@ -480,6 +480,15 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
           Effect.flatMap((value) => decode(ExtensionInstallationSnapshotSchema, value)),
         );
       }
+      case "extensions.installation.pickLocal": {
+        yield* authorize("extensions.install");
+        yield* decode(Schema.Record(Schema.String, Schema.Never), params);
+        if (!options.extensionInstallation) return yield* denied();
+        return yield* options.extensionInstallation.pickLocal().pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((value) => decode(ExtensionInstallationSnapshotSchema, value)),
+        );
+      }
       case "extensions.installation.beginFile": {
         yield* authorize("extensions.install");
         const input = yield* decode(

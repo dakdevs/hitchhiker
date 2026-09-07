@@ -114,6 +114,10 @@ const program = Effect.gen(function* () {
     process.env.MCP_EXTENSION_INSTALLATION === "none"
       ? undefined
       : {
+          pickLocal: () =>
+            record({ operation: "installation.pickLocal" }).pipe(
+              Effect.as({ operationId: "d".repeat(32), state: "choosing" as const }),
+            ),
           begin: () =>
             record({ operation: "installation.begin" }).pipe(
               Effect.as({

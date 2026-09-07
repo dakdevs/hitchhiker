@@ -126,12 +126,15 @@ and expire or become stale after navigation; grant revocation is checked during 
 `extensions.manage`. Both return a bounded profile inventory containing reviewed manifest metadata
 and installation state. Permission approval remains on the trusted Native surface.
 `api.extensions.installation` requires `extensions.install` and supports bounded upload operations:
-`begin`, `beginFile`, `append`, `finish`, `status`, `list`, `requestReview`, and `cancel`.
+`begin`, `beginFile`, `append`, `finish`, `status`, `list`, `requestReview`, `cancel`, and
+`pickLocal`.
 `append` accepts a `Uint8Array`; callers never provide an owner, grant, or host path. Requesting a
 review asks the trusted local surface to review permissions and never approves an installation.
-`finish` validates asynchronously; poll `status(operationId)`. The eight methods are `begin`,
-`beginFile`, `append`, `finish`, `status`, `list`, `requestReview`, and `cancel`. Uploads allow 64 KiB
-chunks, 256 MiB files, 512 MiB total, 10,000 entries, depth 64, and 4,096-byte relative paths. Native
-approval is under end-to-end validation and this adapter is omitted in safe/raw-CDP or degraded mode.
+`finish` validates asynchronously; poll `status(operationId)`. The first eight methods retain their
+existing arguments. `pickLocal()` has no arguments and asks a trusted local host to choose a package;
+it fails safely when that picker is unavailable. Uploads allow 64 KiB chunks, 256 MiB files, 512 MiB
+total, 10,000 entries, depth 64, and 4,096-byte relative paths. Real Native fixtures pass uploaded and locally selected packages through separate native approval,
+binary-resource execution and removal using disposable profiles. Packaged application acceptance
+remains open. This adapter is omitted in safe/raw-CDP or degraded mode.
 Read the [extension API reference](../../docs/EXTENSIONS.md#public-inventory-and-removal) for MCP
 equivalents, raw-CDP restrictions, revocation and recovery semantics, and the compiled Native fixture.

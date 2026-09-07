@@ -42,6 +42,7 @@
 #include "include/wrapper/cef_helpers.h"
 #include "src/page_manager.h"
 #include "src/extension_review.h"
+#include "src/extension_directory_picker.h"
 
 namespace {
 
@@ -212,6 +213,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     ready->SetBool("pageBrowserGeneration", true);
     ready->SetBool("devTools", true);
     ready->SetBool("extensionReview", true);
+    ready->SetBool("extensionDirectoryPicker", true);
     if (root_) {
       const CefRect bounds = root_->GetClientAreaBoundsInScreen();
       CefRefPtr<CefDictionaryValue> client = CefDictionaryValue::Create();
@@ -238,6 +240,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     if (reader_.joinable()) reader_.join();
     if (writer_.joinable()) writer_.join();
     if (CefCurrentlyOn(TID_UI)) {
+      extension_directory_picker_.reset();
       extension_review_.reset();
       registrations_.clear();
       observers_.clear();
@@ -302,6 +305,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
         SendEvent("pages.closeCancelled", params);
         break;
       case PageEvent::kWindowClosing:
+        if (extension_directory_picker_) extension_directory_picker_->Cancel();
         if (extension_review_) extension_review_->Cancel();
         SendEvent("window.closing", params);
         break;
@@ -737,6 +741,20 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
       ReplyResult(request_id, NewValue(CefDictionaryValue::Create())); return;
     }
     if (method == "viewports.set") { HandleViewports(request_id, params); return; }
+    if (method == "extensions.directoryPicker.show") {
+      HandleExtensionDirectoryPicker(request_id, params); return;
+    }
+    if (method == "extensions.directoryPicker.cancel") {
+      std::string nonce, operation_id;
+      if (!HasOnlyKeys(params, {"nonce", "operationId"}) ||
+          !GetString(params, "nonce", &nonce) || !IsUuid(nonce) ||
+          !GetString(params, "operationId", &operation_id) || !IsLowerHex(operation_id, 32) ||
+          nonce != extension_picker_nonce_ || operation_id != extension_picker_operation_id_) {
+        ReplyError(request_id, -32602, "unknown extension directory picker"); return;
+      }
+      if (extension_directory_picker_) extension_directory_picker_->Cancel();
+      ReplyResult(request_id, NewValue(CefDictionaryValue::Create())); return;
+    }
     if (method == "extensions.review.show") { HandleExtensionReview(request_id, params); return; }
     if (method == "extensions.review.cancel") {
       std::string nonce;
@@ -927,9 +945,64 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     }
   }
 
+  void HandleExtensionDirectoryPicker(int request_id, CefRefPtr<CefDictionaryValue> params) {
+    if (!root_ || root_->IsClosed() || (manager_ && manager_->closing_all()) ||
+        (extension_review_ && extension_review_->active()) ||
+        (extension_directory_picker_ && extension_directory_picker_->active())) {
+      ReplyError(request_id, -32003, "extension directory picker is unavailable or busy"); return;
+    }
+    std::string nonce, operation_id, requester, profile_id;
+    if (!HasOnlyKeys(params, {"nonce", "operationId", "requester", "profileId"}) ||
+        !GetString(params, "nonce", &nonce) || !IsUuid(nonce) ||
+        !GetString(params, "operationId", &operation_id) || !IsLowerHex(operation_id, 32) ||
+        !ReviewText(params, "requester", 256, &requester) ||
+        !ReviewText(params, "profileId", 256, &profile_id)) {
+      ReplyError(request_id, -32602, "invalid extension directory picker"); return;
+    }
+    extension_directory_picker_.reset();
+    extension_picker_deadline_ = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+    if (!ScheduleDirectoryPickerExpiry()) {
+      ReplyError(request_id, -32003, "extension directory picker timer is unavailable"); return;
+    }
+    auto weak = weak_from_this();
+    auto prompt = NativeExtensionDirectoryPicker::Show(root_->GetWindowHandle(), requester, profile_id,
+        [weak, nonce, operation_id](std::optional<std::string> directory) {
+          if (auto self = weak.lock()) {
+            auto result = CefDictionaryValue::Create();
+            result->SetString("nonce", nonce);
+            result->SetString("operationId", operation_id);
+            if (directory) result->SetString("directory", *directory);
+            self->SendEvent("extensions.directoryPickerDecision", result);
+          }
+        });
+    if (!prompt) { ReplyError(request_id, -32003, "native directory picker is unavailable"); return; }
+    extension_picker_nonce_ = nonce;
+    extension_picker_operation_id_ = operation_id;
+    extension_directory_picker_ = std::move(prompt);
+    ReplyResult(request_id, NewValue(CefDictionaryValue::Create()));
+  }
+
+  bool ScheduleDirectoryPickerExpiry() {
+    if (extension_picker_timer_pending_) return true;
+    auto weak = weak_from_this();
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        extension_picker_deadline_ - std::chrono::steady_clock::now()).count();
+    extension_picker_timer_pending_ = CefPostDelayedTask(TID_UI, new BridgeTask([weak] {
+      if (auto self = weak.lock()) {
+        self->extension_picker_timer_pending_ = false;
+        if (self->stopped_ || !self->extension_directory_picker_ ||
+            !self->extension_directory_picker_->active()) return;
+        if (std::chrono::steady_clock::now() >= self->extension_picker_deadline_ ||
+            !self->ScheduleDirectoryPickerExpiry()) self->extension_directory_picker_->Cancel();
+      }
+    }), remaining > 0 ? remaining : 1);
+    return extension_picker_timer_pending_;
+  }
+
   void HandleExtensionReview(int request_id, CefRefPtr<CefDictionaryValue> params) {
     if (!root_ || root_->IsClosed() || (manager_ && manager_->closing_all()) ||
-        (extension_review_ && extension_review_->active())) {
+        (extension_review_ && extension_review_->active()) ||
+        (extension_directory_picker_ && extension_directory_picker_->active())) {
       ReplyError(request_id, -32003, "extension review is unavailable or busy"); return;
     }
     std::string nonce;
@@ -1005,6 +1078,11 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
 
   CefRefPtr<PageManager> manager_;
   CefRefPtr<CefWindow> root_;
+  std::unique_ptr<NativeExtensionDirectoryPicker> extension_directory_picker_;
+  std::string extension_picker_nonce_;
+  std::string extension_picker_operation_id_;
+  bool extension_picker_timer_pending_ = false;
+  std::chrono::steady_clock::time_point extension_picker_deadline_;
   std::unique_ptr<NativeExtensionReview> extension_review_;
   std::string extension_review_nonce_;
   bool extension_review_timer_pending_ = false;

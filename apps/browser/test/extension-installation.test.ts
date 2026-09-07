@@ -506,3 +506,67 @@ test("closing an owner waits for its prompt to stop and abandons only its prepar
   assert.equal(records.get(operationB)!.state, "enabled");
   await Effect.runPromise(Scope.close(app, Exit.void));
 });
+
+test("local picking returns immediately and keeps the selected host path private during validation", async () => {
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const selected = yield* Deferred.make<string | undefined>();
+        const prepareGate = yield* Deferred.make<void>();
+        const backend = makeManager({ prepareGate });
+        const coordinator = yield* createExtensionInstallation({
+          manager: backend.manager,
+          uploads: makeUploadStore().store,
+          profileId: "profile-a",
+          pickLocal: () => Deferred.await(selected),
+          review: () => Effect.succeed(false),
+          onFailure: () => Effect.void,
+        });
+        const api = yield* coordinator.forOwner(owner());
+        const choosing = yield* api.pickLocal();
+        assert.equal(choosing.state, "choosing");
+        assert.equal(JSON.stringify(choosing).includes("private"), false);
+        yield* Deferred.succeed(selected, "/private/chosen-extension");
+        yield* Effect.yieldNow;
+        const validating = yield* api.status(choosing.operationId);
+        assert.equal(validating.state, "validating");
+        assert.equal(JSON.stringify(validating).includes("chosen-extension"), false);
+        yield* Deferred.succeed(prepareGate, undefined);
+        yield* Effect.yieldNow;
+        const prepared = yield* api.status(choosing.operationId);
+        assert.equal(prepared.state, "awaiting_review");
+        assert.equal(JSON.stringify(prepared).includes("chosen-extension"), false);
+      }),
+    ),
+  );
+});
+
+test("local picker cancellation and an unavailable picker fail closed", async () => {
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const coordinator = yield* createExtensionInstallation({
+          manager: makeManager().manager,
+          uploads: makeUploadStore().store,
+          profileId: "profile-a",
+          pickLocal: () => Effect.never,
+          review: () => Effect.succeed(false),
+          onFailure: () => Effect.void,
+        });
+        const api = yield* coordinator.forOwner(owner());
+        const choosing = yield* api.pickLocal();
+        assert.equal((yield* api.cancel(choosing.operationId)).state, "canceled");
+
+        const unavailable = yield* createExtensionInstallation({
+          manager: makeManager().manager,
+          uploads: makeUploadStore().store,
+          profileId: "profile-a",
+          review: () => Effect.succeed(false),
+          onFailure: () => Effect.void,
+        });
+        const unavailableApi = yield* unavailable.forOwner(owner());
+        assert.equal((yield* Effect.exit(unavailableApi.pickLocal()))._tag, "Failure");
+      }),
+    ),
+  );
+});

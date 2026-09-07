@@ -207,6 +207,13 @@ const UploadSize = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 256 
 const UploadOffset = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 256 * 1024 * 1024 }));
 const UploadBase64 = Schema.String.check(Schema.isMaxLength(87_384));
 const installationTools = Toolkit.make(
+  Tool.make("hitchhiker_extension_install_pick_local", {
+    description:
+      "Ask the trusted local host to choose an extension package. This does not approve installation.",
+    parameters: Schema.Record(Schema.String, Schema.Never),
+    success: Result,
+    failure: McpActionError,
+  }),
   Tool.make("hitchhiker_extension_install_begin", {
     description: "Begin an owner-bound extension upload; requires extensions.install.",
     parameters: EmptyParameters,
@@ -749,6 +756,15 @@ export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (opt
         Effect.flatMap(json),
       );
     const installationHandlers = installationTools.toLayer({
+      hitchhiker_extension_install_pick_local: (input) =>
+        Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Never), {
+          onExcessProperty: "error",
+        })(input).pipe(
+          Effect.mapError(
+            () => new McpActionError({ message: "Extension picker does not accept arguments." }),
+          ),
+          Effect.andThen(() => snapshot(installation.pickLocal())),
+        ),
       hitchhiker_extension_install_begin: () => snapshot(installation.begin()),
       hitchhiker_extension_install_begin_file: ({ operationId, path, size }) =>
         snapshot(installation.beginFile(operationId, path, size)),

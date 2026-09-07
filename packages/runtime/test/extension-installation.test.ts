@@ -37,6 +37,7 @@ test("extension installation dispatch routes bounded operations and fails closed
         const grants = yield* create({ directory });
         const calls: string[] = [];
         const port: ExtensionInstallationApi = {
+          pickLocal: () => Effect.sync(() => (calls.push("pickLocal"), snapshot)),
           begin: () => Effect.sync(() => (calls.push("begin"), snapshot)),
           beginFile: (_id, path) => Effect.sync(() => (calls.push(`file:${path}`), snapshot)),
           append: () => Effect.sync(() => (calls.push("append"), snapshot)),
@@ -72,6 +73,12 @@ test("extension installation dispatch routes bounded operations and fails closed
             ...(installation ? { extensionInstallation: installation } : {}),
           });
         const dispatch = make();
+        assert.deepEqual(yield* dispatch("extensions.installation.pickLocal", {}), snapshot);
+        assert(
+          Exit.isFailure(
+            yield* Effect.exit(dispatch("extensions.installation.pickLocal", { extra: true })),
+          ),
+        );
         assert.deepEqual(yield* dispatch("extensions.installation.begin", {}), snapshot);
         assert.deepEqual(
           yield* dispatch("extensions.installation.beginFile", {
@@ -122,6 +129,7 @@ test("extension installation dispatch routes bounded operations and fails closed
           release: Effect.void,
         });
         assert(Exit.isFailure(yield* Effect.exit(absent("extensions.installation.begin", {}))));
+        assert(Exit.isFailure(yield* Effect.exit(absent("extensions.installation.pickLocal", {}))));
         const malformed: ExtensionInstallationApi = {
           ...port,
           begin: () => Effect.succeed({ ...snapshot, nonce: "secret", path: "/private" } as never),
@@ -133,6 +141,9 @@ test("extension installation dispatch routes bounded operations and fails closed
         assert.equal(unsafe.message.includes("secret"), false);
         yield* grants.revoke(issued.grant.id);
         assert(Exit.isFailure(yield* Effect.exit(dispatch("extensions.installation.begin", {}))));
+        assert(
+          Exit.isFailure(yield* Effect.exit(dispatch("extensions.installation.pickLocal", {}))),
+        );
         const wrongPrincipal = yield* grants.issue({
           principal: "other",
           profileId: "profile",
@@ -144,7 +155,7 @@ test("extension installation dispatch routes bounded operations and fails closed
             yield* Effect.exit(make(wrongPrincipal.token)("extensions.installation.begin", {})),
           ),
         );
-        assert.deepEqual(calls, ["begin", "file:manifest.json", "append"]);
+        assert.deepEqual(calls, ["pickLocal", "begin", "file:manifest.json", "append"]);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
   } finally {

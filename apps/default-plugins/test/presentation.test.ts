@@ -106,6 +106,7 @@ const fakeApi = () => {
         status: unexpectedExtension,
         list: unexpectedExtension,
         requestReview: unexpectedExtension,
+        pickLocal: unexpectedExtension,
         cancel: unexpectedExtension,
       },
     },

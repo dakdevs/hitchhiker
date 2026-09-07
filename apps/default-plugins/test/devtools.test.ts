@@ -65,6 +65,7 @@ const fakeApi = () => {
         status: unexpected,
         list: unexpected,
         requestReview: unexpected,
+        pickLocal: unexpected,
         cancel: unexpected,
       },
     },

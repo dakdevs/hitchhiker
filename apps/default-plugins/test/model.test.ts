@@ -55,6 +55,7 @@ const fixture = (initial: readonly string[] = ["first", "second"]) => {
         status: unexpectedExtension,
         list: unexpectedExtension,
         requestReview: unexpectedExtension,
+        pickLocal: unexpectedExtension,
         cancel: unexpectedExtension,
       },
     },

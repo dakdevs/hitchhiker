@@ -160,7 +160,7 @@ and does not run in a new, fully loaded document afterward. These tests use disp
 profiles; they do not prove production Keychain startup, physical interaction or full extension
 compatibility. Portable tests cover grants, queue-time revocation, metadata filtering and recovery.
 
-## Public uploaded installation protocol
+## Public extension installation protocol
 
 `api.extensions.installation` requires declared and current profile-wide `extensions.install`.
 `browser.full-control` implies it; `cdp.connect` remains separate. Callers never provide a profile,
@@ -187,14 +187,24 @@ review. When it reports `awaiting_review`, call `requestReview`.
 
 The exact SDK methods are `begin()`, `beginFile(operationId, path, size)`,
 `append(operationId, offset, data: Uint8Array)`, `finish(operationId)`, `status(operationId)`,
-`list()`, `requestReview(operationId)`, and `cancel(operationId)`. `finish` validates
-asynchronously; poll `status`. `requestReview` only opens trusted local Native review: a person
-must approve or reject it and no SDK, MCP, or plugin call can approve it.
+`list()`, `requestReview(operationId)`, `cancel(operationId)`, and `pickLocal()`. The first eight
+methods retain their existing names and arguments. `pickLocal()` has no arguments and asks a trusted
+local host to select a package; it fails safely when that host does not provide a picker. `finish`
+validates asynchronously; poll `status`. `requestReview` only opens trusted local Native review: a
+person must approve or reject it and no SDK, MCP, or plugin call can approve it.
+`pickLocal()` returns immediately with `choosing`. The local user selects one folder containing
+`manifest.json`; its contents pass through the same copied-artifact validation as uploaded packages.
+The path is never returned to the plugin or MCP client. Poll for `awaiting_review`, then call
+`requestReview` to request the separate permission decision. Selecting a folder does not install it.
+Only one local selection/validation operation is active at a time. The native panel closes after
+five minutes, on owner shutdown or revocation, or when `cancel(operationId)` stops the operation.
+An unsupported host settles the operation with a sanitized failure.
 
 MCP uses canonical base64 `dataBase64` for `append`; the SDK encodes `Uint8Array` input.
 
 | Tool                                      | Arguments                         | Result         |
 | ----------------------------------------- | --------------------------------- | -------------- |
+| `hitchhiker_extension_install_pick_local` | `{}`                              | snapshot       |
 | `hitchhiker_extension_install_begin`      | `{}`                              | snapshot       |
 | `hitchhiker_extension_install_begin_file` | `{operationId,path,size}`         | snapshot       |
 | `hitchhiker_extension_install_append`     | `{operationId,offset,dataBase64}` | snapshot       |
@@ -218,9 +228,11 @@ Revocation does not automatically uninstall an already enabled extension. Use th
 operation for a public pending upload; local controls remain the fallback for legacy local reviews.
 Snapshots can include the relative `upload.file.path` and native review outcome state, but exclude
 host filesystem paths, Chromium errors, and approval nonces. See the
-[public installation plan](EXTENSION-INSTALL-PLAN.md): an isolated real Chromium fixture passes binary
-resource upload, native-button approval, content-script execution, removal and clean exit. It uses
-a disposable test Keychain; packaged startup and compiled-plugin/MCP installation acceptance remain open.
+[public installation plan](EXTENSION-INSTALL-PLAN.md): an isolated real Chromium fixture covers binary
+resource upload, native-button approval, content-script execution, removal and clean exit. A second isolated fixture passes actual native folder selection, separate native-button
+approval, binary-resource execution and removal, plus stale-request, exact-cancel and window-close
+checks. Both use disposable test Keychains. Packaged startup and compiled-plugin/MCP installation
+acceptance remain open.
 
 ## Compatibility and limits
 
