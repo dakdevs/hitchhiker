@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EngineError } from "@hitchhiker/runtime";
-import { Deferred, Effect, Exit, Fiber, Scope } from "effect";
+import { Deferred, Effect, Exit, Fiber, Option, Scope, Stream } from "effect";
 import type {
   ExtensionManager,
   ExtensionOwner,
@@ -252,6 +252,58 @@ const owner = (authorize: Effect.Effect<void, unknown> = Effect.void): Extension
   authorize,
 });
 
+test("owner installation invalidations coalesce, wake background work, and exclude reads and peers", async () => {
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const prepareGate = yield* Deferred.make<void>();
+        const coordinator = yield* createExtensionInstallation({
+          manager: makeManager({ prepareGate }).manager,
+          uploads: makeUploadStore([operationA]).store,
+          profileId: "profile-a",
+          review: () => Effect.succeed(false),
+          onFailure: () => Effect.void,
+        });
+        const api = yield* coordinator.forOwner(owner());
+        const foreign = yield* coordinator.forOwner({
+          principal: "plugin-b",
+          grantId: "grant-b",
+          authorize: Effect.void,
+        });
+        const started = yield* api.begin();
+        yield* api.beginFile(started.operationId, "manifest.json", 0);
+        yield* api.append(started.operationId, 0, "");
+        const coalesced = yield* api.events.pipe(Stream.runHead);
+        if (Option.isNone(coalesced)) assert.fail("missing coalesced installation invalidation");
+        assert.equal(coalesced.value.event, "extensions.installation.changed");
+        assert.deepEqual(coalesced.value.payload, {});
+        assert.equal(
+          Option.isNone(yield* api.events.pipe(Stream.runHead, Effect.timeoutOption(25))),
+          true,
+        );
+        assert.equal(
+          Option.isNone(yield* foreign.events.pipe(Stream.runHead, Effect.timeoutOption(25))),
+          true,
+        );
+        yield* api.status(started.operationId);
+        yield* api.list();
+        assert.equal(
+          Option.isNone(yield* api.events.pipe(Stream.runHead, Effect.timeoutOption(25))),
+          true,
+        );
+        yield* api.finish(started.operationId);
+        yield* api.events.pipe(Stream.runHead);
+        const completed = yield* api.events.pipe(Stream.runHead, Effect.forkScoped);
+        yield* Deferred.succeed(prepareGate, undefined);
+        const event = yield* Fiber.join(completed).pipe(Effect.timeoutOption(1_000));
+        if (Option.isNone(event)) assert.fail("background completion did not invalidate");
+        if (Option.isNone(event.value)) assert.fail("background completion closed invalidations");
+        assert.equal(event.value.value.event, "extensions.installation.changed");
+      }),
+    ),
+  );
+});
+
 test("finish and review return promptly while validation and native approval remain pending", async () => {
   await Effect.runPromise(
     Effect.scoped(
@@ -393,6 +445,7 @@ test("revocation closes receiving uploads and restarted ports recover exact pers
     coordinator.forOwner(owner(authorization)).pipe(Effect.provideService(Scope.Scope, port)),
   );
   await Effect.runPromise(api.begin());
+  await Effect.runPromise(api.events.pipe(Stream.runHead));
   assert.equal((await Effect.runPromise(api.status(operationB))).state, "awaiting_review");
   allowed = false;
   await new Promise((resolve) => setTimeout(resolve, 700));

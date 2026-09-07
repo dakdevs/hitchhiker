@@ -791,3 +791,11 @@ still needs a separate native permission review. The real picker/approval/binary
 fixture and native cancellation regression pass; the portable check passes 460 tests. The
 [latest picker evidence](EXTENSION-INSTALL-PLAN.md#native-picker-verification) retains the outstanding
 independent default management plugin, generic routing, cohort and production-startup work.
+
+Compiled developer and installed plugins now complete the public extension upload/review flow in
+real Chromium using owner-scoped change notifications, with verified binary resources and clean
+exit. Isolated plugins consume notifications and read fresh snapshots without timers. Portable
+checks pass 462 tests; two separate interactive Native cases pass without skips. The
+[installation evidence](EXTENSION-INSTALL-PLAN.md#public-compiled-plugin-installation-evidence)
+records current limits. Full default-plugin management and the remaining Chromium API surface are
+still in progress.

@@ -177,14 +177,20 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
           onRecoveryFailure: options.onRecoveryFailure,
           events: Stream.merge(
             Stream.merge(
-              composition
-                ? composition.events(composedOwner)
-                : options.controller.pluginEvents(owner),
-              engine.events.pipe(
-                Stream.filter(
-                  (event) => event.event.startsWith("pages.") || event.event === "devtools.changed",
+              Stream.merge(
+                composition
+                  ? composition.events(composedOwner)
+                  : options.controller.pluginEvents(owner),
+                engine.events.pipe(
+                  Stream.filter(
+                    (event) =>
+                      event.event.startsWith("pages.") || event.event === "devtools.changed",
+                  ),
+                  Stream.map((event) => ({ event: event.event, payload: event.params })),
                 ),
-                Stream.map((event) => ({ event: event.event, payload: event.params })),
+              ),
+              (extensionInstallation?.events ?? Stream.empty).pipe(
+                Stream.map(() => ({ event: "extensions.installation.changed", payload: {} })),
               ),
             ),
             pageWatch?.events ?? Stream.empty,
@@ -328,7 +334,12 @@ export const runPluginDirectory = Effect.fn("Browser.runPluginDirectory")(functi
     release: options.controller.releasePluginSurface(owner),
     onRecoveryFailure: options.onRecoveryFailure,
     events: Stream.merge(
-      Stream.merge(options.controller.pluginEvents(owner), pageEvents),
+      Stream.merge(
+        Stream.merge(options.controller.pluginEvents(owner), pageEvents),
+        (extensionInstallation?.events ?? Stream.empty).pipe(
+          Stream.map(() => ({ event: "extensions.installation.changed", payload: {} })),
+        ),
+      ),
       pageWatch?.events ?? Stream.empty,
     ),
   });

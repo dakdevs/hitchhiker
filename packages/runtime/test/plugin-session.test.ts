@@ -21,6 +21,18 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
 });
 `;
 
+const eventHostScript = (marker: string) => `#!${process.execPath}
+const fs = require("node:fs");
+const readline = require("node:readline");
+const send = value => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", line => {
+  const request = JSON.parse(line);
+  if (request.method === "event") fs.appendFileSync(${JSON.stringify(marker)}, JSON.stringify(request.params) + "\\n");
+  send({ id: request.id, result: true });
+  if (request.method === "stop") process.exit(0);
+});
+`;
+
 const waitForExit = async (pid: number) => {
   const deadline = Date.now() + 3_000;
   for (;;) {
@@ -137,6 +149,107 @@ test("live plugin authenticates before spawn, expires idle credentials, and esca
         yield* Fiber.interrupt(recovery);
         assert.equal(recoveryAttempts, 3);
         assert.equal(escalations, 1);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("installation invalidations are forwarded only with a declared, current install grant", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-install-events-"));
+  const executable = join(directory, "host.cjs");
+  const delivered = join(directory, "events");
+  await writeFile(executable, eventHostScript(delivered), { mode: 0o700 });
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const grants = yield* create({ directory: join(directory, "grants") });
+        const granted = yield* grants.issue({
+          principal: "event-plugin",
+          profileId: "default",
+          capabilities: ["extensions.install"],
+          origins: [],
+        });
+        const browser = {
+          pages: Effect.succeed([]),
+          open: () => Effect.die("not used"),
+          navigate: () => Effect.die("not used"),
+          close: () => Effect.die("not used"),
+          configuration: Effect.die("not used"),
+          configure: () => Effect.die("not used"),
+          setTabPlacement: () => Effect.die("not used"),
+        };
+        const event = { event: "extensions.installation.changed", payload: {} };
+        const base = {
+          executable,
+          code: "compiled",
+          profileId: "default",
+          grants,
+          browser,
+          publish: () => Effect.die("not used"),
+          release: Effect.void,
+        };
+        yield* runLivePlugin({
+          ...base,
+          manifest: {
+            id: "event-plugin",
+            version: "1.0.0",
+            name: "Events",
+            capabilities: ["extensions.install"],
+          },
+          token: granted.token,
+          events: Stream.fromIterable([event]),
+        });
+        assert.deepEqual(
+          JSON.parse(yield* Effect.promise(() => readFile(delivered, "utf8"))) as unknown,
+          { event: "extensions.installation.changed", payload: {} },
+        );
+
+        yield* Effect.promise(() => rm(delivered, { force: true }));
+        yield* runLivePlugin({
+          ...base,
+          manifest: { id: "event-plugin", version: "1.0.0", name: "Events", capabilities: [] },
+          token: granted.token,
+          events: Stream.fromIterable([event]),
+        });
+        assert.equal(
+          yield* Effect.promise(() =>
+            readFile(delivered, "utf8").then(
+              () => true,
+              () => false,
+            ),
+          ),
+          false,
+        );
+
+        const ready = yield* Deferred.make<void>();
+        const trigger = yield* Deferred.make<void>();
+        const pending = yield* runLivePlugin({
+          ...base,
+          manifest: {
+            id: "event-plugin",
+            version: "1.0.0",
+            name: "Events",
+            capabilities: ["extensions.install"],
+          },
+          token: granted.token,
+          events: Stream.fromEffect(Deferred.await(trigger).pipe(Effect.as(event))),
+          onReady: Deferred.succeed(ready, undefined),
+        }).pipe(Effect.forkScoped);
+        yield* Deferred.await(ready);
+        yield* grants.revoke(granted.grant.id);
+        yield* Deferred.succeed(trigger, undefined);
+        assert(Exit.isFailure(yield* Fiber.await(pending).pipe(Effect.timeout(2_000))));
+        assert.equal(
+          yield* Effect.promise(() =>
+            readFile(delivered, "utf8").then(
+              () => true,
+              () => false,
+            ),
+          ),
+          false,
+        );
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
   } finally {

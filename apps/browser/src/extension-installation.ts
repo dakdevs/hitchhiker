@@ -3,7 +3,7 @@ import {
   type ExtensionInstallationSnapshot,
   type ExtensionManagementSummary,
 } from "@hitchhiker/runtime";
-import { Cause, Deferred, Effect, Exit, Fiber, Scope, Semaphore } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Queue, Scope, Semaphore, Stream } from "effect";
 import type {
   ExtensionManager,
   ExtensionOwner,
@@ -33,6 +33,14 @@ class ExtensionInstallationError extends Error {
 const unavailable = () => new ExtensionInstallationError("Extension installation is unavailable");
 
 type Review = ReturnType<typeof createNativeExtensionReview>;
+type ExtensionInstallationChangedEvent = {
+  readonly event: "extensions.installation.changed";
+  readonly payload: Record<never, never>;
+};
+type ExtensionInstallationOwnerApi = ExtensionInstallationApi & {
+  /** Trusted event source for this owner's isolated plugin session. */
+  readonly events: Stream.Stream<ExtensionInstallationChangedEvent, never, never>;
+};
 type Job = {
   readonly operationId: string;
   readonly ownerToken: object;
@@ -137,6 +145,10 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
     const forOwner = (owner: ExtensionOwner) =>
       Effect.gen(function* () {
         const ownerToken = {};
+        // Allocate before starting work so a plugin that attaches its event forwarder later still
+        // receives the most recent transition. One pending invalidation is sufficient: callers
+        // refresh through status/list and never receive sensitive operation details here.
+        const events = yield* Queue.sliding<ExtensionInstallationChangedEvent>(1);
         let closed = false;
         let closing = false;
         const closeDone = yield* Deferred.make<void>();
@@ -152,6 +164,10 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
         const upload = yield* options.uploads
           .forOwner(authorize)
           .pipe(Effect.provideService(Scope.Scope, uploadScope));
+        const changed = () =>
+          Queue.offer(events, { event: "extensions.installation.changed", payload: {} }).pipe(
+            Effect.asVoid,
+          );
 
         const ownedJob = (operationId: string) => {
           const job = jobs.get(operationId);
@@ -172,6 +188,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
         const recordFailure = (
           operationId: string,
           error: ExtensionInstallationSnapshot["error"],
+          notify = true,
         ) =>
           synchronized(
             Effect.sync(() => {
@@ -180,9 +197,11 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                 job.state = "error";
                 job.error = error;
                 job.fiber = undefined;
+                return true;
               }
+              return false;
             }),
-          );
+          ).pipe(Effect.flatMap((didChange) => (didChange && notify ? changed() : Effect.void)));
         const handleFailure = (
           operationId: string,
           error: ExtensionInstallationSnapshot["error"],
@@ -197,6 +216,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
             closing = true;
             closed = true;
             return Effect.gen(function* () {
+              yield* Queue.shutdown(events);
               yield* Scope.close(uploadScope, Exit.void);
               const owned = yield* synchronized(
                 Effect.sync(() => {
@@ -277,6 +297,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                 }),
               ),
             ),
+            Effect.tap(changed),
           );
 
         const pickLocal = () =>
@@ -302,7 +323,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                         job.fiber = undefined;
                       }
                     }),
-                  );
+                  ).pipe(Effect.andThen(changed));
                 validating = true;
                 return synchronized(
                   Effect.suspend(() => {
@@ -313,6 +334,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                     return Effect.void;
                   }),
                 ).pipe(
+                  Effect.tap(changed),
                   Effect.andThen(options.manager.prepareOwned(directory, boundOwner, operationId)),
                   Effect.flatMap((artifact) =>
                     synchronized(
@@ -326,7 +348,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                         job.fiber = undefined;
                         if (job.state === "validating") job.state = "awaiting_review";
                       }),
-                    ),
+                    ).pipe(Effect.andThen(changed)),
                   ),
                 );
               }),
@@ -359,7 +381,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                   return jobSnapshot(job);
                 }),
               ),
-            );
+            ).pipe(Effect.tap(changed));
           });
 
         const updateUpload = (
@@ -381,7 +403,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                 job.upload = uploadProjection(value);
                 return Effect.succeed(jobSnapshot(job));
               }),
-            );
+            ).pipe(Effect.tap(changed));
           });
 
         const finish = (operationId: string) =>
@@ -406,7 +428,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                       job.fiber = undefined;
                       if (job.state === "validating") job.state = "awaiting_review";
                     }),
-                  ),
+                  ).pipe(Effect.andThen(changed)),
                 ),
                 Effect.catchCause((cause) =>
                   handleFailure(operationId, "validation_failed", cause),
@@ -427,7 +449,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                   return jobSnapshot(job);
                 }),
               ),
-            );
+            ).pipe(Effect.tap(changed));
           });
 
         const status = (operationId: string) =>
@@ -438,7 +460,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
             if (local?.state === "receiving" && !local.canceling) {
               const refreshed = yield* Effect.exit(upload.status(operationId));
               if (refreshed._tag === "Failure") {
-                yield* recordFailure(operationId, "expired");
+                yield* recordFailure(operationId, "expired", false);
                 return yield* synchronized(Effect.sync(() => jobSnapshot(ownedJob(operationId)!)));
               }
               const value = refreshed.value;
@@ -525,7 +547,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                                 job.fiber = undefined;
                               }
                             }),
-                          ),
+                          ).pipe(Effect.andThen(changed)),
                         ),
                       )
                     : options.manager
@@ -541,7 +563,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                                   job.fiber = undefined;
                                 }
                               }),
-                            ),
+                            ).pipe(Effect.andThen(changed)),
                           ),
                         ),
                 ),
@@ -586,7 +608,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                   return jobSnapshot(job);
                 }),
               ),
-            );
+            ).pipe(Effect.tap(changed));
           });
 
         const cancel = (operationId: string) =>
@@ -688,7 +710,7 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
                 return jobSnapshot(job);
               }),
             );
-          });
+          }).pipe(Effect.tap(changed));
 
         return {
           begin,
@@ -702,7 +724,8 @@ export const createExtensionInstallation = Effect.fn("ExtensionInstallation.crea
           list,
           requestReview,
           cancel,
-        } satisfies ExtensionInstallationApi;
+          events: Stream.fromQueue(events),
+        } satisfies ExtensionInstallationOwnerApi;
       });
 
     return { forOwner };

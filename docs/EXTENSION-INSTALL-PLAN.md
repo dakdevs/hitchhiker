@@ -219,7 +219,7 @@ approve permissions. Apple documents the [directory selection controls](https://
 and [asynchronous Open panels](https://developer.apple.com/documentation/appkit/nsopenpanel).
 
 A separate default management artifact will use these public operations. Before it can own a full
-management screen, the default plugins need a generic route service so sidebar/top presenters do
+management screen, the default plugins need generic owner-scoped route selection so sidebar/top presenters do
 not gain extension-specific branches. New default grants require a new cohort and must preserve
 existing profile choices. This routing/cohort work is not satisfied by adding a toolbar button or
 copying controller extension screens into presenter code.
@@ -245,3 +245,23 @@ passes 460 portable tests with 40 Native-gated skips (`work/extension-picker-ful
 The SDK, MCP and marketing references document `pickLocal` as the ninth installation operation.
 The default management artifact, generic routing/cohort integration and packaged application
 acceptance remain open. This checkpoint does not claim they are complete.
+
+### Public compiled-plugin installation evidence
+
+Both developer and installed plugins now pass a real Chromium installation fixture using the
+compiled public SDK. The plugin uploads a manifest, content script and binary resource, requests
+separate native approval, and observes completion through owner-scoped installation invalidations.
+Chromium executes the content script and verifies all binary bytes before removal and clean exit
+(`work/extension-public-plugin-native.log`, two passes, no skips). These disposable profiles use
+the test-only mock Keychain. An initial run loaded stale runtime output; rebuilding the runtime
+resolved the missing event forwarding before the passing run.
+
+The invalidation carries an empty payload and requires a current installation grant. Plugins read
+fresh snapshots after it; isolated workers do not need timers. The independent default management
+screen still needs the generic composition route and new default cohort. Native MCP installation,
+cross-profile acceptance and production startup remain outstanding.
+
+Full dependency, type, lint, formatting, test and build checks pass: 462 portable tests and 42
+Native-gated skips (`work/extension-install-events-full-check.log`). The two interactive Native
+cases above ran separately without skips. The owner queue coalesces pending notifications, excludes
+other ports and closes with its owner; runtime tests reject undeclared and revoked delivery.

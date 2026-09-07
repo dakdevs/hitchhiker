@@ -182,20 +182,24 @@ await api.extensions.installation.finish(upload.operationId);
 ```
 
 Upload every required resource, splitting each file into 64 KiB or smaller chunks with exact offsets.
-Poll `status` from a timer or later user action; do not block a plugin event callback while awaiting
-review. When it reports `awaiting_review`, call `requestReview`.
+Isolated plugins with `extensions.install` receive coalesced
+`extensions.installation.changed` events through `definePlugin({ onEvent })`. Its payload is always
+`{}`; call `status` or `list` after an invalidation rather than polling with a timer. MCP has no event
+stream and continues to poll. Do not block a plugin event callback while awaiting review. When status
+reports `awaiting_review`, call `requestReview`.
 
 The exact SDK methods are `begin()`, `beginFile(operationId, path, size)`,
 `append(operationId, offset, data: Uint8Array)`, `finish(operationId)`, `status(operationId)`,
 `list()`, `requestReview(operationId)`, `cancel(operationId)`, and `pickLocal()`. The first eight
 methods retain their existing names and arguments. `pickLocal()` has no arguments and asks a trusted
 local host to select a package; it fails safely when that host does not provide a picker. `finish`
-validates asynchronously; poll `status`. `requestReview` only opens trusted local Native review: a
+validates asynchronously. `requestReview` only opens trusted local Native review: a
 person must approve or reject it and no SDK, MCP, or plugin call can approve it.
 `pickLocal()` returns immediately with `choosing`. The local user selects one folder containing
 `manifest.json`; its contents pass through the same copied-artifact validation as uploaded packages.
-The path is never returned to the plugin or MCP client. Poll for `awaiting_review`, then call
-`requestReview` to request the separate permission decision. Selecting a folder does not install it.
+The path is never returned to the plugin or MCP client. After an invalidation, read status until it
+reports `awaiting_review`, then call `requestReview` to request the separate permission decision.
+Selecting a folder does not install it.
 Only one local selection/validation operation is active at a time. The native panel closes after
 five minutes, on owner shutdown or revocation, or when `cancel(operationId)` stops the operation.
 An unsupported host settles the operation with a sanitized failure.
@@ -220,6 +224,8 @@ One session allows 10,000 entries, depth 64, 256 MiB per file, 512 MiB total, a 
 64 KiB decoded chunks (87,384 base64 characters). Uploads expire after 10 minutes idle or 60 minutes.
 Cancellation, restart, validation, review, and installation can settle asynchronously; refresh
 `status` or inventory before retrying. Errors or client timeouts do not prove no durable side effect.
+Receiving-upload expiry is discovered by a later `status` call and does not emit an invalidation.
+Neither `status` nor `list` emits an invalidation, preventing refresh loops.
 An upload belongs to its owner principal and durable grant. A disconnected plugin/MCP connection
 cannot resume its ephemeral receiving upload. A persisted prepared review for the same principal and
 grant can be rediscovered through the owned inventory; the coordinator bounds memory to 32 operations and evicts terminal entries when admitting new work.

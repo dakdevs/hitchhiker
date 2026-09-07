@@ -130,8 +130,12 @@ and installation state. Permission approval remains on the trusted Native surfac
 `pickLocal`.
 `append` accepts a `Uint8Array`; callers never provide an owner, grant, or host path. Requesting a
 review asks the trusted local surface to review permissions and never approves an installation.
-`finish` validates asynchronously; poll `status(operationId)`. The first eight methods retain their
-existing arguments. `pickLocal()` has no arguments and asks a trusted local host to choose a package;
+`finish` validates asynchronously. Plugins with a declared and current `extensions.install` grant
+receive a coalesced `extensions.installation.changed` `onEvent` callback with payload `{}`; call
+`status` or `list` from that callback instead of polling with a timer. MCP has no event stream and
+polls. `status` and `list` never emit this event, and receiving-upload expiry is reported only by a
+later `status` call. The first eight methods retain their existing arguments. `pickLocal()` has no
+arguments and asks a trusted local host to choose a package;
 it fails safely when that picker is unavailable. Uploads allow 64 KiB chunks, 256 MiB files, 512 MiB
 total, 10,000 entries, depth 64, and 4,096-byte relative paths. Real Native fixtures pass uploaded and locally selected packages through separate native approval,
 binary-resource execution and removal using disposable profiles. Packaged application acceptance

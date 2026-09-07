@@ -76,9 +76,11 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
             ? "ui.compose"
             : event.event === "devtools.changed"
               ? "devtools.manage"
-              : event.event.startsWith("pages.")
-                ? "pages.list"
-                : undefined;
+              : event.event === "extensions.installation.changed"
+                ? "extensions.install"
+                : event.event.startsWith("pages.")
+                  ? "pages.list"
+                  : undefined;
         if (capability === undefined) return;
         if (
           !manifest.capabilities.includes(capability) &&
