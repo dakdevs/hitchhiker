@@ -21,8 +21,8 @@ import type { PluginArtifactStore } from "./plugin-artifacts.ts";
 import type { PluginManager } from "./plugin-manager.ts";
 import type { ProfileWriteLease } from "./profile-write-lease.ts";
 
-const JournalId = "default-browser-v2";
-const JournalVersion = 2;
+const JournalId = "default-browser-v3";
+const JournalVersion = 3;
 const JournalLimit = 64 * 1024;
 const coordinatorLocks = new Map<string, Semaphore.Semaphore>();
 const poisonedProfiles = new Set<string>();
@@ -33,10 +33,15 @@ const previousIds = [
   "default-sidebar-tabs",
   "default-top-tabs",
 ] as const;
-const ids = [...previousIds, "default-devtools"] as const;
-const cohortIds = (version: 1 | 2) => (version === 1 ? previousIds : ids);
+const v2Ids = [...previousIds, "default-devtools"] as const;
+const ids = [...v2Ids, "default-extension-management"] as const;
+const cohortIds = (version: 1 | 2 | 3) =>
+  version === 1 ? previousIds : version === 2 ? v2Ids : ids;
 type DefaultPluginId = (typeof ids)[number];
+type LegacyPluginId = (typeof previousIds)[number];
 type AbandonReason = "profile-customized" | "bootstrap-state-diverged";
+const isLegacyPluginId = (id: DefaultPluginId): id is LegacyPluginId =>
+  (previousIds as readonly string[]).includes(id);
 
 const capabilities = {
   "default-tab-model": ["pages.list", "pages.manage", "storage.local"],
@@ -68,6 +73,13 @@ const capabilities = {
     "pages.list",
     "pages.manage",
     "storage.local",
+    "configuration.read",
+  ],
+  "default-extension-management": [
+    "ui.compose",
+    "extensions.read",
+    "extensions.manage",
+    "extensions.install",
     "configuration.read",
   ],
 } satisfies Readonly<Record<DefaultPluginId, readonly Capability[]>>;
@@ -124,7 +136,7 @@ export interface DefaultPluginBootstrapOptions {
 
 const planFor = (
   placement: "sidebar" | "top",
-  version: 1 | 2 = JournalVersion,
+  version: 1 | 2 | 3 = JournalVersion,
 ): InstalledPluginPlanInput => {
   const presenter = `default-${placement}-tabs`;
   return {
@@ -133,7 +145,8 @@ const planFor = (
       DefaultTabPinsPluginId,
       "default-browser-layout",
       presenter,
-      ...(version === 2 ? ["default-devtools"] : []),
+      ...(version >= 2 ? ["default-devtools"] : []),
+      ...(version === 3 ? ["default-extension-management"] : []),
     ],
     composition: {
       layout: "default-browser-layout",
@@ -141,10 +154,33 @@ const planFor = (
         key,
         contributions: [
           { pluginId: presenter, id: key },
-          ...(version === 2 && key === "toolbar"
+          ...(version >= 2 && key === "toolbar"
             ? [{ pluginId: "default-devtools", id: "toolbar" }]
             : []),
+          ...(version === 3 && key === "toolbar"
+            ? [
+                {
+                  pluginId: "default-extension-management",
+                  id: "launcher",
+                  optional: true as const,
+                },
+              ]
+            : []),
+          ...(version === 3 && key === "content"
+            ? [
+                { pluginId: presenter, id: "settings", optional: true as const },
+                { pluginId: presenter, id: "plugins", optional: true as const },
+                {
+                  pluginId: "default-extension-management",
+                  id: "main",
+                  optional: true as const,
+                },
+              ]
+            : []),
         ],
+        ...(version === 3 && key === "content"
+          ? { route: { fallback: { pluginId: presenter, id: "content" } } }
+          : {}),
       })),
     },
     serviceBindings: [
@@ -166,7 +202,7 @@ const planFor = (
         provider: "default-browser-layout",
         service: "layout",
       },
-      ...(version === 2
+      ...(version >= 2
         ? [
             {
               consumer: "default-devtools",
@@ -214,6 +250,9 @@ const CapabilitySchema = Schema.Literals([
   "plugins.read",
   "plugins.manage",
   "storage.local",
+  "extensions.read",
+  "extensions.manage",
+  "extensions.install",
 ]);
 const DefaultPluginIdSchema = Schema.Literals(ids);
 const RevisionSchema = Schema.Int.check(
@@ -227,8 +266,8 @@ const DescriptorSchema = Schema.Struct({
   grantKey: Schema.String,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const PendingSchema = Schema.Struct({
-  version: Schema.Literals([1, 2]),
-  id: Schema.Literals(["default-browser-v1", "default-browser-v2"]),
+  version: Schema.Literals([1, 2, 3]),
+  id: Schema.Literals(["default-browser-v1", "default-browser-v2", "default-browser-v3"]),
   state: Schema.Literal("pending"),
   placement: Schema.Literals(["sidebar", "top"]),
   artifacts: Schema.Array(DescriptorSchema).check(Schema.isMaxLength(ids.length)),
@@ -242,14 +281,14 @@ const PendingSchema = Schema.Struct({
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const JournalSchema = Schema.Union([
   Schema.Struct({
-    version: Schema.Literals([1, 2]),
-    id: Schema.Literals(["default-browser-v1", "default-browser-v2"]),
+    version: Schema.Literals([1, 2, 3]),
+    id: Schema.Literals(["default-browser-v1", "default-browser-v2", "default-browser-v3"]),
     state: Schema.Literal("completed"),
     revision: RevisionSchema,
   }).annotate({ parseOptions: { onExcessProperty: "error" } }),
   Schema.Struct({
-    version: Schema.Literals([1, 2]),
-    id: Schema.Literals(["default-browser-v1", "default-browser-v2"]),
+    version: Schema.Literals([1, 2, 3]),
+    id: Schema.Literals(["default-browser-v1", "default-browser-v2", "default-browser-v3"]),
     state: Schema.Literal("abandoned"),
     reason: Schema.Literals(["profile-customized", "bootstrap-state-diverged"]),
   }).annotate({ parseOptions: { onExcessProperty: "error" } }),
@@ -292,7 +331,7 @@ const decodeJournal = (value: unknown): Journal | undefined => {
     journal.version === 1 &&
     journal.artifacts.every(
       (descriptor) =>
-        descriptor.id !== "default-devtools" &&
+        isLegacyPluginId(descriptor.id) &&
         same(descriptor.capabilities, legacyCapabilities[descriptor.id]),
     );
   if (

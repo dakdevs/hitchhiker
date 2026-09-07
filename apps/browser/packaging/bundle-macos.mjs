@@ -22,6 +22,7 @@ import { Readable } from "node:stream";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
 
 const nodeVersion = "24.19.0";
 const pnpmVersion = "11.24.0";
@@ -46,6 +47,7 @@ const output = resolve(
 );
 const showHelp = process.argv.includes("--help");
 const verifyOnly = process.argv.includes("--verify-only");
+const verifyDefaultsOnly = process.argv.includes("--verify-default-plugins");
 const skipBuild = process.argv.includes("--skip-build");
 const nativeSource = resolve(
   argument("--native-source") ?? process.env.NATIVE_SDK_SOURCE ?? join(work, "native-sdk"),
@@ -60,15 +62,115 @@ const nodeBinary = join(nodeRoot, "bin/node");
 const corepack = join(nodeRoot, "lib/node_modules/corepack/dist/corepack.js");
 const isolatedWorkspace = join(work, "package-staging/workspace");
 const controllerStage = join(work, "package-staging/controller");
-const defaultPluginBundle = join(root, "apps/default-plugins/dist");
+const defaultPluginBundle = resolve(
+  argument("--default-plugin-bundle") ?? join(root, "apps/default-plugins/dist"),
+);
 const defaultArtifactIds = [
   "default-tab-model",
   "default-tab-pins",
   "default-browser-layout",
   "default-sidebar-tabs",
   "default-top-tabs",
+  "default-devtools",
+  "default-extension-management",
 ];
 const defaultPlacements = ["sidebar", "top"];
+const modelContract = {
+  name: "browser.tabs.model",
+  version: "1.0.0",
+  digest: "a16d9ae88772e0bc62b87b3e6a66297bc1ef3d1c9c5b0ec00ac695015e08d804",
+};
+const pinsContract = {
+  name: "browser.tabs.pins",
+  version: "1.0.0",
+  digest: "56c40b339f7de481bed4b7a23e6236ff26010f042d143e94343dd8544c2e4f83",
+};
+const layoutContract = {
+  name: "browser.shell.layout",
+  version: "1.0.0",
+  digest: "4236cfe559976e38d1fcd6fd0777a7f85954e1a4dc0fbede6b3dbc24a9cdd97d",
+};
+const presenterCapabilities = [
+  "ui.compose",
+  "pages.list",
+  "pages.manage",
+  "storage.local",
+  "configuration.read",
+  "configuration.write",
+  "plugins.read",
+  "plugins.manage",
+];
+const presenterRequirements = [
+  { id: "model", contract: modelContract },
+  { id: "layout", contract: layoutContract },
+  { id: "pins", contract: pinsContract, optional: true },
+];
+const defaultArtifactManifests = {
+  "default-tab-model": {
+    id: "default-tab-model",
+    name: "Tabs",
+    capabilities: ["pages.list", "pages.manage", "storage.local"],
+    provides: [{ id: "model", contract: modelContract }],
+    version: "1.0.0",
+  },
+  "default-tab-pins": {
+    id: "default-tab-pins",
+    name: "Pinned tabs",
+    capabilities: ["pages.list", "storage.local"],
+    provides: [{ id: "pins", contract: pinsContract }],
+    version: "1.0.0",
+  },
+  "default-browser-layout": {
+    id: "default-browser-layout",
+    name: "Browser layout",
+    capabilities: ["ui.compose", "configuration.read"],
+    provides: [{ id: "layout", contract: layoutContract }],
+    version: "1.0.0",
+  },
+  "default-sidebar-tabs": {
+    id: "default-sidebar-tabs",
+    name: "Sidebar tabs",
+    capabilities: presenterCapabilities,
+    requires: presenterRequirements,
+    version: "1.0.0",
+  },
+  "default-top-tabs": {
+    id: "default-top-tabs",
+    name: "Top tabs",
+    capabilities: presenterCapabilities,
+    requires: presenterRequirements,
+    version: "1.0.0",
+  },
+  "default-devtools": {
+    id: "default-devtools",
+    name: "Developer tools",
+    capabilities: [
+      "ui.compose",
+      "devtools.manage",
+      "pages.list",
+      "pages.manage",
+      "storage.local",
+      "configuration.read",
+    ],
+    requires: [
+      { id: "model", contract: modelContract },
+      { id: "layout", contract: layoutContract },
+    ],
+    version: "1.0.0",
+  },
+  "default-extension-management": {
+    id: "default-extension-management",
+    name: "Extensions",
+    capabilities: [
+      "ui.compose",
+      "extensions.read",
+      "extensions.manage",
+      "extensions.install",
+      "configuration.read",
+    ],
+    version: "1.0.0",
+  },
+};
 
 const fail = (message) => {
   throw new Error(message);
@@ -117,38 +219,53 @@ const isSha256 = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(v
 
 const isDefaultPlan = (placement, composition, services) => {
   const presenter = `default-${placement}-tabs`;
-  const expectedBindings = [
-    ["model", "default-tab-model", "model"],
-    ["pins", "default-tab-pins", "pins"],
-    ["layout", "default-browser-layout", "layout"],
+  const expected = {
+    layout: "default-browser-layout",
+    slots: [
+      { key: "tabs", contributions: [{ pluginId: presenter, id: "tabs" }] },
+      {
+        key: "toolbar",
+        contributions: [
+          { pluginId: presenter, id: "toolbar" },
+          { pluginId: "default-devtools", id: "toolbar" },
+          { pluginId: "default-extension-management", id: "launcher", optional: true },
+        ],
+      },
+      {
+        key: "content",
+        route: { fallback: { pluginId: presenter, id: "content" } },
+        contributions: [
+          { pluginId: presenter, id: "content" },
+          { pluginId: presenter, id: "settings", optional: true },
+          { pluginId: presenter, id: "plugins", optional: true },
+          { pluginId: "default-extension-management", id: "main", optional: true },
+        ],
+      },
+    ],
+  };
+  const bindings = [
+    { consumer: presenter, dependency: "model", provider: "default-tab-model", service: "model" },
+    { consumer: presenter, dependency: "pins", provider: "default-tab-pins", service: "pins" },
+    {
+      consumer: presenter,
+      dependency: "layout",
+      provider: "default-browser-layout",
+      service: "layout",
+    },
+    {
+      consumer: "default-devtools",
+      dependency: "model",
+      provider: "default-tab-model",
+      service: "model",
+    },
+    {
+      consumer: "default-devtools",
+      dependency: "layout",
+      provider: "default-browser-layout",
+      service: "layout",
+    },
   ];
-  return (
-    exactKeys(composition, ["layout", "slots"]) &&
-    composition.layout === "default-browser-layout" &&
-    Array.isArray(composition.slots) &&
-    composition.slots.length === 3 &&
-    composition.slots.every(
-      (slot, index) =>
-        exactKeys(slot, ["key", "contributions"]) &&
-        slot.key === ["tabs", "toolbar", "content"][index] &&
-        Array.isArray(slot.contributions) &&
-        slot.contributions.length === 1 &&
-        exactKeys(slot.contributions[0], ["pluginId", "id"]) &&
-        slot.contributions[0].pluginId === presenter &&
-        slot.contributions[0].id === slot.key,
-    ) &&
-    exactKeys(services, ["bindings"]) &&
-    Array.isArray(services.bindings) &&
-    services.bindings.length === expectedBindings.length &&
-    services.bindings.every(
-      (binding, index) =>
-        exactKeys(binding, ["consumer", "dependency", "provider", "service"]) &&
-        binding.consumer === presenter &&
-        binding.dependency === expectedBindings[index][0] &&
-        binding.provider === expectedBindings[index][1] &&
-        binding.service === expectedBindings[index][2],
-    )
-  );
+  return isDeepStrictEqual(composition, expected) && isDeepStrictEqual(services, { bindings });
 };
 
 /**
@@ -173,7 +290,7 @@ const validateDefaultPluginBundle = (directory) => {
   } catch {
     fail("Default plugin index is not valid JSON");
   }
-  if (!exactKeys(index, ["format", "artifacts", "plans", "digest"]) || index.format !== 1) {
+  if (!exactKeys(index, ["format", "artifacts", "plans", "digest"]) || index.format !== 3) {
     fail("Default plugin index has an invalid schema");
   }
   const unsigned = { format: index.format, artifacts: index.artifacts, plans: index.plans };
@@ -184,7 +301,7 @@ const validateDefaultPluginBundle = (directory) => {
     fail("Default plugin index digest does not match its contents");
   }
   if (!Array.isArray(index.artifacts) || index.artifacts.length !== defaultArtifactIds.length) {
-    fail("Default plugin index does not contain the five required artifacts");
+    fail("Default plugin index does not contain the seven required artifacts");
   }
   for (const [position, id] of defaultArtifactIds.entries()) {
     const artifact = index.artifacts[position];
@@ -214,7 +331,9 @@ const validateDefaultPluginBundle = (directory) => {
     } catch {
       fail(`Default plugin ${id} manifest is not valid JSON`);
     }
-    if (parsedManifest.id !== id) fail(`Default plugin manifest identity mismatch for ${id}`);
+    if (!isDeepStrictEqual(parsedManifest, defaultArtifactManifests[id])) {
+      fail(`Default plugin ${id} manifest does not match the fixed V3 declaration`);
+    }
   }
   if (!exactKeys(index.plans, defaultPlacements))
     fail("Default plugin plans have an invalid schema");
@@ -670,10 +789,17 @@ const unknownArguments = process.argv
   .slice(2)
   .filter(
     (value) =>
-      !["--", "--help", "--skip-build", "--verify-only"].includes(value) &&
-      !["--output=", "--native-source=", "--cef-root="].some((prefix) => value.startsWith(prefix)),
+      !["--", "--help", "--skip-build", "--verify-only", "--verify-default-plugins"].includes(
+        value,
+      ) &&
+      !["--output=", "--native-source=", "--cef-root=", "--default-plugin-bundle="].some((prefix) =>
+        value.startsWith(prefix),
+      ),
   );
 if (unknownArguments.length > 0) fail(`Unknown argument: ${unknownArguments[0]}`);
+if (argument("--default-plugin-bundle") !== undefined && !verifyDefaultsOnly) {
+  fail("--default-plugin-bundle requires --verify-default-plugins");
+}
 if (showHelp) {
   console.log(`Build an Apple Silicon Hitchhiker developer app.
 Usage: pnpm bundle:macos [-- --skip-build] [--output=/path/Hitchhiker.app]
@@ -684,7 +810,14 @@ Options:
   --cef-root=/path       CEF ${cefVersion} binary distribution
   --skip-build           Reuse native outputs and TypeScript dist files
   --verify-only          Verify an existing bundle without build inputs
+  --verify-default-plugins Verify the built default plugins without packaging an app
+  --default-plugin-bundle=/path Override the distribution checked by --verify-default-plugins
 `);
+  process.exit(0);
+}
+if (verifyDefaultsOnly) {
+  validateDefaultPluginBundle(defaultPluginBundle);
+  console.log("Verified default plugin distribution");
   process.exit(0);
 }
 if (process.platform !== "darwin" || process.arch !== "arm64") {

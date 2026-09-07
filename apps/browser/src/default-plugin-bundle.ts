@@ -20,6 +20,7 @@ const ids = [
   "default-sidebar-tabs",
   "default-top-tabs",
   "default-devtools",
+  "default-extension-management",
 ] as const;
 const placements = ["sidebar", "top"] as const;
 type Placement = (typeof placements)[number];
@@ -38,7 +39,7 @@ const PlanIndex = Schema.Struct({
   servicesSha256: Digest,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const BundleIndex = Schema.Struct({
-  format: Schema.Literal(2),
+  format: Schema.Literal(3),
   artifacts: Schema.Array(ArtifactIndex).check(Schema.isMaxLength(ids.length)),
   plans: Schema.Struct({ sidebar: PlanIndex, top: PlanIndex }).annotate({
     parseOptions: { onExcessProperty: "error" },
@@ -63,7 +64,7 @@ export const packagedDefaultPluginBundleDirectory = (controllerModule: URL): str
 const expectedPlan = (placement: Placement): InstalledPluginPlanInput => {
   const presenter = `default-${placement}-tabs`;
   return {
-    enabled: [ids[0], ids[1], ids[2], presenter, ids[5]],
+    enabled: [ids[0], ids[1], ids[2], presenter, ids[5], ids[6]],
     composition: {
       layout: ids[2],
       slots: ["tabs", "toolbar", "content"].map((key) => ({
@@ -73,8 +74,19 @@ const expectedPlan = (placement: Placement): InstalledPluginPlanInput => {
             ? [
                 { pluginId: presenter, id: key },
                 { pluginId: ids[5], id: key },
+                { pluginId: ids[6], id: "launcher", optional: true as const },
               ]
-            : [{ pluginId: presenter, id: key }],
+            : key === "content"
+              ? [
+                  { pluginId: presenter, id: key },
+                  { pluginId: presenter, id: "settings", optional: true as const },
+                  { pluginId: presenter, id: "plugins", optional: true as const },
+                  { pluginId: ids[6], id: "main", optional: true as const },
+                ]
+              : [{ pluginId: presenter, id: key }],
+        ...(key === "content"
+          ? { route: { fallback: { pluginId: presenter, id: "content" } } }
+          : {}),
       })),
     },
     serviceBindings: [

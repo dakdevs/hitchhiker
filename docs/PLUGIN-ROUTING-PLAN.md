@@ -284,3 +284,31 @@ Still unimplemented are the
 default extension-management artifact, V3 bundle and journal, six-worker capacity change, complete
 timer-free default screen, six-worker Native regression and resource measurements. Do not describe
 independent default extension management as shipped until those items and the acceptance above pass.
+
+## V3 integration checkpoint
+
+The current worktree builds seven default artifacts and admits six active workers, including the
+independent extension-management plugin. Strict V3 bootstrap and packaging validation preserve
+predecessor journals without adding grants. The combined portable check passes; the public SDK now
+includes the picker's existing `choosing` state, with a typed fixture instead of an unsafe cast.
+
+The interactive Native fixture passes local directory selection, native permission review, real
+Chromium installation, content-script execution and binary-resource integrity, removal, selected
+plugin disable/re-enable, browser fallback, retained document state, and clean engine exit. Other
+five activation generations remain unchanged during extension-plugin disable. A process inspection
+after the run found no remaining host, broker, or worker processes. This is graceful lifecycle
+coverage, not abrupt-crash or grant-revocation coverage. Evidence: `work/default-extensions-native.log`.
+
+That run observed six-worker startup at 3.89 seconds and combined worker RSS of 64,720 KiB at startup,
+65,040 KiB with the picker, 65,168 KiB during review, 66,192 KiB after installation, and 66,112 KiB
+after removal/re-enable. These are short-run system-wide worker-name samples, excluding Chromium,
+brokers, and GPU memory. No other Native fixture ran concurrently, but automated process-tree
+attribution and teardown assertions remain required. The 252 ms route observation uses a 250 ms
+polling interval and is not a frame-latency measurement. Restart, crash, idle rendering, production
+Keychain startup, and release acceptance remain open.
+
+Independent review also identified a presenter publication race: route destinations now publish
+before their toolbar launchers. The portable presenter fixture rejects launchers whose destinations
+are absent. Packaging now compares every complete manifest to the fixed V3 declaration, and a portable
+regression rejects excess extension authority even when the artifact and index are rehashed. A
+distribution hash alone does not prove that its capabilities match the approved default cohort.

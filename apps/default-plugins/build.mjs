@@ -16,8 +16,33 @@ const artifactIds = [
   "default-sidebar-tabs",
   "default-top-tabs",
   "default-devtools",
+  "default-extension-management",
 ];
 const placements = ["sidebar", "top"];
+const compositionFor = (presenter) => ({
+  layout: "default-browser-layout",
+  slots: [
+    { key: "tabs", contributions: [{ pluginId: presenter, id: "tabs" }] },
+    {
+      key: "toolbar",
+      contributions: [
+        { pluginId: presenter, id: "toolbar" },
+        { pluginId: "default-devtools", id: "toolbar" },
+        { pluginId: "default-extension-management", id: "launcher", optional: true },
+      ],
+    },
+    {
+      key: "content",
+      route: { fallback: { pluginId: presenter, id: "content" } },
+      contributions: [
+        { pluginId: presenter, id: "content" },
+        { pluginId: presenter, id: "settings", optional: true },
+        { pluginId: presenter, id: "plugins", optional: true },
+        { pluginId: "default-extension-management", id: "main", optional: true },
+      ],
+    },
+  ],
+});
 
 // The index digest deliberately excludes itself. Its canonical representation has no whitespace
 // and is generated from fixed-key objects below, so it remains stable across platforms.
@@ -39,6 +64,18 @@ for (const name of ["model", "pins", "layout"]) {
   };
 }
 const artifacts = [
+  {
+    id: "default-extension-management",
+    entry: "extensions-entry",
+    name: "Extensions",
+    capabilities: [
+      "ui.compose",
+      "extensions.read",
+      "extensions.manage",
+      "extensions.install",
+      "configuration.read",
+    ],
+  },
   {
     id: "default-tab-model",
     entry: "model-entry",
@@ -140,19 +177,7 @@ for (const placement of ["sidebar", "top"]) {
   const presenter = `default-${placement}-tabs`;
   const destination = new URL(`${placement}/`, out);
   await mkdir(destination, { recursive: true });
-  const composition = {
-    layout: "default-browser-layout",
-    slots: ["tabs", "toolbar", "content"].map((key) => ({
-      key,
-      contributions:
-        key === "toolbar"
-          ? [
-              { pluginId: presenter, id: key },
-              { pluginId: "default-devtools", id: key },
-            ]
-          : [{ pluginId: presenter, id: key }],
-    })),
-  };
+  const composition = compositionFor(presenter);
   const services = {
     bindings: [
       { consumer: presenter, dependency: "model", provider: "default-tab-model", service: "model" },
@@ -221,23 +246,7 @@ for (const placement of placements) {
     ["default-devtools", "layout", "default-browser-layout", "layout"],
   ];
   if (
-    recipe.layout !== "default-browser-layout" ||
-    !Array.isArray(recipe.slots) ||
-    recipe.slots.length !== 3 ||
-    !recipe.slots.every(
-      (slot, index) =>
-        slot.key === ["tabs", "toolbar", "content"][index] &&
-        ((slot.key === "toolbar" &&
-          slot.contributions?.length === 2 &&
-          slot.contributions[0]?.pluginId === presenter &&
-          slot.contributions[0]?.id === slot.key &&
-          slot.contributions[1]?.pluginId === "default-devtools" &&
-          slot.contributions[1]?.id === slot.key) ||
-          (slot.key !== "toolbar" &&
-            slot.contributions?.length === 1 &&
-            slot.contributions[0]?.pluginId === presenter &&
-            slot.contributions[0]?.id === slot.key)),
-    ) ||
+    !isDeepStrictEqual(recipe, compositionFor(presenter)) ||
     !Array.isArray(bindings.bindings) ||
     bindings.bindings.length !== expectedBindings.length ||
     !bindings.bindings.every(
@@ -257,7 +266,7 @@ for (const placement of placements) {
     servicesSha256: sha256(servicesBytes),
   };
 }
-const index = { format: 2, artifacts: bundleArtifacts, plans };
+const index = { format: 3, artifacts: bundleArtifacts, plans };
 await writeFile(
   new URL("bundle.json", out),
   JSON.stringify({ ...index, digest: indexDigest(index) }, null, 2) + "\n",

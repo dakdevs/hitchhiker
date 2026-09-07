@@ -806,3 +806,11 @@ and fallback loss clears selection through the existing recovery path. The
 [routing plan](PLUGIN-ROUTING-PLAN.md) records portable lifecycle coverage and a real installed-SDK
 Chromium fixture that preserves live pages across route switching and optional-plugin removal.
 The independent extension-management artifact and V3 default cohort remain to be implemented.
+
+The V3 default cohort adds an independent extension-management plugin through optional owner-scoped
+routes. Its real Native fixture passes picker, native review, Chromium extension execution and
+binary integrity, removal, disable/re-enable fallback, retained page state, and clean exit. The V3
+startup regression also passes public sidebar/top presenter replacement with DevTools retained.
+Published V1/V2 journals retain their artifacts and grants. The [V3 checkpoint](PLUGIN-ROUTING-PLAN.md#v3-integration-checkpoint)
+distinguishes these lifecycle results from unfinished restart/crash/resource acceptance, production
+startup, and the remaining framework API work.

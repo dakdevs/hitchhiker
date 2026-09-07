@@ -26,6 +26,8 @@ const nodes = (root: NativeNode): readonly NativeNode[] => {
 };
 
 const fakeApi = () => {
+  let selectedRoute = "content";
+  const routeCalls: string[] = [];
   let model: Json = {
     version: 1,
     pagesRevision: 1,
@@ -214,11 +216,20 @@ const fakeApi = () => {
         return { revision: layouts.length };
       },
       publishContribution: async (id, surface) => {
+        if (id === "toolbar") {
+          for (const route of ["content", "settings", "plugins"])
+            assert.ok(contributions.has(route), `${route} must be ready before its launcher`);
+        }
         contributions.set(id, surface);
         return { revision: contributions.size };
       },
       withdrawContribution: async () => ({ revision: 1 }),
-      showRoute: async () => ({ revision: 1 }),
+      showRoute: async (id) => {
+        assert.ok(contributions.has(id));
+        selectedRoute = id;
+        routeCalls.push(id);
+        return { revision: 1 };
+      },
       hideRoute: async () => ({ revision: 1 }),
       release: async () => undefined,
     },
@@ -228,6 +239,8 @@ const fakeApi = () => {
     calls,
     pageCalls,
     contributions,
+    routeCalls,
+    selectedRoute: () => selectedRoute,
     layouts,
     publications,
     configurationWrites,
@@ -341,10 +354,13 @@ test("presenter management routes replace the viewport and Back restores the sel
     "ui.event",
     uiEvent("press", "settings", { action: "interface.settings" }),
   );
-  assert.equal(fake.contributions.get("content")?.root.key, "settings-route");
-  assert.deepEqual(fake.contributions.get("content")?.bindings, []);
+  assert.equal(fake.selectedRoute(), "settings");
+  assert.equal(fake.contributions.get("settings")?.root.key, "settings-route");
+  assert.deepEqual(fake.contributions.get("settings")?.bindings, []);
+  assert.equal(fake.contributions.get("content")?.root.key, "main-page");
   await plugin.onPagesChanged?.(2);
-  assert.equal(fake.contributions.get("content")?.root.key, "settings-route");
+  assert.equal(fake.selectedRoute(), "settings");
+  assert.deepEqual(fake.routeCalls, ["settings"]);
   await plugin.onEvent?.(
     "ui.event",
     uiEvent("press", "settings-color-dark", { action: "settings.color:dark" }),
@@ -359,6 +375,7 @@ test("presenter management routes replace the viewport and Back restores the sel
     uiEvent("press", "management-back", { action: "management.back" }),
   );
   assert.equal(fake.contributions.get("content")?.root.key, "main-page");
+  assert.equal(fake.selectedRoute(), "content");
   assert.deepEqual(fake.contributions.get("content")?.bindings, [
     { viewportId: "main-page", pageId: "page-b" },
   ]);
@@ -384,7 +401,10 @@ test("management routes refresh tab state and navigation uses a selection change
     revision: 2,
     available: true,
   });
-  assert.equal(fake.contributions.get("content")?.root.key, "settings-route");
+  assert.equal(fake.selectedRoute(), "settings");
+  assert.deepEqual(fake.contributions.get("content")?.bindings, [
+    { viewportId: "main-page", pageId: "page-a" },
+  ]);
   assert.ok(
     nodes(fake.contributions.get("tabs")!.root).some((node) => node.key === "page-select-page-a"),
   );
@@ -407,8 +427,9 @@ test("presenter forwards bounded lifecycle operations and refreshes the revision
   const plugin = createPresenterPlugin("sidebar");
   await plugin.activate(fake.api);
   await plugin.onEvent?.("ui.event", uiEvent("press", "plugins", { action: "interface.plugins" }));
-  assert.equal(fake.contributions.get("content")?.root.key, "plugins-route");
-  assert.deepEqual(fake.contributions.get("content")?.bindings, []);
+  assert.equal(fake.selectedRoute(), "plugins");
+  assert.equal(fake.contributions.get("plugins")?.root.key, "plugins-route");
+  assert.deepEqual(fake.contributions.get("plugins")?.bindings, []);
   for (const action of [
     "plugins.disable:other-plugin",
     "plugins.rollback:other-plugin",

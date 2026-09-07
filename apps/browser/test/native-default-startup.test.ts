@@ -188,8 +188,8 @@ test(
             yield* management.enableMutations();
 
             const installed = yield* manager.list();
-            assert.equal(installed.length, 6);
-            assert.equal(installed.filter((entry) => entry.running).length, 5);
+            assert.equal(installed.length, 7);
+            assert.equal(installed.filter((entry) => entry.running).length, 6);
             const model = Schema.decodeUnknownSync(ModelState)(
               (yield* (yield* storage.forOwner("default-tab-model")).read()).value,
             );
@@ -281,7 +281,8 @@ test(
                       (plan) =>
                         plan.enabled.includes(`default-${placement}-tabs`) &&
                         plan.enabled.includes("default-devtools") &&
-                        plan.enabled.length === 5,
+                        plan.enabled.includes("default-extension-management") &&
+                        plan.enabled.length === 6,
                     ),
                   ),
               );
@@ -307,7 +308,7 @@ test(
                 yield* (yield* storage.forOwner("default-tab-pins")).read(),
                 pinsBefore,
               );
-              assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 5);
+              assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 6);
               for (const [pageId, marker] of markers) {
                 assert.deepEqual(
                   yield* evaluate(
@@ -353,8 +354,8 @@ test(
               ),
             );
             assert.equal(journal.state, "completed");
-            assert.equal(journal.version, 2);
-            assert.equal(journal.revision, 7);
+            assert.equal(journal.version, 3);
+            assert.equal(journal.revision, 8);
             const persisted = JSON.parse(
               yield* Effect.promise(() =>
                 readFile(join(lease.profileRoot, "browser-state.json"), "utf8"),

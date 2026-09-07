@@ -104,6 +104,7 @@ export interface ExtensionManagementSnapshot {
 export interface ExtensionInstallationSnapshot {
   readonly operationId: string;
   readonly state:
+    | "choosing"
     | "receiving"
     | "validating"
     | "awaiting_review"

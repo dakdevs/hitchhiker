@@ -16,7 +16,7 @@ export type { InstalledPluginPlanInput, InstalledPluginPlan } from "@hitchhiker/
 
 const Hash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
 /** A single installed-plugin plan may run this many workers, regardless of origin. */
-export const MaxInstalledPluginWorkers = 5;
+export const MaxInstalledPluginWorkers = 6;
 // Keep plan admission compatible with durable manager revision metadata.
 const GrantId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
 export const InstalledPluginPlanArtifactSchema = Schema.Struct({

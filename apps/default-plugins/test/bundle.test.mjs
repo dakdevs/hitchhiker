@@ -18,6 +18,7 @@ const artifactIds = [
   "default-sidebar-tabs",
   "default-top-tabs",
   "default-devtools",
+  "default-extension-management",
 ];
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -33,7 +34,7 @@ test("build emits the fixed, digest-bound default plugin bundle", async () => {
     "repeated builds must preserve the index",
   );
   assert.deepEqual(Object.keys(index).sort(), ["artifacts", "digest", "format", "plans"]);
-  assert.equal(index.format, 2);
+  assert.equal(index.format, 3);
   assert.equal(
     index.digest,
     sha256(
@@ -91,11 +92,21 @@ test("build emits the fixed, digest-bound default plugin bundle", async () => {
           [
             { pluginId: presenter, id: "toolbar" },
             { pluginId: "default-devtools", id: "toolbar" },
+            { pluginId: "default-extension-management", id: "launcher", optional: true },
           ],
         ],
-        ["content", [{ pluginId: presenter, id: "content" }]],
+        [
+          "content",
+          [
+            { pluginId: presenter, id: "content" },
+            { pluginId: presenter, id: "settings", optional: true },
+            { pluginId: presenter, id: "plugins", optional: true },
+            { pluginId: "default-extension-management", id: "main", optional: true },
+          ],
+        ],
       ],
     );
+    assert.deepEqual(recipe.slots[2].route, { fallback: { pluginId: presenter, id: "content" } });
     assert.deepEqual(serviceRecipe.bindings, [
       { consumer: presenter, dependency: "model", provider: "default-tab-model", service: "model" },
       { consumer: presenter, dependency: "pins", provider: "default-tab-pins", service: "pins" },

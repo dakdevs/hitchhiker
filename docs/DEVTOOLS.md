@@ -50,9 +50,10 @@ Explicit `close` is intentionally profile-wide and can close an inspector opened
 
 ## Default bundle
 
-Fresh eligible profiles use bundle format 2. It installs six artifacts: the tab model, pins,
-layout, both alternate presenters, and `default-devtools`. A selected presentation activates the
-model, pins, layout, one presenter, and the DevTools toolbar: five isolated workers. The toolbar is
+Fresh eligible profiles use bundle format 3. It installs seven artifacts: the tab model, pins,
+layout, both alternate presenters, `default-devtools`, and `default-extension-management`. A selected
+presentation activates the model, pins, layout, one presenter, the DevTools toolbar, and extension
+management: six isolated workers. The toolbar is
 a second contribution in the presenter's toolbar slot, after the presenter contribution. It reads
 the selected page from the model service, refreshes inspector status after model or layout changes,
 and uses `configuration.read` only to match the interface color scheme. It does not own page state
@@ -64,8 +65,9 @@ authority, so `default-devtools` declares and receives those three capabilities 
 `ui.compose`, profile-wide `devtools.manage`, and `configuration.read`. The extra page and storage
 capabilities permit the service binding; they do not expand the toolbar's module API use.
 
-Published V1 bootstrap journals retain their frozen artifact cohort and grants. They never acquire
-`default-devtools` or `devtools.manage` automatically. Completed, abandoned, removed, and custom
+Published V1 and V2 bootstrap journals retain their frozen artifact cohorts and grants. V1 never
+acquires `default-devtools` or `devtools.manage` automatically, and neither predecessor receives
+extension-management authority automatically. Completed, abandoned, removed, and custom
 plans likewise remain unchanged unless an explicit future migration authorizes a change.
 
 ## Build a replacement

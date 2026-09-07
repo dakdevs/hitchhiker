@@ -176,8 +176,8 @@ Each update starts a fresh isolated worker, waits for activation and a short hea
 retains the previous revision for rollback. Replacement briefly returns to the trusted interface.
 Rollback restores the plugin revision and interface; page creation, navigation, or configuration
 changes a plugin already performed are not transactional and are not undone. The manager allows
-sixteen installations, four concurrent workers, and one enabled interface owner. Background plugins
-can run alongside it. Artifact storage is bounded; package garbage collection and a catalog remain
+sixteen installations and six concurrent workers. Composition plans bind a layout owner and
+required or optional contribution owners; a legacy exclusive interface still has one owner. Artifact storage is bounded; package garbage collection and a catalog remain
 future work.
 
 Command–Shift–Escape is reserved by the native host to disable plugins and open trusted plugin

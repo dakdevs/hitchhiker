@@ -539,7 +539,7 @@ test("a sidebar replacement admitted through its management port survives the ca
   );
 });
 
-test("five-worker plans are admitted, while a sixth and failed replacement preserve the live plan", async () => {
+test("six-worker plans are admitted, while a seventh and failed replacement preserve the live plan", async () => {
   await withProfile((root) =>
     Effect.runPromise(
       Effect.gen(function* () {
@@ -550,6 +550,7 @@ test("five-worker plans are admitted, while a sixth and failed replacement prese
           "third-plugin",
           "fourth-plugin",
           "fifth-plugin",
+          "sixth-plugin",
           "bad-plugin",
         ])
           yield* f.stage(id);
@@ -561,11 +562,12 @@ test("five-worker plans are admitted, while a sixth and failed replacement prese
             "third-plugin",
             "fourth-plugin",
             "fifth-plugin",
+            "sixth-plugin",
           ],
           serviceBindings: [],
         });
-        assert.equal(f.active.size, 5);
-        assert.equal(f.peak(), 5);
+        assert.equal(f.active.size, 6);
+        assert.equal(f.peak(), 6);
         const before = yield* Effect.promise(() => readFile(path(root), "utf8"));
         const retained = new Map(f.active);
         const attempt = {
@@ -575,6 +577,7 @@ test("five-worker plans are admitted, while a sixth and failed replacement prese
             "third-plugin",
             "fourth-plugin",
             "fifth-plugin",
+            "sixth-plugin",
             "bad-plugin",
           ],
           serviceBindings: [],
@@ -585,7 +588,7 @@ test("five-worker plans are admitted, while a sixth and failed replacement prese
         );
         assert.match(
           (yield* f.manager.applyPlan(current.revision, attempt).pipe(Effect.flip)).message,
-          /5/,
+          /6/,
         );
         assert.deepEqual(yield* f.manager.plan(), current);
         assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
@@ -600,6 +603,7 @@ test("five-worker plans are admitted, while a sixth and failed replacement prese
                   "second-plugin",
                   "third-plugin",
                   "fourth-plugin",
+                  "fifth-plugin",
                   "bad-plugin",
                 ],
                 serviceBindings: [],
@@ -609,13 +613,19 @@ test("five-worker plans are admitted, while a sixth and failed replacement prese
         );
         assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
         assert.deepEqual(yield* f.manager.plan(), current);
-        assert.equal(f.active.size, 5);
+        assert.equal(f.active.size, 6);
         assert.equal(f.active.has("bad-plugin"), false);
-        for (const id of ["first-plugin", "second-plugin", "third-plugin", "fourth-plugin"])
+        for (const id of [
+          "first-plugin",
+          "second-plugin",
+          "third-plugin",
+          "fourth-plugin",
+          "fifth-plugin",
+        ])
           assert.equal(f.active.get(id), retained.get(id));
-        assert.equal(f.active.has("fifth-plugin"), true);
+        assert.equal(f.active.has("sixth-plugin"), true);
         assert.equal((yield* readRegistry(root)).pendingPlan, undefined);
-        assert.equal(f.peak(), 5);
+        assert.equal(f.peak(), 6);
       }).pipe(Effect.scoped),
     ),
   );

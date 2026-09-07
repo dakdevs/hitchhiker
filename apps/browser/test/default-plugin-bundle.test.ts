@@ -16,6 +16,8 @@ import { createPluginArtifactStore } from "../src/plugin-artifacts.ts";
 
 const execute = promisify(execFile);
 const source = fileURLToPath(new URL("../../default-plugins/", import.meta.url));
+const repository = fileURLToPath(new URL("../../../", import.meta.url));
+const packagingVerifier = join(repository, "apps/browser/packaging/bundle-macos.mjs");
 const ids = [
   "default-tab-model",
   "default-tab-pins",
@@ -23,6 +25,7 @@ const ids = [
   "default-sidebar-tabs",
   "default-top-tabs",
   "default-devtools",
+  "default-extension-management",
 ];
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 let fixtureRoot: string;
@@ -70,6 +73,12 @@ const writeIndex = async (
   );
   await writeFile(join(directory, "bundle.json"), JSON.stringify(index));
 };
+const verifyPackagedDefaults = (directory: string) =>
+  execute(
+    process.execPath,
+    [packagingVerifier, "--verify-default-plugins", `--default-plugin-bundle=${directory}`],
+    { cwd: repository },
+  );
 
 test("reads a real isolated build after resource relocation and stages its complete inventory", () =>
   withBundle(async (directory) => {
@@ -83,6 +92,17 @@ test("reads a real isolated build after resource relocation and stages its compl
       ids,
     );
     assert.ok(staged.every((artifact) => artifact.code.length > 0));
+    assert.deepEqual(
+      staged.find((artifact) => artifact.manifest.id === "default-extension-management")?.manifest
+        .capabilities,
+      [
+        "ui.compose",
+        "extensions.read",
+        "extensions.manage",
+        "extensions.install",
+        "configuration.read",
+      ],
+    );
     assert.deepEqual(
       bundle.plans.sidebar.enabled,
       ids.filter((id) => id !== "default-top-tabs"),
@@ -101,7 +121,58 @@ test("reads a real isolated build after resource relocation and stages its compl
         plan.serviceBindings.map((binding) => binding.provider),
         [ids[0], ids[1], ids[2], ids[0], ids[2]],
       );
+      assert.equal(
+        plan.serviceBindings.some(
+          (binding) =>
+            binding.consumer === "default-extension-management" ||
+            binding.provider === "default-extension-management",
+        ),
+        false,
+      );
+      assert.deepEqual(plan.composition?.slots[1]?.contributions, [
+        { pluginId: `default-${placement}-tabs`, id: "toolbar" },
+        { pluginId: "default-devtools", id: "toolbar" },
+        { pluginId: "default-extension-management", id: "launcher", optional: true },
+      ]);
+      assert.deepEqual(plan.composition?.slots[2], {
+        key: "content",
+        route: {
+          fallback: { pluginId: `default-${placement}-tabs`, id: "content" },
+        },
+        contributions: [
+          { pluginId: `default-${placement}-tabs`, id: "content" },
+          { pluginId: `default-${placement}-tabs`, id: "settings", optional: true },
+          { pluginId: `default-${placement}-tabs`, id: "plugins", optional: true },
+          { pluginId: "default-extension-management", id: "main", optional: true },
+        ],
+      });
     }
+  }));
+
+test("packaging accepts the complete fixed V3 manifest inventory", () =>
+  withBundle(async (directory) => {
+    const result = await verifyPackagedDefaults(directory);
+    assert.match(result.stdout, /Verified default plugin distribution/);
+  }));
+
+test("packaging rejects rehashed excess extension authority", () =>
+  withBundle(async (directory) => {
+    const index = await readIndex(directory);
+    const artifact = index.artifacts.find(
+      ({ id }: { id: string }) => id === "default-extension-management",
+    );
+    assert.ok(artifact);
+    const path = join(directory, artifact.manifest);
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.capabilities.push("plugins.manage");
+    const bytes = JSON.stringify(manifest);
+    await writeFile(path, bytes);
+    artifact.manifestSha256 = hash(bytes);
+    await writeIndex(directory, index);
+    await assert.rejects(
+      verifyPackagedDefaults(directory),
+      /manifest does not match the fixed V3 declaration/,
+    );
   }));
 
 test("rejects changed code before returning any bundle", () =>
@@ -132,6 +203,14 @@ test("rejects missing or duplicated artifact identities even with a matching dig
     index.artifacts[1] = index.artifacts[0];
     await writeIndex(directory, index);
     await assert.rejects(Effect.runPromise(loadDefaultPluginBundle(directory)), /index paths/);
+  }));
+
+test("rejects a predecessor bundle format even when its index is rehashed", () =>
+  withBundle(async (directory) => {
+    const index = await readIndex(directory);
+    index.format = 2;
+    await writeIndex(directory, index);
+    await assert.rejects(Effect.runPromise(loadDefaultPluginBundle(directory)), /index is invalid/);
   }));
 
 test("rejects a rehashed manifest with the wrong identity", () =>

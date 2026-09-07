@@ -9,11 +9,13 @@ cutover remains open.
 
 ## Current cohort
 
-Fresh eligible profiles now use V2: six artifacts, five enabled workers, and a separate DevTools
-toolbar contribution. The manager limit is five for all plugins. V1 pending journals finish their
-frozen five-artifact/four-worker plan; V1 terminal journals remain terminal. The V1 journal details
-and checkpoint evidence below are retained for recovery compatibility. See
-[DevTools V2 integration](DEVTOOLS-PLAN.md#default-cohort-v2-implementation) for the current recipe.
+Fresh eligible profiles use V3: seven artifacts, six enabled workers, a separate DevTools toolbar,
+and independent extension management. The manager limit is six for all plugins. Existing V1/V2
+journals retain their frozen plans and grants: pending work resumes its original cohort, and
+terminal records remain terminal. Neither predecessor automatically receives extension authority.
+The V1 journal details and checkpoint evidence below remain for recovery compatibility. See the
+[V3 routing checkpoint](PLUGIN-ROUTING-PLAN.md#v3-integration-checkpoint) for current implementation
+and the remaining performance and release acceptance.
 
 ## Eligibility and ownership
 

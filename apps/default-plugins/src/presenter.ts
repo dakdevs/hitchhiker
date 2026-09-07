@@ -177,15 +177,16 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
         ? { ...parts.tabs, root: withoutPinControls(parts.tabs.root) }
         : parts.tabs;
     await api.ui.publishContribution("tabs", tabSurface);
-    await api.ui.publishContribution("toolbar", parts.toolbar);
+    await api.ui.publishContribution("content", parts.content);
     await api.ui.publishContribution(
-      "content",
-      route === "settings"
-        ? settingsSurface(configuration, presentation, managementError)
-        : route === "plugins"
-          ? pluginsSurface(management, configuration, presentation, managementError)
-          : parts.content,
+      "settings",
+      settingsSurface(configuration, presentation, managementError),
     );
+    await api.ui.publishContribution(
+      "plugins",
+      pluginsSurface(management, configuration, presentation, managementError),
+    );
+    await api.ui.publishContribution("toolbar", parts.toolbar);
   };
 
   const requestRefresh = (): Promise<void> => {
@@ -236,11 +237,14 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
 
   const handlePress = async (action: string): Promise<void> => {
     if (!api) throw new Error("Presenter plugin has not activated");
+    let revealRoute = false;
     if (action === defaultSurfaceActions.settings || action === defaultSurfaceActions.plugins) {
+      revealRoute = true;
       route = action === defaultSurfaceActions.settings ? "settings" : "plugins";
       managementError = undefined;
       if (route === "plugins") await refreshManagement();
     } else if (action === "management.back") {
+      revealRoute = true;
       route = "browser";
       managementError = undefined;
     } else if (action.startsWith("settings.color:")) {
@@ -284,6 +288,7 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
           presentation: presentation === "sidebar" && !tabsVisible ? "top" : presentation,
         });
       } else if (action === defaultSurfaceActions.newPage) {
+        revealRoute = true;
         route = "browser";
         await callModel("new", {});
         input = initialInput();
@@ -291,6 +296,7 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
       } else if (action === defaultSurfaceActions.navigate) {
         const url = addressUrl(input.text);
         if (url !== undefined) {
+          revealRoute = true;
           route = "browser";
           const page = selectedPage();
           if (page && model?.selection?.kind === "page") await api.pages.navigate(page.id, url);
@@ -298,12 +304,18 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
           inputDirty = false;
         }
       } else if (action === defaultSurfaceActions.back) {
+        route = "browser";
+        revealRoute = true;
         const page = selectedPage();
         if (page) await api.pages.back(page.id);
       } else if (action === defaultSurfaceActions.forward) {
+        route = "browser";
+        revealRoute = true;
         const page = selectedPage();
         if (page) await api.pages.forward(page.id);
       } else if (action === defaultSurfaceActions.reload) {
+        route = "browser";
+        revealRoute = true;
         const page = selectedPage();
         if (page) await api.pages.reload(page.id);
       } else if (action === defaultSurfaceActions.previousSlice) {
@@ -317,6 +329,7 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
         if (pageAction) {
           const [, operation, pageId] = pageAction;
           if (operation === "page.select") {
+            revealRoute = true;
             route = "browser";
             await callModel("select", { pageId });
             inputDirty = false;
@@ -329,6 +342,7 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
       }
     }
     await requestRefresh();
+    if (revealRoute) await api.ui.showRoute(route === "browser" ? "content" : route);
   };
 
   return {
