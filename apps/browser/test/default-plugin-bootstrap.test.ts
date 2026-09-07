@@ -6,12 +6,14 @@ import test from "node:test";
 import { NodeServices } from "@effect/platform-node";
 import {
   createGrantStore,
+  GrantStoreError,
+  LivePluginManifest,
   createPluginStorage,
   PluginStorageError,
   type InstalledPluginPlanInput,
   type PluginStorageAdapter,
 } from "@hitchhiker/runtime";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import {
   DefaultTabModelPluginId,
   DefaultTabPinsPluginId,
@@ -41,9 +43,27 @@ const ids = [
 const caps = [
   ["pages.list", "pages.manage", "storage.local"],
   ["pages.list", "storage.local"],
-  ["ui.compose", "configuration.write"],
-  ["ui.compose", "pages.list", "pages.manage", "storage.local", "configuration.write"],
-  ["ui.compose", "pages.list", "pages.manage", "storage.local", "configuration.write"],
+  ["ui.compose", "configuration.read"],
+  [
+    "ui.compose",
+    "pages.list",
+    "pages.manage",
+    "storage.local",
+    "configuration.read",
+    "configuration.write",
+    "plugins.read",
+    "plugins.manage",
+  ],
+  [
+    "ui.compose",
+    "pages.list",
+    "pages.manage",
+    "storage.local",
+    "configuration.read",
+    "configuration.write",
+    "plugins.read",
+    "plugins.manage",
+  ],
 ] as const;
 const plan = (placement: "sidebar" | "top"): InstalledPluginPlanInput => {
   const presenter = `default-${placement}-tabs`;
@@ -594,5 +614,66 @@ test("safe and developer modes do not load bundles or touch the journal", () =>
         }
       });
       assert.equal(exists, false);
+    }),
+  ));
+
+test("resumes a previous capability cohort without upgrading its frozen managed grants", () =>
+  withHarness("hitchhiker-bootstrap-legacy-authority", "sidebar", (harness) =>
+    Effect.gen(function* () {
+      yield* expectFailure(
+        runDefaultPluginBootstrap({
+          ...harness.input,
+          grants: {
+            ...harness.grants,
+            ensureManaged: () =>
+              Effect.fail(new GrantStoreError({ code: "injected", message: "injected boundary" })),
+          },
+        }),
+      );
+      const pending = JSON.parse(yield* journalText(harness.profileRoot));
+      const previous = [
+        ["pages.list", "pages.manage", "storage.local"],
+        ["pages.list", "storage.local"],
+        ["ui.compose", "configuration.write"],
+        ["ui.compose", "pages.list", "pages.manage", "storage.local", "configuration.write"],
+        ["ui.compose", "pages.list", "pages.manage", "storage.local", "configuration.write"],
+      ] as const;
+      for (const [index, item] of bundle.packages.entries()) {
+        const manifest = yield* Schema.decodeUnknownEffect(LivePluginManifest)(item.manifest);
+        const artifact = yield* harness.artifacts.stage({
+          manifest: { ...manifest, capabilities: previous[index] },
+          code: item.code,
+        });
+        pending.artifacts[index].hash = artifact.hash;
+        pending.artifacts[index].capabilities = previous[index];
+        if (index < 3) {
+          const grant = yield* harness.grants.ensureManaged(pending.artifacts[index].grantKey, {
+            principal: artifact.manifest.id,
+            profileId: "default",
+            origins: [],
+            capabilities: artifact.manifest.capabilities,
+          });
+          yield* harness.manager.install(artifact.hash, grant.id, { staged: true });
+        }
+      }
+      pending.expectedRevision = 3;
+      pending.installedPrefix = ids.slice(0, 3);
+      yield* Effect.promise(() =>
+        writeFile(
+          join(harness.profileRoot, "hitchhiker-plugins", "default-bootstrap.json"),
+          JSON.stringify(pending),
+        ),
+      );
+      yield* runDefaultPluginBootstrap({
+        ...harness.input,
+        loadBundle: Effect.die("must not reload"),
+      });
+      assert.match(yield* journalText(harness.profileRoot), /"state":"completed"/);
+      assert.equal(harness.observed.loads, 1);
+      for (const [index, id] of ids.entries()) {
+        const grant = (yield* harness.grants.list()).find((entry) => entry.principal === id);
+        assert(grant);
+        assert.deepEqual([...grant.capabilities].sort(), [...previous[index]!].sort());
+      }
     }),
   ));

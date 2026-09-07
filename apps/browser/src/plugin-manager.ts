@@ -52,7 +52,10 @@ const capabilities = new Set<Capability>([
   "pages.write",
   "ui.compose",
   "configuration.write",
+  "configuration.read",
   "plugins.install",
+  "plugins.read",
+  "plugins.manage",
   "storage.local",
   "browser.full-control",
   "cdp.connect",
@@ -102,8 +105,15 @@ export interface ManagedPlugin {
   readonly previousVersion?: string;
   readonly lastFailure?: string;
 }
+/** Metadata that an installed manager may expose to a plugin-management caller. */
+export type PublicManagedPlugin = Omit<ManagedPlugin, "hash">;
 export interface PluginManager {
   readonly list: () => Effect.Effect<readonly ManagedPlugin[], PluginManagerError>;
+  /** One coherent public view of the current plan and installed plugin metadata. */
+  readonly managementSnapshot: () => Effect.Effect<
+    { readonly revision: number; readonly plugins: readonly PublicManagedPlugin[] },
+    PluginManagerError
+  >;
   /** Trusted recovery metadata; no bearer credential and no worker/MCP endpoint. */
   readonly inspectInstallation: (id: string) => Effect.Effect<
     | {
@@ -125,6 +135,12 @@ export interface PluginManager {
   readonly applyPlan: (
     expectedRevision: number,
     candidate: InstalledPluginPlanInput,
+  ) => Effect.Effect<InstalledPluginPlan, PluginManagerError>;
+  /** Replaces the authenticated caller everywhere it owns the active plan. */
+  readonly replaceSelf: (
+    callerId: string,
+    targetId: string,
+    expectedRevision: number,
   ) => Effect.Effect<InstalledPluginPlan, PluginManagerError>;
   readonly enable: (id: string) => Effect.Effect<void, PluginManagerError>;
   readonly disable: (id: string) => Effect.Effect<void, PluginManagerError>;
@@ -182,7 +198,10 @@ const CapabilitySchema = Schema.Literals([
   "pages.write",
   "ui.compose",
   "configuration.write",
+  "configuration.read",
   "plugins.install",
+  "plugins.read",
+  "plugins.manage",
   "storage.local",
   "browser.full-control",
   "cdp.connect",
@@ -903,24 +922,26 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
             }
           }).pipe(Effect.tapError(() => poisonMutation)),
         );
+  const publicSummary = (plugin: StoredPlugin): PublicManagedPlugin =>
+    ({
+      id: plugin.id,
+      name: plugin.name,
+      version: plugin.version,
+      enabled: plugin.enabled,
+      running: running.has(plugin.id),
+      ...(plugin.removing ? { removing: true } : {}),
+      capabilities: plugin.revision.capabilities,
+      ...(plugin.previous ? { previousVersion: plugin.previous.version } : {}),
+      ...(plugin.lastFailure ? { lastFailure: plugin.lastFailure } : {}),
+    }) satisfies PublicManagedPlugin;
   const list = () =>
     lock.withPermit(
       Effect.gen(function* () {
         const registry = yield* load();
-        return yield* Effect.forEach(registry.plugins, (plugin) =>
-          Effect.succeed({
-            id: plugin.id,
-            name: plugin.name,
-            version: plugin.version,
-            hash: plugin.revision.hash,
-            enabled: plugin.enabled,
-            running: running.has(plugin.id),
-            ...(plugin.removing ? { removing: true } : {}),
-            capabilities: plugin.revision.capabilities,
-            ...(plugin.previous ? { previousVersion: plugin.previous.version } : {}),
-            ...(plugin.lastFailure ? { lastFailure: plugin.lastFailure } : {}),
-          } satisfies ManagedPlugin),
-        );
+        return registry.plugins.map((plugin) => ({
+          ...publicSummary(plugin),
+          hash: plugin.revision.hash,
+        })) satisfies readonly ManagedPlugin[];
       }),
     );
   const install = (hash: string, grantId: string) =>
@@ -1356,6 +1377,18 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
   });
   const plan = () =>
     withMutationLock(loadedPlan().pipe(Effect.map((registry) => registry.activePlan)));
+  /**
+   * This deliberately does not take the mutation lock: a newly-starting plugin may ask for
+   * management metadata before it acknowledges activation, while a transition holds that lock.
+   * Registry replacement is atomic, so this returns either committed registry generation.
+   */
+  const managementSnapshot = () =>
+    load().pipe(
+      Effect.map((registry) => ({
+        revision: registry.version === 2 ? registry.activePlan.revision : 0,
+        plugins: registry.plugins.map(publicSummary),
+      })),
+    );
   const applyPlan = (expectedRevision: number, input: InstalledPluginPlanInput) =>
     withMutationLock(
       Effect.gen(function* () {
@@ -1369,6 +1402,49 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
           input.enabled.includes(plugin.id)
             ? { ...plugin, suspended: false, lastFailure: undefined }
             : plugin,
+        );
+        return yield* transition(registry, plugins, candidate);
+      }),
+    );
+  const replaceSelf = (callerId: string, targetId: string, expectedRevision: number) =>
+    withMutationLock(
+      Effect.gen(function* () {
+        const registry = yield* loadedPlan();
+        if (registry.activePlan.revision !== expectedRevision)
+          return yield* failure("Plugin plan revision is stale");
+        const caller = registry.plugins.find((plugin) => plugin.id === callerId);
+        if (!caller || !caller.enabled || !running.has(callerId))
+          return yield* failure("Caller plugin is not enabled and running");
+        const target = registry.plugins.find((plugin) => plugin.id === targetId);
+        if (callerId === targetId || !target || target.enabled || target.removing)
+          return yield* failure("Replacement target must be a distinct disabled installed plugin");
+        const active = registry.activePlan;
+        const candidate = yield* nextPlan(registry, {
+          enabled: active.enabled.map((id) => (id === callerId ? targetId : id)),
+          ...(active.composition === undefined
+            ? {}
+            : {
+                composition: {
+                  layout:
+                    active.composition.layout === callerId ? targetId : active.composition.layout,
+                  slots: active.composition.slots.map((slot) => ({
+                    ...slot,
+                    contributions: slot.contributions.map((contribution) => ({
+                      ...contribution,
+                      pluginId:
+                        contribution.pluginId === callerId ? targetId : contribution.pluginId,
+                    })),
+                  })),
+                },
+              }),
+          serviceBindings: active.serviceBindings.map((binding) => ({
+            ...binding,
+            consumer: binding.consumer === callerId ? targetId : binding.consumer,
+            provider: binding.provider === callerId ? targetId : binding.provider,
+          })),
+        });
+        const plugins = registry.plugins.map((plugin) =>
+          plugin.id === targetId ? { ...plugin, suspended: false, lastFailure: undefined } : plugin,
         );
         return yield* transition(registry, plugins, candidate);
       }),
@@ -1687,6 +1763,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       : current;
   return {
     list,
+    managementSnapshot,
     inspectInstallation: (id) =>
       lock.withPermit(
         Effect.gen(function* () {
@@ -1705,6 +1782,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       ),
     plan,
     applyPlan,
+    replaceSelf,
     install: (hash: string, grantId: string, config?: { readonly staged?: boolean }) =>
       choose(install(hash, grantId), installPlan(hash, grantId, config)),
     enable: (id: string) => choose(enable(id), setEnabledPlan(id, true)),

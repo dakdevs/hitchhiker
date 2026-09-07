@@ -557,7 +557,10 @@ test("CDP pipe EOF stops the whole logical connection", async () => {
       const cdp = yield* engine.claimRawCdp;
       const cdpClosed = yield* cdp.events.pipe(Stream.runDrain, Effect.forkScoped);
       yield* Effect.yieldNow;
-      yield* engine.request("close-cdp");
+      // The fixture acknowledges the close command before closing fd 4. Freeze the request
+      // timer so this receipt, rather than scheduler load around the 150ms test timeout,
+      // is the handshake that precedes the EOF assertion below.
+      yield* engine.request("close-cdp").pipe(Effect.provide(TestClock.layer()));
       yield* Fiber.join(cdpClosed).pipe(Effect.timeout(1_000));
       assert.equal((yield* engine.request("echo").pipe(Effect.flip)).code, "cdp-read-closed");
     }).pipe(Effect.provide(layer), Effect.scoped),

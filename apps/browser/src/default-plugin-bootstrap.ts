@@ -39,6 +39,33 @@ type AbandonReason = "profile-customized" | "bootstrap-state-diverged";
 const capabilities = {
   "default-tab-model": ["pages.list", "pages.manage", "storage.local"],
   "default-tab-pins": ["pages.list", "storage.local"],
+  "default-browser-layout": ["ui.compose", "configuration.read"],
+  "default-sidebar-tabs": [
+    "ui.compose",
+    "pages.list",
+    "pages.manage",
+    "storage.local",
+    "configuration.read",
+    "configuration.write",
+    "plugins.read",
+    "plugins.manage",
+  ],
+  "default-top-tabs": [
+    "ui.compose",
+    "pages.list",
+    "pages.manage",
+    "storage.local",
+    "configuration.read",
+    "configuration.write",
+    "plugins.read",
+    "plugins.manage",
+  ],
+} satisfies Readonly<Record<DefaultPluginId, readonly Capability[]>>;
+
+// Previously published pending journals must finish with their frozen authority, never upgrade it.
+const legacyCapabilities = {
+  "default-tab-model": ["pages.list", "pages.manage", "storage.local"],
+  "default-tab-pins": ["pages.list", "storage.local"],
   "default-browser-layout": ["ui.compose", "configuration.write"],
   "default-sidebar-tabs": [
     "ui.compose",
@@ -141,7 +168,10 @@ const CapabilitySchema = Schema.Literals([
   "pages.list",
   "pages.manage",
   "ui.compose",
+  "configuration.read",
   "configuration.write",
+  "plugins.read",
+  "plugins.manage",
   "storage.local",
 ]);
 const DefaultPluginIdSchema = Schema.Literals(ids);
@@ -217,8 +247,10 @@ const decodeJournal = (value: unknown): Journal | undefined => {
     !journal.artifacts.every(
       (descriptor, index) =>
         descriptor.id === ids[index] &&
-        same(descriptor.capabilities, capabilities[descriptor.id]) &&
         descriptor.grantKey === `default-bootstrap/1/${descriptor.id}`,
+    ) ||
+    ![capabilities, legacyCapabilities].some((cohort) =>
+      journal.artifacts.every((descriptor) => same(descriptor.capabilities, cohort[descriptor.id])),
     ) ||
     !same(journal.plan, planFor(journal.placement)) ||
     journal.expectedRevision !== journal.installedPrefix.length ||

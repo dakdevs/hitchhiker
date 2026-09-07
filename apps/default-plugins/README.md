@@ -2,7 +2,7 @@
 
 These are real isolated Hitchhiker SDK plugins under construction. They are not yet bootstrapped
 as the browser's default interface. Existing profiles continue to use the current interface until
-live plan switching, management-screen routing, and profile migration are implemented.
+native switching verification and the default startup migration are complete.
 
 Build with `pnpm --filter @hitchhiker/default-plugins build`. Each directory under `dist/default-*`
 contains `hitchhiker.plugin.json` and `plugin.js`, the same package format accepted by public MCP
@@ -27,8 +27,14 @@ The model and pins use public `pages.watch`, service state, and owner-bound `sto
 Page snapshots restart at most three times on `stale-snapshot`; storage retries only on `conflict`.
 These defaults support at most 128 open pages, independently of alternate plugins' policies.
 
-The presenters temporarily include navigation and address input while those features are being
-extracted. Management screens and live switching between presenter packages remain cutover gates.
-The existing public configuration read currently requires `configuration.write`; layout and
-presenter manifests declare that requirement explicitly. This permission granularity remains a
-framework limitation to address before default-profile bootstrap.
+The presenters include navigation, address input, and Native Settings and Plugins route
+contributions. These routes replace the content contribution without binding a page viewport; Back
+returns to the selected page. Settings reads and updates color scheme and inactive-page sleep time.
+Plugins shows bounded public lifecycle summaries and can enable, disable, roll back, remove, or
+switch to the alternate presenter through the owner-bound management API. The layout declares only
+`configuration.read`; presenters retain `configuration.write` for Settings and also declare
+`configuration.read`, `plugins.read`, and `plugins.manage`.
+
+These management screens are shared presenter modules, not separately installed route plugins.
+The host contains no Settings or Plugins route policy. Normal startup cutover, remaining feature
+extraction and Native public-action switching/shutdown verification are still outstanding.

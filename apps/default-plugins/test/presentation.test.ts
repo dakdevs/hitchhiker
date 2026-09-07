@@ -39,6 +39,26 @@ const fakeApi = () => {
   });
   let failNavigate = false;
   let failPins = false;
+  let configuration: Awaited<ReturnType<PluginApi["configuration"]["get"]>> = {
+    colorScheme: "light" as const,
+    sleepAfterMs: 300_000,
+    alwaysAwakeOrigins: ["https://kept.example"],
+  };
+  let management = {
+    revision: 7,
+    plugins: [
+      {
+        id: "other-plugin",
+        name: "Other plugin",
+        version: "1.2.3",
+        enabled: true,
+        running: true,
+        capabilities: ["pages.list"] as const,
+      },
+    ],
+  };
+  const configurationWrites: unknown[] = [];
+  const pluginCalls: { method: string; id?: string; revision?: number }[] = [];
   const contributions = new Map<string, Omit<Surface, "identity">>();
   const layouts: Omit<Surface, "identity">[] = [];
   const publications: { service: string; value: Json }[] = [];
@@ -132,8 +152,37 @@ const fakeApi = () => {
       stop: async () => undefined,
     },
     configuration: {
-      get: async () => ({ colorScheme: "light", sleepAfterMs: 300_000, alwaysAwakeOrigins: [] }),
-      set: async () => undefined,
+      get: async () => configuration,
+      set: async (next) => {
+        configurationWrites.push(next);
+        configuration = next;
+      },
+    },
+    plugins: {
+      snapshot: async () => {
+        pluginCalls.push({ method: "snapshot" });
+        return management;
+      },
+      enable: async (id) => {
+        pluginCalls.push({ method: "enable", id });
+        return management;
+      },
+      disable: async (id) => {
+        pluginCalls.push({ method: "disable", id });
+        return management;
+      },
+      rollback: async (id) => {
+        pluginCalls.push({ method: "rollback", id });
+        return management;
+      },
+      uninstall: async (id) => {
+        pluginCalls.push({ method: "uninstall", id });
+        return management;
+      },
+      replaceSelf: async (id, revision) => {
+        pluginCalls.push({ method: "replaceSelf", id, revision });
+        return management;
+      },
     },
     ui: {
       publish: async () => ({ revision: 1 }),
@@ -156,14 +205,22 @@ const fakeApi = () => {
     contributions,
     layouts,
     publications,
+    configurationWrites,
+    pluginCalls,
     setPins(value: ServiceSnapshot) {
       pins = value;
+    },
+    setModel(value: Json) {
+      model = value;
     },
     denyNextNavigate() {
       failNavigate = true;
     },
     denyNextPin() {
       failPins = true;
+    },
+    setManagement(value: typeof management) {
+      management = value;
     },
   };
 };
@@ -214,6 +271,14 @@ test("layout publishes stable slots and changes geometry through its public serv
   await handler("setPresentation", { presentation: "top" }, { id: "presenter", generation: 1 });
   assert.equal(fake.layouts.length, 2);
   assert.equal(fake.publications.length, 2);
+  await fake.api.configuration.set({
+    ...(await fake.api.configuration.get()),
+    colorScheme: "dark",
+  });
+  await handler("setPresentation", { presentation: "top" }, { id: "presenter", generation: 1 });
+  assert.equal(fake.layouts.length, 3);
+  assert.equal(fake.layouts.at(-1)?.root.bg, "#212121");
+  assert.deepEqual(fake.layouts.at(-1)?.bindings, []);
 });
 
 test("sidebar presenter publishes screenshot-compatible fragments and routes selection", async () => {
@@ -227,8 +292,8 @@ test("sidebar presenter publishes screenshot-compatible fragments and routes sel
     { viewportId: "main-page", pageId: "page-b" },
   ]);
   const toolbarNodes = nodes(fake.contributions.get("toolbar")!.root);
-  assert.equal(toolbarNodes.find((node) => node.key === "plugins")?.kind, "text");
-  assert.equal(toolbarNodes.find((node) => node.key === "settings")?.kind, "text");
+  assert.equal(toolbarNodes.find((node) => node.key === "plugins")?.kind, "button");
+  assert.equal(toolbarNodes.find((node) => node.key === "settings")?.kind, "button");
   await plugin.onEvent?.(
     "ui.event",
     uiEvent("press", "page-select-page-a", { action: "page.select:page-a" }),
@@ -240,6 +305,102 @@ test("sidebar presenter publishes screenshot-compatible fragments and routes sel
   });
   assert.deepEqual(fake.contributions.get("content")?.bindings, [
     { viewportId: "main-page", pageId: "page-a" },
+  ]);
+});
+
+test("presenter management routes replace the viewport and Back restores the selected page", async () => {
+  const fake = fakeApi();
+  const plugin = createPresenterPlugin("sidebar");
+  await plugin.activate(fake.api);
+  await plugin.onEvent?.(
+    "ui.event",
+    uiEvent("press", "settings", { action: "interface.settings" }),
+  );
+  assert.equal(fake.contributions.get("content")?.root.key, "settings-route");
+  assert.deepEqual(fake.contributions.get("content")?.bindings, []);
+  await plugin.onPagesChanged?.(2);
+  assert.equal(fake.contributions.get("content")?.root.key, "settings-route");
+  await plugin.onEvent?.(
+    "ui.event",
+    uiEvent("press", "settings-color-dark", { action: "settings.color:dark" }),
+  );
+  assert.deepEqual(fake.configurationWrites.at(-1), {
+    colorScheme: "dark",
+    sleepAfterMs: 300_000,
+    alwaysAwakeOrigins: ["https://kept.example"],
+  });
+  await plugin.onEvent?.(
+    "ui.event",
+    uiEvent("press", "management-back", { action: "management.back" }),
+  );
+  assert.equal(fake.contributions.get("content")?.root.key, "main-page");
+  assert.deepEqual(fake.contributions.get("content")?.bindings, [
+    { viewportId: "main-page", pageId: "page-b" },
+  ]);
+});
+
+test("management routes refresh tab state and navigation uses a selection changed while Settings is open", async () => {
+  const fake = fakeApi();
+  const plugin = createPresenterPlugin("sidebar");
+  await plugin.activate(fake.api);
+  await plugin.onEvent?.(
+    "ui.event",
+    uiEvent("press", "settings", { action: "interface.settings" }),
+  );
+  fake.setModel({
+    version: 1,
+    pagesRevision: 2,
+    selection: { kind: "page", pageId: "page-a" },
+    pageOrder: ["page-a", "page-b"],
+  });
+  await plugin.onEvent?.("service.state", {
+    dependency: "model",
+    providerGeneration: 1,
+    revision: 2,
+    available: true,
+  });
+  assert.equal(fake.contributions.get("content")?.root.key, "settings-route");
+  assert.ok(
+    nodes(fake.contributions.get("tabs")!.root).some((node) => node.key === "page-select-page-a"),
+  );
+  await plugin.onEvent?.("ui.event", uiEvent("input", "address", { kind: "clear" }));
+  await plugin.onEvent?.(
+    "ui.event",
+    uiEvent("input", "address", { kind: "insert_text", text: "example.com" }),
+  );
+  await plugin.onEvent?.("ui.event", uiEvent("press", "navigate", { action: "browser.navigate" }));
+  assert.equal(fake.contributions.get("content")?.root.key, "main-page");
+  assert.deepEqual(fake.pageCalls.at(-1), {
+    method: "navigate",
+    pageId: "page-a",
+    url: "https://example.com",
+  });
+});
+
+test("presenter forwards bounded lifecycle operations and refreshes the revision before switching", async () => {
+  const fake = fakeApi();
+  const plugin = createPresenterPlugin("sidebar");
+  await plugin.activate(fake.api);
+  await plugin.onEvent?.("ui.event", uiEvent("press", "plugins", { action: "interface.plugins" }));
+  assert.equal(fake.contributions.get("content")?.root.key, "plugins-route");
+  assert.deepEqual(fake.contributions.get("content")?.bindings, []);
+  for (const action of [
+    "plugins.disable:other-plugin",
+    "plugins.rollback:other-plugin",
+    "plugins.uninstall:other-plugin",
+  ])
+    await plugin.onEvent?.("ui.event", uiEvent("press", action, { action }));
+  await plugin.onEvent?.(
+    "ui.event",
+    uiEvent("press", "plugins-switch-presenter", { action: "plugins.replace-self" }),
+  );
+  assert.deepEqual(fake.pluginCalls, [
+    { method: "snapshot" },
+    { method: "disable", id: "other-plugin" },
+    { method: "rollback", id: "other-plugin" },
+    { method: "uninstall", id: "other-plugin" },
+    { method: "snapshot" },
+    { method: "replaceSelf", id: "default-top-tabs", revision: 7 },
   ]);
 });
 

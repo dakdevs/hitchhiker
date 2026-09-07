@@ -6,6 +6,12 @@ import { ServiceProviderSchema, ServiceRequirementSchema } from "./service-contr
 import { PageWatchRequestSchema, type PageWatchSubscription } from "./page-observations.ts";
 import { EngineError } from "./engine.ts";
 import { PluginStorageError, type PluginStorageAdapter } from "./plugin-storage.ts";
+import {
+  PluginManagementIdSchema,
+  PluginManagementRevisionSchema,
+  PluginManagementSnapshotSchema,
+  type PluginManagementApi,
+} from "./plugin-management.ts";
 
 export const LivePluginManifest = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{1,62}$/)),
@@ -25,9 +31,12 @@ export const LivePluginManifest = Schema.Struct({
       "pages.read",
       "pages.write",
       "ui.compose",
+      "configuration.read",
       "configuration.write",
       "storage.local",
       "plugins.install",
+      "plugins.read",
+      "plugins.manage",
       "browser.full-control",
       "cdp.connect",
     ]),
@@ -83,6 +92,8 @@ export interface PluginDispatchOptions {
   readonly release: Effect.Effect<void, unknown>;
   readonly pageWatch?: PageWatchSubscription["watch"];
   readonly storage?: PluginStorageAdapter;
+  /** Application-owned, owner-bound lifecycle port. Absent ports fail closed. */
+  readonly management?: PluginManagementApi;
   /** Trusted owner-bound broker adapter; service callers never select identities or grants. */
   readonly services?: {
     readonly publish: (
@@ -256,9 +267,55 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
         return null;
       }
       case "configuration.get": {
-        yield* authorize("configuration.write");
+        // Existing writers retain read access; read-only plugins use the narrower grant.
+        if (options.manifest.capabilities.includes("configuration.read"))
+          yield* authorize("configuration.read");
+        else yield* authorize("configuration.write");
+        yield* decode(Schema.Record(Schema.String, Schema.Never), params);
         return yield* options.browser.configuration.pipe(
           Effect.flatMap((configuration) => decode(Schema.Json, configuration)),
+        );
+      }
+      case "plugins.snapshot": {
+        yield* authorize("plugins.read");
+        yield* decode(Schema.Record(Schema.String, Schema.Never), params);
+        if (!options.management) return yield* denied();
+        return yield* options.management.snapshot().pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((snapshot) => decode(PluginManagementSnapshotSchema, snapshot)),
+        );
+      }
+      case "plugins.enable":
+      case "plugins.disable":
+      case "plugins.rollback":
+      case "plugins.uninstall": {
+        yield* authorize("plugins.manage");
+        const { id } = yield* decode(Schema.Struct({ id: PluginManagementIdSchema }), params);
+        if (!options.management) return yield* denied();
+        const operation = {
+          "plugins.enable": options.management.enable,
+          "plugins.disable": options.management.disable,
+          "plugins.rollback": options.management.rollback,
+          "plugins.uninstall": options.management.uninstall,
+        }[method];
+        return yield* operation(id).pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((snapshot) => decode(PluginManagementSnapshotSchema, snapshot)),
+        );
+      }
+      case "plugins.replaceSelf": {
+        yield* authorize("plugins.manage");
+        const { targetId, expectedRevision } = yield* decode(
+          Schema.Struct({
+            targetId: PluginManagementIdSchema,
+            expectedRevision: PluginManagementRevisionSchema,
+          }),
+          params,
+        );
+        if (!options.management) return yield* denied();
+        return yield* options.management.replaceSelf(targetId, expectedRevision).pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((snapshot) => decode(PluginManagementSnapshotSchema, snapshot)),
         );
       }
       case "configuration.set": {

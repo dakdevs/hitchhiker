@@ -37,6 +37,22 @@ export interface ServiceDeclaration {
   readonly id: string;
   readonly contract: ServiceContract;
 }
+/** Display-only lifecycle metadata. It never contains artifact hashes or grant credentials. */
+export interface PluginManagementPluginSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly version: string;
+  readonly enabled: boolean;
+  readonly running: boolean;
+  readonly removing?: boolean;
+  readonly capabilities: readonly Capability[];
+  readonly previousVersion?: string;
+  readonly lastFailure?: string;
+}
+export interface PluginManagementSnapshot {
+  readonly revision: number;
+  readonly plugins: readonly PluginManagementPluginSummary[];
+}
 export type ServiceSnapshot =
   | { readonly available: false }
   | {
@@ -88,6 +104,14 @@ export interface PluginApi {
   readonly configuration: {
     get(): Promise<BrowserConfiguration>;
     set(configuration: BrowserConfiguration): Promise<void>;
+  };
+  readonly plugins: {
+    snapshot(): Promise<PluginManagementSnapshot>;
+    enable(id: string): Promise<PluginManagementSnapshot>;
+    disable(id: string): Promise<PluginManagementSnapshot>;
+    rollback(id: string): Promise<PluginManagementSnapshot>;
+    uninstall(id: string): Promise<PluginManagementSnapshot>;
+    replaceSelf(targetId: string, expectedRevision: number): Promise<PluginManagementSnapshot>;
   };
   readonly ui: {
     /** Legacy whole-window API; aliases publishLayout for the configured layout in composition mode. */
@@ -162,6 +186,18 @@ const api = (host: HostBridge): PluginApi =>
       get: () => call<BrowserConfiguration>(host, "configuration.get", {}),
       set: (configuration: BrowserConfiguration) =>
         call<void>(host, "configuration.set", { configuration }),
+    }),
+    plugins: Object.freeze({
+      snapshot: () => call<PluginManagementSnapshot>(host, "plugins.snapshot", {}),
+      enable: (id: string) => call<PluginManagementSnapshot>(host, "plugins.enable", { id }),
+      disable: (id: string) => call<PluginManagementSnapshot>(host, "plugins.disable", { id }),
+      rollback: (id: string) => call<PluginManagementSnapshot>(host, "plugins.rollback", { id }),
+      uninstall: (id: string) => call<PluginManagementSnapshot>(host, "plugins.uninstall", { id }),
+      replaceSelf: (targetId: string, expectedRevision: number) =>
+        call<PluginManagementSnapshot>(host, "plugins.replaceSelf", {
+          targetId,
+          expectedRevision,
+        }),
     }),
     ui: Object.freeze({
       publish: (surface: Omit<Surface, "identity">) =>

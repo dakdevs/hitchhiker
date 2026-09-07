@@ -583,14 +583,42 @@ The distribution bootstrap coordinator now has 16 portable recovery tests and an
 It validates exact stored installation identities, resumes durable install/promotion checkpoint gaps,
 preserves nonzero owner state, checkpoints model/pins independently, and permanently respects removal
 or profile customization. An uncertain journal write requires restart. The combined check passes 346
-tests and all builds, with 29 native-gated skips (`work/default-bootstrap-coordinator-check.log`). Public management routes and normal startup cutover remain unfinished; this coordinator has not
-passed native acceptance. The public guide also names the currently exposed
+tests and all builds, with 29 native-gated skips (`work/default-bootstrap-coordinator-check.log`). Normal startup cutover remains unfinished; this coordinator has not passed native acceptance. The public guide also names the currently exposed
 appearance/sleep configuration fields separately from planned Chromium site-permission controls.
 
 The runtime default bundle reader now resolves the packaged resource directory explicitly and verifies
 its complete fixed inventory, hashes, manifests and recipes before returning code to the coordinator.
 Nine new portable tests include a relocated real build and tampering/path/size/encoding rejection.
 The combined check passes 355 tests with 29 native-gated skips and all builds
-(`work/default-bundle-reader-check.log`). The reader remains unwired pending public management routes.
-The bootstrap plan records their proposed authority and cancellation boundaries; these API additions
-are not yet available. Native startup and clean shutdown remain open gates.
+(`work/default-bundle-reader-check.log`). The reader remains unwired pending startup migration.
+The management API implementation and its remaining native gate are described below. Native startup and clean shutdown remain open gates.
+
+## Public plugin management and presenter routes
+
+Installed plugins now use `plugins.read` for bounded public snapshots and `plugins.manage` for
+enable, disable, rollback, uninstall and authenticated self-replacement. Staging executable code and
+selecting grants remain outside this worker API. Read-only configuration access is available; legacy
+configuration writers retain read access. The launcher binds caller identity and readiness, and the
+application admits at most 16 lifecycle commands independently of their reply waiters. Snapshot reads
+can run during activation without waiting for the transaction mutex. Shutdown interrupts admitted
+work; stopping a requesting presenter does not cancel its accepted replacement.
+
+The default presenters now supply Native Settings/Plugins content through public APIs. They preserve
+page bindings when returning to browsing, refresh tab/navigation state while management is open,
+apply appearance through the layout service, and read a fresh revision before switching presenters.
+Layout manifests have read-only configuration authority; presenters have eight exact capabilities.
+Pending bootstrap journals from the previous cohort recover their original artifacts and grants
+without adopting new management permissions.
+
+The combined `pnpm check` passes 370 portable tests with 29 native-gated skips, plus dependency
+validation, typecheck, lint, formatting and all builds (`work/public-plugin-management-check.log`).
+A real portable manager fixture invokes self-replacement from the worker being stopped and retains
+other worker generations. Separate tests cover shutdown, bounded admission, strict dispatch,
+authority denial, management route behavior and previous-cohort recovery. Read-only integration and
+bootstrap compatibility reviews found no blocker. An existing CDP EOF fixture now awaits its command
+acknowledgment with a frozen request clock, preserving its real EOF assertion and production deadlines.
+
+Next: wire restored-page bootstrap into normal startup, retire legacy default tab/UI authority,
+and verify the public presenter action in the Native host with retained document markers/storage,
+at most four workers and clean shutdown. Current Native timeout/shutdown evidence still fails that
+gate. Complete feature extraction, DevTools, broad Chromium APIs and release requirements remain open.

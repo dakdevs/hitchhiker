@@ -444,3 +444,18 @@ never adopt a matching unmanaged grant, renew revoked authority, or create an or
 interrupted caller. This constructor-only API returns grant metadata, not a bearer, and is not
 exposed through MCP or plugins. The permanent bootstrap completion marker must remain authoritative
 after users remove defaults; matching artifact IDs alone never authorize reinstallation.
+
+## Public management boundary implemented
+
+Installed workers can now read bounded lifecycle summaries and invoke permitted lifecycle operations
+through the SDK. Self-replacement derives a complete candidate from authenticated caller references,
+retains unrelated plan entries and uses normal manager validation. An application-owned command scope
+prevents stopping the requesting presenter from canceling an admitted switch. Readiness gating,
+read-only configuration authority, public response schemas, bounded admission and shutdown behavior
+have portable coverage. Default Settings/Plugins routes use these APIs as Native presenter content.
+They are shared presenter modules, not separately installed management-screen artifacts.
+
+The combined check passes 370 tests with 29 native-gated skips and all builds. See
+[DEFAULT-BOOTSTRAP-PLAN.md](DEFAULT-BOOTSTRAP-PLAN.md) for exact permission/recovery semantics. Normal
+startup cutover, remaining feature extraction and the Native public-action switch/shutdown gate are
+still incomplete; this change does not establish the complete plugin-first distribution.

@@ -281,10 +281,31 @@ definePlugin({
 });`,
   },
   {
+    id: "plugin-management",
+    title: "Build Settings and plugin management",
+    paragraphs: [
+      "Installed plugins can build Native management screens through configuration.get/set and plugins.snapshot/enable/disable/rollback/uninstall/replaceSelf. The bundled sidebar and top presenters use these same APIs. Their Settings and Plugins routes replace only their content contribution, preserving Chromium page identity. The normal default-browser startup migration and native acceptance are still unfinished.",
+      "Declare plugins.read for snapshots and plugins.manage for lifecycle commands. Lifecycle permission cannot stage executable code, choose grants, or install revisions; those operations retain separate plugins.install authority over MCP. Every call checks the current profile, caller identity, declaration and live grant. Revoking the grant denies future calls. Accepted commands run in the application scope and can finish after their caller stops; revocation does not undo an already admitted command.",
+      "A snapshot contains a plan revision and up to 16 summaries: id, name, version, enabled, running, capabilities, and optional removing, previousVersion and lastFailure. It excludes hashes, credentials and filesystem paths. During a transition the revision describes the committed plan while running flags may change. Snapshots may be read during activation; lifecycle commands require completed activation. At most 16 admitted management commands may be pending across the application.",
+      "replaceSelf changes the authenticated caller's enabled ID, layout/contribution ownership and service bindings to a distinct disabled installed target. Other plan entries are retained and ordinary dependency, grant and four-worker validation still apply. A stale revision or incompatible target is denied without applying the candidate. Re-read the snapshot before retrying. The old presenter may stop before receiving a response, so a replacement must initialize from public state in its own activation.",
+      "There is no management change event yet. Refresh the snapshot when opening a screen or on an explicit Refresh action. Configuration replacement validates and persists the complete object; read first and preserve fields your screen does not edit. Uninstall also removes that plugin's owner storage and revokes its current and rollback grants. These lifecycle changes persist across restart.",
+    ],
+    code: `import type { PluginApi } from "@hitchhiker/plugin-sdk";
+
+// Call from a UI handler after activation. Both plugins must already be installed.
+// Manifest and profile grant: plugins.read and plugins.manage.
+export async function useOtherPresenter(api: PluginApi) {
+  const before = await api.plugins.snapshot();
+  await api.plugins.replaceSelf("my-other-presenter", before.revision);
+  // This activation may stop before the reply arrives.
+  // The replacement reads plugins.snapshot() during activation to render current state.
+}`,
+  },
+  {
     id: "plugin-api",
     title: "Plugin API reference",
     paragraphs: [
-      "All methods return Promises. Await host calls and handle rejection. Both the declared capability and a live grant are required. Configuration reads currently use configuration.write as well; there is no separate configuration.read capability.",
+      "All methods return Promises. Await host calls and handle rejection. Both the declared capability and a live grant are required. Configuration reads use configuration.read when it is declared; existing plugins that declare only configuration.write retain read access. The installed-plugin management port is unavailable to developer --plugin launches.",
     ],
     table: {
       headings: ["Method", "Capability", "Result"],
@@ -307,8 +328,23 @@ definePlugin({
           "storage.local",
           "Revisioned owner-and-profile local JSON state",
         ],
-        ["configuration.get()", "configuration.write", "BrowserConfiguration"],
+        [
+          "configuration.get()",
+          "configuration.read (legacy writers also supported)",
+          "BrowserConfiguration",
+        ],
         ["configuration.set(configuration)", "configuration.write", "void; validated replacement"],
+        ["plugins.snapshot()", "plugins.read", "Revision and up to 16 public plugin summaries"],
+        [
+          "plugins.enable(id) / disable(id) / rollback(id) / uninstall(id)",
+          "plugins.manage",
+          "Updated management snapshot; accepted changes survive caller shutdown",
+        ],
+        [
+          "plugins.replaceSelf(targetId, expectedRevision)",
+          "plugins.manage",
+          "Replaces caller references in the existing plan; caller may stop before receiving a reply",
+        ],
         [
           "services.publish(service, value)",
           "Declared provides; bound consumer authority",

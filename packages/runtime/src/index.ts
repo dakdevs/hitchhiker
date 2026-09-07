@@ -58,6 +58,11 @@ export { spawnPluginHost, PluginHostError } from "./plugin.ts";
 export type { PluginHostOptions } from "./plugin.ts";
 export { LivePluginManifest, PluginCallError, createPluginDispatcher } from "./plugin-dispatch.ts";
 export type { PluginDispatchOptions } from "./plugin-dispatch.ts";
+export type {
+  PluginManagementApi,
+  PluginManagementPluginSummary,
+  PluginManagementSnapshot,
+} from "./plugin-management.ts";
 export { runLivePlugin } from "./plugin-session.ts";
 export type { LivePluginOptions } from "./plugin-session.ts";
 export {

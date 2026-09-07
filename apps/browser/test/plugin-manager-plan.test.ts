@@ -4,14 +4,19 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { Deferred, Effect, Exit, Fiber } from "effect";
+import { Deferred, Effect, Exit, Fiber, Scope } from "effect";
 import {
   makePluginComposition,
   type GrantStoreApi,
   type InstalledPluginPlanInput,
 } from "@hitchhiker/runtime";
 import { column, text, viewport } from "@hitchhiker/ui";
-import { createPluginManager, type PluginManagerOptions } from "../src/plugin-manager.ts";
+import {
+  createPluginManager,
+  type PluginManager,
+  type PluginManagerOptions,
+} from "../src/plugin-manager.ts";
+import { createPluginManagement } from "../src/plugin-management.ts";
 import { createPluginArtifactStore } from "../src/plugin-artifacts.ts";
 
 const withProfile = async (run: (root: string) => Promise<void>) => {
@@ -36,9 +41,31 @@ const readRegistry = (root: string) =>
 const grants = (denied: Set<string>) =>
   ({
     authenticateGrant: (id: string) =>
-      denied.has(id) ? Effect.fail("revoked") : Effect.succeed({ principal: id, grant: {} }),
+      denied.has(id)
+        ? Effect.fail("revoked")
+        : Effect.succeed({
+            principal: id,
+            grant: {
+              id,
+              principal: id,
+              profileId: "default",
+              capabilities: ["browser.full-control"],
+              origins: [],
+            },
+          }),
     authorizeGrant: (id: string) =>
-      denied.has(id) ? Effect.fail("revoked") : Effect.succeed({ principal: id, grant: {} }),
+      denied.has(id)
+        ? Effect.fail("revoked")
+        : Effect.succeed({
+            principal: id,
+            grant: {
+              id,
+              principal: id,
+              profileId: "default",
+              capabilities: ["browser.full-control"],
+              origins: [],
+            },
+          }),
   }) as unknown as GrantStoreApi;
 const fixture = Effect.fn("test.planFixture")(function* (root: string) {
   const artifacts = yield* createPluginArtifactStore(root);
@@ -50,6 +77,9 @@ const fixture = Effect.fn("test.planFixture")(function* (root: string) {
   const entered = new Map<string, Deferred.Deferred<void>>();
   let peak = 0;
   let recoveries = 0;
+  let snapshotDuringActivation = false;
+  let snapshotCalls = 0;
+  let manager: PluginManager | undefined;
   const owners = new Set<string>();
   const session = yield* makePluginComposition({
     recipe: undefined,
@@ -102,6 +132,11 @@ const fixture = Effect.fn("test.planFixture")(function* (root: string) {
             bindings: [{ viewportId: "content", pageId: "retained-page" }],
           });
       }
+      if (snapshotDuringActivation) {
+        if (!manager) return yield* Effect.fail("manager fixture is not ready");
+        snapshotCalls++;
+        yield* manager.managementSnapshot();
+      }
       yield* ready;
       yield* Effect.never;
     }).pipe(Effect.scoped);
@@ -114,13 +149,18 @@ const fixture = Effect.fn("test.planFixture")(function* (root: string) {
       recoveries++;
     }),
   };
-  const manager = yield* createPluginManager(options);
+  manager = yield* createPluginManager(options);
   const stage = Effect.fn("test.stagePlanPlugin")(function* (id: string, ui = false) {
     const artifact = yield* artifacts.stage({
-      manifest: { id, name: id, version: "1.0.0", capabilities: ui ? ["ui.compose"] : [] },
+      manifest: {
+        id,
+        name: id,
+        version: "1.0.0",
+        capabilities: ui ? ["ui.compose"] : [],
+      },
       code: id,
     });
-    yield* manager.install(artifact.hash, id, { staged: true });
+    yield* manager!.install(artifact.hash, id, { staged: true });
     return artifact;
   });
   return {
@@ -135,6 +175,10 @@ const fixture = Effect.fn("test.planFixture")(function* (root: string) {
     entered,
     peak: () => peak,
     recoveries: () => recoveries,
+    snapshotOnActivation: (enabled: boolean) => {
+      snapshotDuringActivation = enabled;
+    },
+    snapshotCalls: () => snapshotCalls,
   };
 });
 const visible = (presenter: string): InstalledPluginPlanInput => ({
@@ -183,6 +227,152 @@ test("live four-worker plans retain compatible generations and restore a failed 
         assert.equal((yield* readRegistry(root)).pendingPlan, undefined);
         assert.equal(f.peak(), 4);
         assert.equal(f.recoveries(), 0);
+      }).pipe(Effect.scoped),
+    ),
+  );
+});
+
+test("management replacement is guarded, preserves unrelated references, and uses normal plan validation", async () => {
+  await withProfile((root) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const f = yield* fixture(root);
+        yield* f.stage("layout-plugin", true);
+        yield* f.stage("caller-plugin", true);
+        yield* f.stage("target-plugin", true);
+        yield* f.stage("incompatible-plugin");
+        f.snapshotOnActivation(true);
+        const initial = yield* f.manager.applyPlan((yield* f.manager.plan()).revision, {
+          enabled: ["caller-plugin", "layout-plugin"],
+          composition: {
+            layout: "layout-plugin",
+            slots: [
+              {
+                key: "area",
+                contributions: [{ pluginId: "caller-plugin", id: "tabs" }],
+              },
+            ],
+          },
+          serviceBindings: [],
+        });
+        const before = yield* Effect.promise(() => readFile(path(root), "utf8"));
+        const layoutGeneration = f.active.get("layout-plugin");
+        assert.match(
+          (yield* f.manager
+            .replaceSelf("caller-plugin", "target-plugin", initial.revision - 1)
+            .pipe(Effect.flip)).message,
+          /stale/,
+        );
+        assert.match(
+          (yield* f.manager
+            .replaceSelf("caller-plugin", "caller-plugin", initial.revision)
+            .pipe(Effect.flip)).message,
+          /disabled installed/,
+        );
+        assert.match(
+          (yield* f.manager
+            .replaceSelf("caller-plugin", "incompatible-plugin", initial.revision)
+            .pipe(Effect.flip)).message,
+          /UI plugins/,
+        );
+        assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
+        assert.equal(f.active.get("layout-plugin"), layoutGeneration);
+        const replaced = yield* f.manager.replaceSelf(
+          "caller-plugin",
+          "target-plugin",
+          initial.revision,
+        );
+        assert.deepEqual(replaced, {
+          revision: initial.revision + 1,
+          enabled: ["target-plugin", "layout-plugin"],
+          composition: {
+            layout: "layout-plugin",
+            slots: [
+              {
+                key: "area",
+                contributions: [{ pluginId: "target-plugin", id: "tabs" }],
+              },
+            ],
+          },
+          serviceBindings: [],
+        });
+        assert.equal(f.active.get("layout-plugin"), layoutGeneration);
+        const snapshot = yield* f.manager.managementSnapshot();
+        assert.equal(snapshot.revision, replaced.revision);
+        assert.deepEqual(
+          snapshot.plugins.map((plugin) => plugin.id),
+          ["layout-plugin", "caller-plugin", "target-plugin", "incompatible-plugin"],
+        );
+        assert(snapshot.plugins.every((plugin) => !("hash" in plugin)));
+        assert(f.snapshotCalls() >= 2);
+      }).pipe(Effect.scoped),
+    ),
+  );
+});
+
+test("a sidebar replacement admitted through its management port survives the caller stop", async () => {
+  await withProfile((root) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const artifacts = yield* createPluginArtifactStore(root);
+        const application = yield* Scope.make();
+        const port = yield* createPluginManagement().pipe(
+          Effect.provideService(Scope.Scope, application),
+        );
+        const trigger = yield* Deferred.make<void>();
+        const topStarted = yield* Deferred.make<void>();
+        const active = new Map<string, number>();
+        let activeRevision = 0;
+        const launch: PluginManagerOptions["launch"] = (artifact, _grant, ready, activation) =>
+          Effect.gen(function* () {
+            const id = artifact.manifest.id;
+            yield* Effect.acquireRelease(
+              Effect.sync(() => {
+                active.set(id, activation.generation);
+              }),
+              () =>
+                Effect.sync(() => {
+                  active.delete(id);
+                }),
+            );
+            yield* ready;
+            if (id === "top-plugin") yield* Deferred.succeed(topStarted, undefined);
+            if (id === "sidebar-plugin") {
+              yield* Deferred.await(trigger);
+              yield* port
+                .forPlugin("sidebar-plugin", () => true)
+                .replaceSelf("top-plugin", activeRevision);
+            }
+            yield* Effect.never;
+          }).pipe(Effect.scoped);
+        const manager = yield* createPluginManager({
+          profileRoot: root,
+          grants: grants(new Set()),
+          launch,
+        });
+        yield* port.bind(manager);
+        for (const id of ["model-plugin", "pins-plugin", "sidebar-plugin", "top-plugin"]) {
+          const artifact = yield* artifacts.stage({
+            manifest: { id, name: id, version: "1.0.0", capabilities: [] },
+            code: id,
+          });
+          yield* manager.install(artifact.hash, id, { staged: true });
+        }
+        const initial = yield* manager.applyPlan((yield* manager.plan()).revision, {
+          enabled: ["model-plugin", "pins-plugin", "sidebar-plugin"],
+          serviceBindings: [],
+        });
+        activeRevision = initial.revision;
+        const retained = new Map(active);
+        yield* Deferred.succeed(trigger, undefined);
+        yield* Deferred.await(topStarted).pipe(Effect.timeout(5_000));
+        const committed = yield* manager.plan();
+        assert.deepEqual(committed.enabled, ["model-plugin", "pins-plugin", "top-plugin"]);
+        assert.equal(active.has("sidebar-plugin"), false);
+        assert.equal(active.get("model-plugin"), retained.get("model-plugin"));
+        assert.equal(active.get("pins-plugin"), retained.get("pins-plugin"));
+        assert(active.has("top-plugin"));
+        yield* Scope.close(application, Exit.void).pipe(Effect.timeout(5_000));
       }).pipe(Effect.scoped),
     ),
   );

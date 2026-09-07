@@ -56,7 +56,7 @@ const artifacts = [
     id: "default-browser-layout",
     entry: "layout-entry",
     name: "Browser layout",
-    capabilities: ["ui.compose", "configuration.write"],
+    capabilities: ["ui.compose", "configuration.read"],
     provides: [{ id: "layout", contract: contracts.layout }],
   },
   ...["sidebar", "top"].map((placement) => ({
@@ -68,7 +68,10 @@ const artifacts = [
       "pages.list",
       "pages.manage",
       "storage.local",
+      "configuration.read",
       "configuration.write",
+      "plugins.read",
+      "plugins.manage",
     ],
     requires: [
       { id: "model", contract: contracts.model },

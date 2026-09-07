@@ -290,8 +290,11 @@ export type Capability =
   | "pages.read"
   | "pages.write"
   | "ui.compose"
+  | "configuration.read"
   | "configuration.write"
   | "plugins.install"
+  | "plugins.read"
+  | "plugins.manage"
   | "storage.local"
   | "browser.full-control"
   | "cdp.connect";
@@ -310,8 +313,11 @@ const capabilityNames: readonly Capability[] = [
   "pages.read",
   "pages.write",
   "ui.compose",
+  "configuration.read",
   "configuration.write",
   "plugins.install",
+  "plugins.read",
+  "plugins.manage",
   "storage.local",
   "browser.full-control",
   "cdp.connect",

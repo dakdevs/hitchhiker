@@ -34,17 +34,20 @@ export const createLayoutPlugin = (): Plugin => {
   let api: PluginApi | undefined;
   let state: LayoutState = { version: 1, presentation: "sidebar" };
   let published = false;
+  let publishedDark = false;
   const run = serial();
 
   const publish = async (presentation: LayoutState["presentation"]): Promise<LayoutState> => {
     if (!api) throw new Error("Layout plugin has not activated");
-    if (published && state.presentation === presentation) return state;
     const next: LayoutState = { version: 1, presentation };
     const configuration = await api.configuration.get();
-    await api.ui.publishLayout(renderLayout(presentation, configuration.colorScheme === "dark"));
+    const dark = configuration.colorScheme === "dark";
+    if (published && state.presentation === presentation && publishedDark === dark) return state;
+    await api.ui.publishLayout(renderLayout(presentation, dark));
     await api.services.publish("layout", next as Json);
     state = next;
     published = true;
+    publishedDark = dark;
     return state;
   };
 

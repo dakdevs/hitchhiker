@@ -4,7 +4,7 @@ This is the remaining distribution startup migration, not a tab policy in the ge
 live manager plan is implemented. The state-seeding, managed-grant and exact staged-install retry
 prerequisites, packaged bundle index and controller restoration barrier are published. The coordinator
 now passes its focused recovery tests, review and combined repository check. The runtime bundle
-reader is implemented with portable tests. Public management routes and main startup cutover remain.
+reader is implemented with portable tests. Public management routes now have portable coverage; main startup cutover remains.
 
 ## Eligibility and ownership
 
@@ -152,24 +152,29 @@ force a route change. Shared route rendering can compile into both alternative p
 adding a fifth worker or moving tab-model, pinning or layout ownership into the presenter. The host
 must not recognize product route names or call the legacy controller screens.
 
-The next API slice separates `configuration.read`, `plugins.read` and `plugins.manage` from code
+The implemented SDK separates `configuration.read`, `plugins.read` and `plugins.manage` from code
 installation authority. A bounded public management snapshot exposes display metadata and lifecycle
 state, never grant IDs, artifact paths or credentials. Lifecycle operations use `plugins.manage`;
-executable staging and grant delegation retain `plugins.install`. These new capabilities and routes
-are a design, not an implemented SDK contract.
+executable staging and grant delegation retain `plugins.install`. Existing configuration writers retain read access; new layout manifests use read-only authority.
+Pending journals from the previous capability cohort finish with their frozen artifacts and grants,
+without loading the new bundle or upgrading authority. Fresh bootstrap requires the new exact cohort.
 
-A proposed authenticated `replaceSelf(targetId, expectedRevision)` operation substitutes the caller
+The authenticated `replaceSelf(targetId, expectedRevision)` operation substitutes the caller
 references in the existing plan, preserving unrelated entries and using ordinary complete-plan
 validation. Sidebar/top switching then replaces only the presenter and keeps model/pins/layout
-workers, page identities and owner storage. Before accepting this API, test stale revisions, missing
-or incompatible targets, authority denial and preservation of unrelated entries.
+workers, page identities and owner storage. Portable tests cover stale revisions, missing or incompatible targets, authority denial, and
+preservation of unrelated entries. A real portable manager fixture also initiates replacement from
+the requesting worker and verifies that stopping it does not cancel the committed transition.
 
 Accepted management mutations must run in an application-owned scope. Stopping the calling presenter
 must not cancel the transaction that replaces it. A late-bound port is created before the installed
 launcher, bound once before restore, and fails closed while unbound. The dispatcher authorizes and
-decodes each request before admission. Developer plugins receive no port by default. A deterministic
-cancellation test and a native public-action switch test are required; direct manager-plan tests alone
-do not prove this lifecycle.
+decodes each request before admission. Developer plugins receive no port by default. Snapshot reads bypass the transaction mutex so activation can inspect state without deadlocking.
+Mutations are denied until activation completes and after stopping. Admitted work is bounded to 16
+commands and owned by the application scope; independent Deferred replies let caller cancellation
+leave work running while application shutdown interrupts it. Five port tests cover binding, caller
+cancellation, application shutdown, readiness and bounded admission. A native public-action switch
+test remains required; portable manager tests do not prove native startup or shutdown.
 
 ## Runtime reader verification
 
@@ -183,3 +188,16 @@ The combined `pnpm check` passes 355 portable tests with 29 native-gated skips, 
 typecheck, lint, formatting and all builds. Evidence: `work/default-bundle-reader-check.log`. This
 verifies the portable reader and existing suite; it does not establish normal startup cutover or
 native acceptance.
+
+## Public management verification
+
+The combined check now passes 370 portable tests, 29 native-gated skips and all builds, with
+dependency/type/lint/format validation (`work/public-plugin-management-check.log`). The new tests
+cover dispatcher authority and exact payloads, app-scope lifetime/admission, real manager-driven
+caller replacement, presenter routes and an older frozen grant cohort. Read-only integration and
+recovery reviews accepted the changes. A CDP EOF fixture request now uses a frozen test clock for
+its acknowledgment handshake; production engine deadlines and the actual EOF assertion are unchanged.
+
+Normal startup still does not invoke the coordinator. Public management routes no longer block that
+implementation, but actual Native public-action switching, startup/cutover and clean shutdown remain
+required. The built-in controller still supplies legacy default UI until that migration is verified.

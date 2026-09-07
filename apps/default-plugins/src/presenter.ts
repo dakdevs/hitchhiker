@@ -15,9 +15,7 @@ import {
 } from "@hitchhiker/plugin-sdk";
 import {
   column,
-  design,
   reduceNativeTextInput,
-  text,
   type NativeNode,
   type NativeTextInputEvent,
   type NativeTextInputState,
@@ -28,6 +26,7 @@ import type { Schema } from "effect";
 import { PinState, TabState, decode } from "./contracts.ts";
 import { Input, Press, ServiceStateEvent, UiEvent } from "./input-contracts.ts";
 import { readPages, serial } from "./state-io.ts";
+import { pluginsSurface, settingsSurface, type PresenterRoute } from "./routes.ts";
 
 const initialInput = (): NativeTextInputState => ({
   text: "",
@@ -83,17 +82,6 @@ const withoutPinControls = (node: NativeNode): NativeNode => {
   };
 };
 
-const withoutUnavailableRoutes = (node: NativeNode, dark: boolean): NativeNode => {
-  if (node.kind === "button" && (node.key === "plugins" || node.key === "settings"))
-    return text(node.key, node.label, {
-      width: 28,
-      height: 28,
-      fg: dark ? design.dark.muted : design.light.muted,
-    });
-  if (!("children" in node)) return node;
-  return { ...node, children: node.children.map((child) => withoutUnavailableRoutes(child, dark)) };
-};
-
 const observedPage = (page: ObservedPage): BrowserPage => ({ ...page, lastUsedAt: 0 });
 
 const requiredState = <A>(snapshot: ServiceSnapshot, schema: Schema.Codec<A>): A => {
@@ -114,6 +102,10 @@ const addressUrl = (draft: string): string | undefined => {
   return scheme === undefined ? `https://${trimmed}` : trimmed;
 };
 
+type ManagementSnapshot = Awaited<ReturnType<PluginApi["plugins"]["snapshot"]>>;
+const failureText = (error: unknown) =>
+  error instanceof PluginApiError ? "This action was denied." : "This action could not complete.";
+
 /** A real isolated presentation assembled entirely through public page, service, and UI APIs. */
 export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
   let api: PluginApi | undefined;
@@ -124,6 +116,9 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
   let pageOffset = 0;
   let input = initialInput();
   let inputDirty = false;
+  let route: PresenterRoute = "browser";
+  let management: ManagementSnapshot | undefined;
+  let managementError: string | undefined;
   let refreshDirty = false;
   let refreshing: Promise<void> | undefined;
   const runCommand = serial();
@@ -176,18 +171,21 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
     model = nextModel;
     pins = nextPins;
     pages = pageSnapshot.pages;
-    const parts = fragments(
-      { ...rendered, root: withoutUnavailableRoutes(rendered.root, dark) },
-      presentation,
-      tabsVisible,
-    );
+    const parts = fragments(rendered, presentation, tabsVisible);
     const tabSurface =
       nextPins === undefined
         ? { ...parts.tabs, root: withoutPinControls(parts.tabs.root) }
         : parts.tabs;
     await api.ui.publishContribution("tabs", tabSurface);
     await api.ui.publishContribution("toolbar", parts.toolbar);
-    await api.ui.publishContribution("content", parts.content);
+    await api.ui.publishContribution(
+      "content",
+      route === "settings"
+        ? settingsSurface(configuration, presentation, managementError)
+        : route === "plugins"
+          ? pluginsSurface(management, configuration, presentation, managementError)
+          : parts.content,
+    );
   };
 
   const requestRefresh = (): Promise<void> => {
@@ -211,56 +209,124 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
     return api.services.call("model", method, params);
   };
 
+  const refreshManagement = async () => {
+    if (!api) throw new Error("Presenter plugin has not activated");
+    try {
+      management = await api.plugins.snapshot();
+      managementError = undefined;
+    } catch (error) {
+      management = undefined;
+      managementError = failureText(error);
+    }
+  };
+
+  const replacePresenter = async () => {
+    if (!api) throw new Error("Presenter plugin has not activated");
+    try {
+      const current = await api.plugins.snapshot();
+      await api.plugins.replaceSelf(
+        presentation === "sidebar" ? "default-top-tabs" : "default-sidebar-tabs",
+        current.revision,
+      );
+      managementError = undefined;
+    } catch (error) {
+      managementError = failureText(error);
+    }
+  };
+
   const handlePress = async (action: string): Promise<void> => {
     if (!api) throw new Error("Presenter plugin has not activated");
-    if (action === defaultSurfaceActions.toggleTabs) {
-      tabsVisible = !tabsVisible;
-      await api.services.call("layout", "setPresentation", {
-        presentation: presentation === "sidebar" && !tabsVisible ? "top" : presentation,
-      });
-    } else if (action === defaultSurfaceActions.newPage) {
-      await callModel("new", {});
-      input = initialInput();
-      inputDirty = false;
-    } else if (action === defaultSurfaceActions.navigate) {
-      const url = addressUrl(input.text);
-      if (url !== undefined) {
-        const page = selectedPage();
-        if (page && model?.selection?.kind === "page") await api.pages.navigate(page.id, url);
-        else await callModel("open", { url });
-        inputDirty = false;
+    if (action === defaultSurfaceActions.settings || action === defaultSurfaceActions.plugins) {
+      route = action === defaultSurfaceActions.settings ? "settings" : "plugins";
+      managementError = undefined;
+      if (route === "plugins") await refreshManagement();
+    } else if (action === "management.back") {
+      route = "browser";
+      managementError = undefined;
+    } else if (action.startsWith("settings.color:")) {
+      const colorScheme = action.slice("settings.color:".length);
+      if (colorScheme === "light" || colorScheme === "dark" || colorScheme === "system") {
+        const configuration = await api.configuration.get();
+        await api.configuration.set({ ...configuration, colorScheme });
+        await api.services.call("layout", "setPresentation", {
+          presentation: presentation === "sidebar" && !tabsVisible ? "top" : presentation,
+        });
+        managementError = undefined;
       }
-    } else if (action === defaultSurfaceActions.back) {
-      const page = selectedPage();
-      if (page) await api.pages.back(page.id);
-    } else if (action === defaultSurfaceActions.forward) {
-      const page = selectedPage();
-      if (page) await api.pages.forward(page.id);
-    } else if (action === defaultSurfaceActions.reload) {
-      const page = selectedPage();
-      if (page) await api.pages.reload(page.id);
-    } else if (action === defaultSurfaceActions.previousSlice) {
-      pageOffset = Math.max(0, pageOffset - 30);
-    } else if (action === defaultSurfaceActions.nextSlice) {
-      pageOffset += 30;
+    } else if (action.startsWith("settings.sleep:")) {
+      const sleepAfterMs = Number(action.slice("settings.sleep:".length));
+      if ([60_000, 300_000, 900_000].includes(sleepAfterMs)) {
+        const configuration = await api.configuration.get();
+        await api.configuration.set({ ...configuration, sleepAfterMs });
+        managementError = undefined;
+      }
+    } else if (action === "settings.replace-self" || action === "plugins.replace-self") {
+      await replacePresenter();
+    } else if (action === "plugins.refresh") {
+      await refreshManagement();
     } else {
-      const pageAction = /^(page\.(?:select|close|pin|unpin)):([A-Za-z][A-Za-z0-9_-]{0,63})$/.exec(
-        action,
-      );
-      const reorder = /^page\.reorder:([A-Za-z][A-Za-z0-9_-]{0,63}):(\d{1,3})$/.exec(action);
-      if (pageAction) {
-        const [, operation, pageId] = pageAction;
-        if (operation === "page.select") {
-          await callModel("select", { pageId });
+      const lifecycle =
+        /^plugins\.(enable|disable|rollback|uninstall):([a-z][a-z0-9-]{1,62})$/.exec(action);
+      if (lifecycle !== null) {
+        const [operation, id] = [lifecycle[1], lifecycle[2]];
+        try {
+          if (operation === "enable") management = await api.plugins.enable(id!);
+          else if (operation === "disable") management = await api.plugins.disable(id!);
+          else if (operation === "rollback") management = await api.plugins.rollback(id!);
+          else management = await api.plugins.uninstall(id!);
+          managementError = undefined;
+        } catch (error) {
+          managementError = failureText(error);
+        }
+      } else if (action === defaultSurfaceActions.toggleTabs) {
+        tabsVisible = !tabsVisible;
+        await api.services.call("layout", "setPresentation", {
+          presentation: presentation === "sidebar" && !tabsVisible ? "top" : presentation,
+        });
+      } else if (action === defaultSurfaceActions.newPage) {
+        route = "browser";
+        await callModel("new", {});
+        input = initialInput();
+        inputDirty = false;
+      } else if (action === defaultSurfaceActions.navigate) {
+        const url = addressUrl(input.text);
+        if (url !== undefined) {
+          route = "browser";
+          const page = selectedPage();
+          if (page && model?.selection?.kind === "page") await api.pages.navigate(page.id, url);
+          else await callModel("open", { url });
           inputDirty = false;
-        } else if (operation === "page.close") await callModel("close", { pageId });
-        else if (pins !== undefined)
-          await api.services.call("pins", "set", { pageId, pinned: operation === "page.pin" });
-      } else if (reorder) {
-        await callModel("reorder", { pageId: reorder[1]!, index: Number(reorder[2]) });
+        }
+      } else if (action === defaultSurfaceActions.back) {
+        const page = selectedPage();
+        if (page) await api.pages.back(page.id);
+      } else if (action === defaultSurfaceActions.forward) {
+        const page = selectedPage();
+        if (page) await api.pages.forward(page.id);
+      } else if (action === defaultSurfaceActions.reload) {
+        const page = selectedPage();
+        if (page) await api.pages.reload(page.id);
+      } else if (action === defaultSurfaceActions.previousSlice) {
+        pageOffset = Math.max(0, pageOffset - 30);
+      } else if (action === defaultSurfaceActions.nextSlice) {
+        pageOffset += 30;
+      } else {
+        const pageAction =
+          /^(page\.(?:select|close|pin|unpin)):([A-Za-z][A-Za-z0-9_-]{0,63})$/.exec(action);
+        const reorder = /^page\.reorder:([A-Za-z][A-Za-z0-9_-]{0,63}):(\d{1,3})$/.exec(action);
+        if (pageAction) {
+          const [, operation, pageId] = pageAction;
+          if (operation === "page.select") {
+            route = "browser";
+            await callModel("select", { pageId });
+            inputDirty = false;
+          } else if (operation === "page.close") await callModel("close", { pageId });
+          else if (pins !== undefined)
+            await api.services.call("pins", "set", { pageId, pinned: operation === "page.pin" });
+        } else if (reorder) {
+          await callModel("reorder", { pageId: reorder[1]!, index: Number(reorder[2]) });
+        }
       }
-      // Settings and Plugins stay visible for screenshot parity. They intentionally have no
-      // private route; public management-screen composition is a tracked cutover prerequisite.
     }
     await requestRefresh();
   };
@@ -293,7 +359,10 @@ export const createPresenterPlugin = (presentation: TabPlacement): Plugin => {
       if (uiEvent.event !== "press") return;
       const press = decode(Press, uiEvent.payload);
       return runCommand(() => handlePress(press.action)).catch((error) => {
-        if (error instanceof PluginApiError) return;
+        if (error instanceof PluginApiError) {
+          managementError = failureText(error);
+          return requestRefresh();
+        }
         throw error;
       });
     },

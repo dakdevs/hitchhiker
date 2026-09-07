@@ -17,6 +17,7 @@ import { createBrowserComposition } from "./composition.ts";
 import { readCompositionRecipe } from "./composition-recipe.ts";
 import { readServiceRecipe } from "./service-recipe.ts";
 import { createPluginManager } from "./plugin-manager.ts";
+import { createPluginManagement } from "./plugin-management.ts";
 import { browserMcpApi } from "./mcp.ts";
 import { makeBrowserController } from "./controller.ts";
 import { makeBrowserDomDriver } from "./dom.ts";
@@ -159,12 +160,14 @@ const program = Effect.gen(function* () {
     ) {
       if (!isAbsolute(pluginExecutable))
         return yield* Effect.die("HITCHHIKER_PLUGIN_HOST must be absolute");
+      const management = yield* createPluginManagement();
       const launch = yield* createInstalledPluginLauncher({
         executable: pluginExecutable,
         grants,
         controller,
         onRecoveryFailure: recoveryFailure,
         composition,
+        management,
       });
       const manager = yield* createPluginManager({
         profileRoot,
@@ -176,6 +179,7 @@ const program = Effect.gen(function* () {
         onRecoveryFailure: recoveryFailure,
       });
       const artifacts = yield* createPluginArtifactStore(profileRoot);
+      yield* management.bind(manager);
       stopInstalledPlugins = manager.plan().pipe(
         Effect.flatMap((current) =>
           manager.applyPlan(current.revision, {

@@ -113,6 +113,14 @@ const fixture = (initial: readonly string[] = ["first", "second"]) => {
       },
       async set() {},
     },
+    plugins: {
+      snapshot: async () => ({ revision: 1, plugins: [] }),
+      enable: async () => ({ revision: 1, plugins: [] }),
+      disable: async () => ({ revision: 1, plugins: [] }),
+      rollback: async () => ({ revision: 1, plugins: [] }),
+      uninstall: async () => ({ revision: 1, plugins: [] }),
+      replaceSelf: async () => ({ revision: 1, plugins: [] }),
+    },
     ui: {
       async publish() {
         return { revision: 0 };
