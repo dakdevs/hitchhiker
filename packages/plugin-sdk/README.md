@@ -47,3 +47,39 @@ See [the runnable composition example](../../apps/composition-example/README.md)
 [development instructions](../../docs/DEVELOPMENT.md). The built-in tabs/controller migration and
 generic plugin services are still pending; do not assume every Chromium API or default-browser feature
 is exposed by this SDK.
+
+## Experimental service transport
+
+The SDK includes `services.publish(service, value)`, `get(dependency)`, `subscribe(dependency)` and
+`call(dependency, method, params)`. These require a host service adapter. Installed browser profiles
+do not bind this adapter yet, so these operations currently fail there. The runtime fixture in
+[`native-plugin-services.test.ts`](../runtime/test/native-plugin-services.test.ts) exercises the
+intended integration using two separately isolated SDK artifacts.
+
+A provider declares `provides` in its manifest and registers handlers through
+`definePlugin({ services: { serviceId: handler }, activate })`. A consumer declares `requires`.
+Each declaration identifies a contract by exact `{ name, version, digest }`; a trusted profile
+binding selects the provider for each dependency alias. The digest identifies an agreed contract,
+not host validation of arbitrary feature schemas. Plugins validate their own command and state data.
+
+Handlers receive `(method, params, caller)` and return JSON. Caller identity is supplied by the host;
+it does not transfer the caller's credentials. The provider retains its own authority. Service
+cooperation requires the consumer's effective host authority to contain the provider's authority,
+including origins and separately granted CDP access. Publishing private provider data is deliberate
+sharing with those consumers.
+
+`subscribe` returns the current snapshot. Later `service.state` events announce a revision; use
+`get` to read the latest snapshot. A missing optional provider yields `{ available: false }`.
+Feature schemas, including any future tab model, remain outside the host.
+
+Providers may publish initial state during `activate`. Consumers must use the returned subscription
+snapshot during activation: event forwarding begins after activation resolves, so waiting for a later
+event inside `activate` would prevent startup. Service handlers may call dependencies that have already
+become ready. A command timeout does not prove the provider stopped executing it; consumers must not
+automatically retry commands with side effects.
+
+The experimental broker limits each JSON value to 128 KiB, depth 32, 4,096 nodes and 64 KiB of
+combined string/key bytes. Published state shares a 1 MiB budget across the broker. Calls have a
+three-second response deadline and limits of 16 per consumer, 32 per provider and 128 overall.
+Notifications retain only the latest revision for each subscribed dependency. These are resource
+ceilings; they do not establish performance of the eventual default plugin set.

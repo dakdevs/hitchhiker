@@ -8,12 +8,17 @@ export interface LivePluginOptions extends Omit<PluginDispatchOptions, "manifest
   readonly executable: string;
   readonly code: string;
   readonly events: Stream.Stream<{ readonly event: string; readonly payload: unknown }, unknown>;
+  /** Broker-owned events already enforce service bindings and current authority on delivery. */
+  readonly serviceEvents?: Stream.Stream<
+    { readonly event: string; readonly payload: Schema.Json },
+    unknown
+  >;
   /** An owner-specific inbox/resource failure terminates this worker, including activation. */
   readonly stopWhen?: Effect.Effect<never, unknown>;
   /** Trusted lifecycle cleanup, distinct from a worker requesting ui.release. */
   readonly onStop?: Effect.Effect<void, unknown>;
   /** Runs only after the isolated worker's activation Promise has fulfilled. */
-  readonly onReady?: Effect.Effect<void>;
+  readonly onReady?: Effect.Effect<void, unknown>;
   /** Escalates a failed trusted-interface recovery to the owning application. */
   readonly onRecoveryFailure?: Effect.Effect<void>;
 }
@@ -65,6 +70,11 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
         : Effect.void,
     ),
   );
+  const serviceForwarding = options.serviceEvents
+    ? options.serviceEvents.pipe(
+        Stream.runForEach((event) => host.sendEvent(event.event, event.payload)),
+      )
+    : Effect.never;
   const lease = Effect.gen(function* () {
     const current = yield* options.grants.authenticate(options.token, {
       profileId: options.profileId,
@@ -74,7 +84,10 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
     yield* Effect.sleep(500);
   }).pipe(Effect.forever);
   yield* Effect.raceFirst(
-    Effect.raceFirst(Effect.raceFirst(forwarding, monitoring), lease),
+    Effect.raceFirst(
+      Effect.raceFirst(Effect.raceFirst(forwarding, serviceForwarding), monitoring),
+      lease,
+    ),
     options.stopWhen ?? Effect.never,
   );
 }, Effect.scoped);

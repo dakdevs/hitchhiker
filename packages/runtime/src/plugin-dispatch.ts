@@ -2,6 +2,7 @@ import type { BrowserConfiguration, Capability } from "@hitchhiker/core";
 import { Effect, Schema } from "effect";
 import type { GrantStoreApi } from "./grants.ts";
 import type { McpBrowserApi } from "./mcp.ts";
+import { ServiceProviderSchema, ServiceRequirementSchema } from "./service-contracts.ts";
 
 export const LivePluginManifest = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{1,62}$/)),
@@ -27,6 +28,8 @@ export const LivePluginManifest = Schema.Struct({
       "cdp.connect",
     ]),
   ).check(Schema.isMaxLength(16)),
+  provides: Schema.optional(Schema.Array(ServiceProviderSchema).check(Schema.isMaxLength(8))),
+  requires: Schema.optional(Schema.Array(ServiceRequirementSchema).check(Schema.isMaxLength(8))),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type LivePluginManifest = typeof LivePluginManifest.Type;
 export class PluginCallError extends Schema.TaggedError<PluginCallError>()("PluginCallError", {
@@ -59,6 +62,25 @@ export interface PluginDispatchOptions {
   readonly browser: McpBrowserApi;
   readonly publish: (surface: unknown) => Effect.Effect<number, unknown>;
   readonly release: Effect.Effect<void, unknown>;
+  /** Trusted owner-bound broker adapter; service callers never select identities or grants. */
+  readonly services?: {
+    readonly publish: (
+      service: string,
+      value: Schema.Json,
+    ) => Effect.Effect<{ readonly revision: number }, unknown>;
+    readonly get: (dependency: string) => Effect.Effect<Schema.Json, unknown>;
+    readonly subscribe: (dependency: string) => Effect.Effect<Schema.Json, unknown>;
+    readonly call: (
+      dependency: string,
+      method: string,
+      params: Schema.Json,
+    ) => Effect.Effect<Schema.Json, unknown>;
+    readonly respond: (
+      response:
+        | { readonly callId: string; readonly result: Schema.Json }
+        | { readonly callId: string; readonly error: string },
+    ) => Effect.Effect<void, unknown>;
+  };
   /** When present, plugins may publish only their host-declared layout or contributions. */
   readonly composition?: {
     readonly publishLayout: (surface: unknown) => Effect.Effect<number, unknown>;
@@ -85,6 +107,63 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
       if (grant.principal !== options.manifest.id) return yield* denied();
     });
     switch (method) {
+      case "services.publish":
+      case "services.get":
+      case "services.subscribe":
+      case "services.call":
+      case "services.respond": {
+        const services = options.services;
+        if (!services) return yield* denied();
+        const grant = yield* options.grants
+          .authenticate(options.token, { profileId: options.profileId })
+          .pipe(Effect.mapError(denied));
+        if (grant.principal !== options.manifest.id) return yield* denied();
+        if (method === "services.publish") {
+          const { service, value } = yield* decode(
+            Schema.Struct({ service: ContributionId, value: Schema.Json }),
+            params,
+          );
+          if (!options.manifest.provides?.some((item) => item.id === service))
+            return yield* denied();
+          return yield* services.publish(service, value).pipe(Effect.mapError(denied));
+        }
+        if (method === "services.respond") {
+          const callId = Schema.String.check(Schema.isMaxLength(64), Schema.isMinLength(1));
+          const response = yield* decode(
+            Schema.Union([
+              Schema.Struct({ callId, result: Schema.Json }),
+              Schema.Struct({ callId, error: Schema.String.check(Schema.isMaxLength(256)) }),
+            ]),
+            params,
+          );
+          yield* services.respond(response).pipe(Effect.mapError(denied));
+          return null;
+        }
+        if (method === "services.call") {
+          const input = yield* decode(
+            Schema.Struct({
+              dependency: ContributionId,
+              method: Schema.String.check(
+                Schema.isMaxLength(128),
+                Schema.isPattern(/^[A-Za-z][A-Za-z0-9_.-]*$/),
+              ),
+              params: Schema.Json,
+            }),
+            params,
+          );
+          if (!options.manifest.requires?.some((item) => item.id === input.dependency))
+            return yield* denied();
+          return yield* services
+            .call(input.dependency, input.method, input.params)
+            .pipe(Effect.mapError(denied));
+        }
+        const { dependency } = yield* decode(Schema.Struct({ dependency: ContributionId }), params);
+        if (!options.manifest.requires?.some((item) => item.id === dependency))
+          return yield* denied();
+        return yield* (
+          method === "services.get" ? services.get(dependency) : services.subscribe(dependency)
+        ).pipe(Effect.mapError(denied));
+      }
       case "pages.list": {
         yield* authorize("pages.list");
         yield* decode(Schema.Record(Schema.String, Schema.Never), params);

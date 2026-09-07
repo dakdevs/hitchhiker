@@ -32,6 +32,32 @@ const recipe = {
 const fails = async (value: unknown) =>
   assert(Exit.isFailure(await Effect.runPromise(Effect.exit(decodeCustomizationRecipe(value)))));
 
+test("customization round trips service contracts and optional dependencies", async () => {
+  const contract = { name: "example.counter", version: "1.0.0", digest: hash };
+  const value = await Effect.runPromise(
+    decodeCustomizationRecipe({
+      ...recipe,
+      plugins: [
+        {
+          ...recipe.plugins[0],
+          manifest: {
+            ...recipe.plugins[0].manifest,
+            provides: [{ id: "counter", contract }],
+            requires: [{ id: "source", contract, optional: true }],
+          },
+        },
+      ],
+    }),
+  );
+  const restored = await Effect.runPromise(
+    exportCustomizationRecipe(value).pipe(Effect.flatMap(importCustomizationRecipe)),
+  );
+  assert.deepEqual(restored.plugins[0]?.manifest.provides, [{ id: "counter", contract }]);
+  assert.deepEqual(restored.plugins[0]?.manifest.requires, [
+    { id: "source", contract, optional: true },
+  ]);
+});
+
 test("customization recipes validate strictly and canonicalize portable fields", async () => {
   const decoded = await Effect.runPromise(decodeCustomizationRecipe(recipe));
   assert.deepEqual(decoded.configuration.alwaysAwakeOrigins, [

@@ -1,13 +1,55 @@
 import type { BrowserConfiguration, BrowserPage, Capability } from "@hitchhiker/core";
 import type { Surface } from "@hitchhiker/ui";
 
+export type Json =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly Json[]
+  | { readonly [key: string]: Json };
+export interface ServiceContract {
+  readonly name: string;
+  readonly version: string;
+  readonly digest: string;
+}
+export interface ServiceDeclaration {
+  readonly id: string;
+  readonly contract: ServiceContract;
+}
+export type ServiceSnapshot =
+  | { readonly available: false }
+  | {
+      readonly available: true;
+      readonly providerGeneration: number;
+      readonly revision: number;
+      readonly value: Json;
+    };
+export interface ServiceCaller {
+  readonly id: string;
+  readonly generation: number;
+}
+export type ServiceHandler = (
+  method: string,
+  params: Json,
+  caller: ServiceCaller,
+) => Json | Promise<Json>;
+
 export interface PluginManifest {
   readonly id: string;
   readonly version: string;
   readonly name: string;
   readonly capabilities: readonly Capability[];
+  readonly provides?: readonly ServiceDeclaration[];
+  readonly requires?: readonly (ServiceDeclaration & { readonly optional?: boolean })[];
 }
 export interface PluginApi {
+  readonly services: {
+    publish(service: string, value: Json): Promise<{ readonly revision: number }>;
+    get(dependency: string): Promise<ServiceSnapshot>;
+    subscribe(dependency: string): Promise<ServiceSnapshot>;
+    call(dependency: string, method: string, params: Json): Promise<Json>;
+  };
   readonly pages: {
     list(): Promise<readonly BrowserPage[]>;
     open(url: string): Promise<{ readonly pageId: string }>;
@@ -36,6 +78,8 @@ export interface PluginApi {
 }
 export interface Plugin {
   readonly activate: (api: PluginApi) => void | Promise<void>;
+  /** Handlers run with this provider's own API authority. Caller identity is informational. */
+  readonly services?: Readonly<Record<string, ServiceHandler>>;
   readonly onEvent?: (event: string, payload: unknown) => void | Promise<void>;
 }
 interface HostBridge {
@@ -43,6 +87,15 @@ interface HostBridge {
 }
 const api = (host: HostBridge): PluginApi =>
   Object.freeze({
+    services: Object.freeze({
+      publish: (service: string, value: Json) =>
+        host.call<{ readonly revision: number }>("services.publish", { service, value }),
+      get: (dependency: string) => host.call<ServiceSnapshot>("services.get", { dependency }),
+      subscribe: (dependency: string) =>
+        host.call<ServiceSnapshot>("services.subscribe", { dependency }),
+      call: (dependency: string, method: string, params: Json) =>
+        host.call<Json>("services.call", { dependency, method, params }),
+    }),
     pages: Object.freeze({
       list: () => host.call<readonly BrowserPage[]>("pages.list", {}),
       open: (url: string) => host.call<{ readonly pageId: string }>("pages.open", { url }),
@@ -69,11 +122,41 @@ const api = (host: HostBridge): PluginApi =>
 
 /** Bundle this entry point as an IIFE. The host discovers no filesystem entry points. */
 export const definePlugin = (plugin: Plugin): void => {
+  let bridge: HostBridge | undefined;
   Object.defineProperty(globalThis, "HitchhikerPlugin", {
     configurable: true,
     value: Object.freeze({
-      activate: (host: HostBridge) => plugin.activate(api(host)),
-      ...(plugin.onEvent ? { onEvent: plugin.onEvent } : {}),
+      activate: (host: HostBridge) => {
+        bridge = host;
+        return plugin.activate(api(host));
+      },
+      onEvent: async (event: string, payload: unknown) => {
+        if (event !== "service.request") return plugin.onEvent?.(event, payload);
+        if (!bridge) throw new Error("Plugin has not activated");
+        // This event comes from the trusted broker, which validates its complete envelope.
+        const request = payload as {
+          callId: string;
+          service: string;
+          method: string;
+          params: Json;
+          caller: ServiceCaller;
+        };
+        let response: { callId: string; result: Json } | { callId: string; error: string };
+        try {
+          const handler =
+            plugin.services && Object.hasOwn(plugin.services, request.service)
+              ? plugin.services[request.service]
+              : undefined;
+          if (!handler) throw new Error("Service is unavailable");
+          response = {
+            callId: request.callId,
+            result: await handler(request.method, request.params, request.caller),
+          };
+        } catch {
+          response = { callId: request.callId, error: "Service command failed" };
+        }
+        await bridge.call("services.respond", response);
+      },
     }),
   });
 };

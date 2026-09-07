@@ -39,6 +39,29 @@ export class CustomizationError extends Schema.TaggedError<CustomizationError>()
   { message: Schema.String },
 ) {}
 const failure = (message: string) => new CustomizationError({ message });
+const projectManifest = (manifest: PluginManifest) => ({
+  id: manifest.id,
+  version: manifest.version,
+  name: manifest.name,
+  capabilities: [...manifest.capabilities],
+  ...(manifest.provides === undefined
+    ? {}
+    : {
+        provides: manifest.provides.map(({ id, contract }) => ({
+          id,
+          contract: { name: contract.name, version: contract.version, digest: contract.digest },
+        })),
+      }),
+  ...(manifest.requires === undefined
+    ? {}
+    : {
+        requires: manifest.requires.map(({ id, contract, optional }) => ({
+          id,
+          contract: { name: contract.name, version: contract.version, digest: contract.digest },
+          optional,
+        })),
+      }),
+});
 
 const canonicalize = (
   value: typeof RecipeWire.Type,
@@ -54,12 +77,7 @@ const canonicalize = (
       interface: { tabPlacement: value.interface.tabPlacement },
       plugins: value.plugins
         .map((plugin) => ({
-          manifest: {
-            id: plugin.manifest.id,
-            version: plugin.manifest.version,
-            name: plugin.manifest.name,
-            capabilities: [...plugin.manifest.capabilities],
-          },
+          manifest: projectManifest(plugin.manifest),
           hash: plugin.hash,
           enabled: plugin.enabled,
         }))
@@ -97,12 +115,7 @@ export const exportCustomizationRecipe = (value: CustomizationRecipe) =>
     },
     interface: { tabPlacement: value.interface.tabPlacement },
     plugins: value.plugins.map((plugin) => ({
-      manifest: {
-        id: plugin.manifest.id,
-        version: plugin.manifest.version,
-        name: plugin.manifest.name,
-        capabilities: plugin.manifest.capabilities,
-      },
+      manifest: projectManifest(plugin.manifest),
       hash: plugin.hash,
       enabled: plugin.enabled,
     })),

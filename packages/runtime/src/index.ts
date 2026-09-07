@@ -57,6 +57,35 @@ export { LivePluginManifest, PluginCallError, createPluginDispatcher } from "./p
 export type { PluginDispatchOptions } from "./plugin-dispatch.ts";
 export { runLivePlugin } from "./plugin-session.ts";
 export type { LivePluginOptions } from "./plugin-session.ts";
+export {
+  ServiceContractSchema,
+  ServiceProviderSchema,
+  ServiceRequirementSchema,
+  ServicePluginDescriptorSchema,
+  ServiceBindingSchema,
+  ServiceContractError,
+  validateServiceGraph,
+} from "./service-contracts.ts";
+export type {
+  ServiceContract,
+  ServiceProvider,
+  ServiceRequirement,
+  ServicePluginDescriptor,
+  ServiceBinding,
+  ResolvedServiceBinding,
+  ServiceGraph,
+} from "./service-contracts.ts";
+export { createServiceAuthority } from "./service-authority.ts";
+export type { ServiceParty, EffectiveAuthority } from "./service-authority.ts";
+export { createPluginServiceBroker, ServiceBrokerError } from "./plugin-service-broker.ts";
+export type {
+  PluginServiceBroker,
+  ServiceBrokerOptions,
+  ServiceBrokerAuthority,
+  ServiceOwner,
+  ServiceState,
+  ServiceEvent,
+} from "./plugin-service-broker.ts";
 
 export { composePluginSurface, routeCompositionEvent } from "./composition.ts";
 export type { CompositionOwner, CompositionRoute, ComposedPluginSurface } from "./composition.ts";

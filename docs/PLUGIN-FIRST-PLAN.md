@@ -41,13 +41,14 @@ their controls belong to plugins; invariant security enforcement stays in the ho
 
 `apps/browser/src/controller.ts` imports the default interface, owns tab selection/order/pins,
 dispatches default action strings, and renders navigation/settings/plugin screens. The SDK exposes
-whole-window `ui.publish`/`ui.release`; installed plugins cannot independently contribute and compose
-features. `ui.release` returns to a trusted default, which must become a configured plugin composition.
+whole-window `ui.publish`/`ui.release` and configured independent UI contributions. Service dependencies
+are not yet connected to installed workers, and the default features still use the controller.
+Legacy `ui.release` returns to a trusted default, which must become a configured plugin composition.
 The installed package manager, grants and isolated worker machinery can be reused, but do not prove
 the default experience is plugin-based.
 
-Favicon work is paused before implementation while this architecture is corrected. A read-only
-audit is identifying the composition, state, command and lifecycle contracts before migration.
+Favicon work is paused before implementation while this architecture is corrected. The composition,
+state, command and lifecycle contracts are being implemented before the default-feature migration.
 The current private/public Chromium API gaps are recorded in
 [CHROMIUM-CAPABILITY-AUDIT.md](CHROMIUM-CAPABILITY-AUDIT.md).
 Acceptance requires a default browser assembled entirely through public APIs, replacement/removal
@@ -141,7 +142,8 @@ privilege. The provider continues to execute under its own fixed identity. Core 
 commands or tab-state schemas; contracts, state and behavior remain plugin-owned. Exact bindings,
 versions/schema digests, activation generations, bounded calls/state and current grants remain host
 responsibilities. Private provider storage exposed through a service is intentional data sharing and
-must not be described as equivalent self-storage authority. This decision is not implemented yet.
+must not be described as equivalent self-storage authority. The authority helper now implements this
+decision; installed service integration remains pending.
 
 Installed composition uses a direct trusted controller event sink and bounded per-activation inboxes.
 Events published before activation completes remain queued. Overflow fails only that activation,
@@ -178,3 +180,38 @@ remains unverified: two clean packaged launches timed out before Native mounted.
 shows Chromium initialization waiting in macOS `SecItemCopyMatching`; the source-run native suite
 passes. The orphaned test engines were terminated. Investigate this packaged startup issue without
 disabling Keychain or weakening encryption. Source commit `adf8144` passed GitHub CI.
+
+## Service broker implementation
+
+The next packet adds generic `provides` and `requires` declarations with exact contract identity
+`{ name, version, digest }`. Profile bindings connect one consumer dependency alias to one provider
+service. Required dependencies must be bound; bound optional dependencies also impose startup order.
+Validate duplicate identities, absent endpoints, tuple mismatches and cycles before activation.
+The digest identifies an agreed contract; it does not prove behavioral conformance or mean the host
+interprets arbitrary JSON Schema. Payloads remain bounded JSON and feature contracts stay plugin-owned.
+
+The broker must validate live authority on calls and delivery, bind requests to activation generations,
+bound concurrency and response size, and invalidate work when a participant stops or loses its grant.
+Provider-owned state uses revisions so consumers can read the current snapshot after a notification.
+This is implementation in progress, not a claim that the default tab feature is already extracted.
+
+Installed integration must use the same lifecycle coordinator for restore, enable, update, rollback
+and recovery. Validate the enabled artifacts and bindings before starting workers, then start in
+provider-first graph order. The launcher binds all service operations to the selected durable grant
+and one authoritative activation generation. Mark providers ready only after plugin activation
+completes. Stop required consumers before their providers on deliberate shutdown; optional provider
+loss publishes unavailable state. Keep the four-worker ceiling until measurements justify a change.
+Developer `--plugin` launches are not implicitly admitted to an installed profile's service graph.
+
+The service graph, authority checks and dispatcher have focused behavioral coverage, including
+revoked ancestors, contract mismatches and strict identity-free wire envelopes. The SDK artifacts
+build successfully. The isolated native transport fixture passes: two real SDK workers exchange
+initial state and a command without page authority, and provider grant revocation terminates its
+required consumer. Existing native plugin lifecycle tests also pass. Eight broker tests cover
+activation interruption, replacement, optional dependencies, notification authority, cleanup,
+JSON/state budgets, concurrency and a real deadline with late-response rejection. Installed service
+recipe/manager wiring and default feature extraction remain unimplemented.
+
+Verification on September 6: `pnpm check` passed, and the complete native suite passed all 252 tests
+without skips (142 runtime, 110 browser). This verifies the generic service foundation and SDK
+transport fixture, not installed service composition or the performance of the final default plugins.

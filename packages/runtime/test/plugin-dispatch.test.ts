@@ -8,6 +8,169 @@ import { Effect, Exit } from "effect";
 import { create } from "../src/grants.ts";
 import { createPluginDispatcher } from "../src/plugin-dispatch.ts";
 
+test("services dispatch uses the durable identity and forwards only declared, owner-bound envelopes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-services-"));
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const grants = yield* create({ directory });
+        const issued = yield* grants.issue({
+          principal: "service-plugin",
+          profileId: "default",
+          capabilities: [],
+          origins: [],
+        });
+        const calls: Array<readonly [string, unknown]> = [];
+        const services = {
+          publish: (service: string, value: unknown) =>
+            Effect.sync(() => {
+              calls.push(["publish", { service, value }]);
+              return { revision: 3 };
+            }),
+          get: (dependency: string) =>
+            Effect.sync(() => {
+              calls.push(["get", dependency]);
+              return { available: false };
+            }),
+          subscribe: (dependency: string) =>
+            Effect.sync(() => {
+              calls.push(["subscribe", dependency]);
+              return { available: false };
+            }),
+          call: (dependency: string, method: string, params: unknown) =>
+            Effect.sync(() => {
+              calls.push(["call", { dependency, method, params }]);
+              return { answer: 7 };
+            }),
+          respond: (response: unknown) =>
+            Effect.sync(() => {
+              calls.push(["respond", response]);
+            }),
+        };
+        const dispatch = createPluginDispatcher({
+          manifest: {
+            id: "service-plugin",
+            version: "1.0.0",
+            name: "Services",
+            capabilities: [],
+            provides: [
+              {
+                id: "counter",
+                contract: { name: "test.counter", version: "1.0.0", digest: "a".repeat(64) },
+              },
+            ],
+            requires: [
+              {
+                id: "source",
+                optional: true,
+                contract: { name: "test.source", version: "1.0.0", digest: "b".repeat(64) },
+              },
+            ],
+          },
+          profileId: "default",
+          token: issued.token,
+          grants,
+          browser: {
+            pages: Effect.succeed([]),
+            open: () => Effect.succeed("one"),
+            navigate: () => Effect.void,
+            close: () => Effect.void,
+            configuration: Effect.succeed({
+              colorScheme: "system",
+              sleepAfterMs: 1,
+              alwaysAwakeOrigins: [],
+            } as const),
+            configure: () => Effect.void,
+            setTabPlacement: () => Effect.void,
+          },
+          publish: () => Effect.succeed(1),
+          release: Effect.void,
+          services,
+        });
+        assert.deepEqual(
+          yield* dispatch("services.publish", { service: "counter", value: { count: 1 } }),
+          { revision: 3 },
+        );
+        assert.deepEqual(yield* dispatch("services.get", { dependency: "source" }), {
+          available: false,
+        });
+        assert.deepEqual(yield* dispatch("services.subscribe", { dependency: "source" }), {
+          available: false,
+        });
+        assert.deepEqual(
+          yield* dispatch("services.call", {
+            dependency: "source",
+            method: "read.count",
+            params: {},
+          }),
+          { answer: 7 },
+        );
+        yield* dispatch("services.respond", { callId: "call-1", result: { ok: true } });
+        assert.deepEqual(calls, [
+          ["publish", { service: "counter", value: { count: 1 } }],
+          ["get", "source"],
+          ["subscribe", "source"],
+          ["call", { dependency: "source", method: "read.count", params: {} }],
+          ["respond", { callId: "call-1", result: { ok: true } }],
+        ]);
+
+        for (const [method, params] of [
+          ["services.publish", { service: "unknown", value: null }],
+          ["services.get", { dependency: "unknown" }],
+          ["services.call", { dependency: "source", method: "bad method", params: {} }],
+          ["services.respond", { callId: "call-1", result: null, error: "no" }],
+          [
+            "services.call",
+            { dependency: "source", method: "read", params: {}, caller: { id: "spoof" } },
+          ],
+          [
+            "services.publish",
+            { service: "counter", value: null, grantId: "spoof", token: "spoof" },
+          ],
+        ] as const)
+          assert(Exit.isFailure(yield* Effect.exit(dispatch(method, params))));
+        assert.equal(calls.length, 5);
+
+        const unavailable = createPluginDispatcher({
+          manifest: {
+            id: "service-plugin",
+            version: "1.0.0",
+            name: "No services",
+            capabilities: [],
+          },
+          profileId: "default",
+          token: issued.token,
+          grants,
+          browser: {
+            pages: Effect.succeed([]),
+            open: () => Effect.succeed("one"),
+            navigate: () => Effect.void,
+            close: () => Effect.void,
+            configuration: Effect.succeed({
+              colorScheme: "system",
+              sleepAfterMs: 1,
+              alwaysAwakeOrigins: [],
+            } as const),
+            configure: () => Effect.void,
+            setTabPlacement: () => Effect.void,
+          },
+          publish: () => Effect.succeed(1),
+          release: Effect.void,
+        });
+        assert(
+          Exit.isFailure(yield* Effect.exit(unavailable("services.get", { dependency: "source" }))),
+        );
+        yield* grants.revoke(issued.grant.id);
+        assert(
+          Exit.isFailure(yield* Effect.exit(dispatch("services.get", { dependency: "source" }))),
+        );
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("live plugins need matching identity, declared capability and current grant for each operation", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-grants-"));
   try {
