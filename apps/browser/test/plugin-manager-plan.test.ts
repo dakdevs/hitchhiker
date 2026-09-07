@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
-import { Deferred, Effect, Exit, Fiber, Scope } from "effect";
+import { Deferred, Effect, Exit, Fiber, Scope, Stream } from "effect";
 import {
   makePluginComposition,
   type GrantStoreApi,
@@ -77,6 +77,7 @@ const fixture = Effect.fn("test.planFixture")(function* (root: string) {
   const failures = new Set<string>();
   const waits = new Map<string, Deferred.Deferred<void>>();
   const entered = new Map<string, Deferred.Deferred<void>>();
+  const crashes = new Map<string, Deferred.Deferred<void>>();
   let peak = 0;
   let recoveries = 0;
   let snapshotDuringActivation = false;
@@ -140,6 +141,11 @@ const fixture = Effect.fn("test.planFixture")(function* (root: string) {
         yield* manager.managementSnapshot();
       }
       yield* ready;
+      const crash = crashes.get(id);
+      if (crash) {
+        yield* Deferred.await(crash);
+        return yield* Effect.fail("fixture worker crashed");
+      }
       yield* Effect.never;
     }).pipe(Effect.scoped);
   const options: PluginManagerOptions = {
@@ -175,6 +181,7 @@ const fixture = Effect.fn("test.planFixture")(function* (root: string) {
     failures,
     waits,
     entered,
+    crashes,
     peak: () => peak,
     recoveries: () => recoveries,
     snapshotOnActivation: (enabled: boolean) => {
@@ -915,6 +922,108 @@ test("independent manager replaces a presenter, rejects stale or revoked candida
         assert.equal(f.active.get("layout-plugin"), layoutGeneration);
         assert(!f.active.has("source-plugin"));
         assert.equal(f.peak(), 3);
+      }).pipe(Effect.scoped),
+    ),
+  );
+});
+
+test("management invalidations subscribe before initial delivery and coalesce settled mutations", async () => {
+  await withProfile((root) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const f = yield* fixture(root);
+        const initial = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const events: unknown[] = [];
+        const listener = yield* f.manager.events.pipe(
+          Stream.take(2),
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              events.push(event);
+              if (events.length === 1) {
+                yield* Deferred.succeed(initial, undefined);
+                yield* Deferred.await(release);
+              }
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(initial);
+        yield* f.stage("observed-plugin");
+        yield* f.manager.enable("observed-plugin");
+        yield* f.manager.disable("observed-plugin");
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(listener).pipe(Effect.timeout(2_000));
+        assert.deepEqual(events, [
+          { event: "plugins.changed", payload: {} },
+          { event: "plugins.changed", payload: {} },
+        ]);
+        const snapshot = yield* f.manager.managementSnapshot();
+        assert.equal(snapshot.plugins[0]?.enabled, false);
+        assert.equal(snapshot.plugins[0]?.running, false);
+
+        const ready = yield* Deferred.make<void>();
+        const enabled = yield* Deferred.make<void>();
+        const removed = yield* Deferred.make<void>();
+        let reads = 0;
+        yield* f.manager.events.pipe(
+          Stream.runForEach(() =>
+            Effect.gen(function* () {
+              const current = yield* f.manager.managementSnapshot();
+              reads++;
+              if (reads === 1) yield* Deferred.succeed(ready, undefined);
+              else if (current.plugins.length === 0) yield* Deferred.succeed(removed, undefined);
+              else if (current.plugins[0]?.running) yield* Deferred.succeed(enabled, undefined);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(ready);
+        yield* f.manager.enable("observed-plugin");
+        yield* Deferred.await(enabled).pipe(Effect.timeout(2_000));
+        yield* f.manager.uninstall("observed-plugin");
+        yield* Deferred.await(removed).pipe(Effect.timeout(2_000));
+        assert.equal(f.active.size, 0);
+        assert.equal(reads, 3, "one settled invalidation per enable/removal transaction");
+      }).pipe(Effect.scoped),
+    ),
+  );
+});
+
+test("unexpected worker termination invalidates inventory and retains unrelated activation", async () => {
+  await withProfile((root) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const f = yield* fixture(root);
+        const crash = yield* Deferred.make<void>();
+        f.crashes.set("crashing-plugin", crash);
+        yield* f.stage("crashing-plugin");
+        yield* f.stage("retained-plugin");
+        yield* f.manager.applyPlan((yield* f.manager.plan()).revision, {
+          enabled: ["crashing-plugin", "retained-plugin"],
+          serviceBindings: [],
+        });
+        const retained = f.active.get("retained-plugin");
+        const subscribed = yield* Deferred.make<void>();
+        const stopped = yield* Deferred.make<void>();
+        yield* f.manager.events.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              assert.deepEqual(event, { event: "plugins.changed", payload: {} });
+              const current = yield* f.manager.managementSnapshot();
+              const crashed = current.plugins.find((plugin) => plugin.id === "crashing-plugin");
+              if (crashed?.running) yield* Deferred.succeed(subscribed, undefined);
+              if (crashed && !crashed.running && crashed.lastFailure !== undefined)
+                yield* Deferred.succeed(stopped, undefined);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(subscribed).pipe(Effect.timeout(2_000));
+        yield* Deferred.succeed(crash, undefined);
+        yield* Deferred.await(stopped).pipe(Effect.timeout(3_000));
+        assert.equal(f.active.get("retained-plugin"), retained);
+        assert(!f.active.has("crashing-plugin"));
       }).pipe(Effect.scoped),
     ),
   );

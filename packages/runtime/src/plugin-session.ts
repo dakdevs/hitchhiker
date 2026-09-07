@@ -73,7 +73,7 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
     host.activate(options.code).pipe(Effect.andThen(options.onReady ?? Effect.void)),
     stopped,
   );
-  const forwarding = options.events.pipe(
+  const forwarding = Stream.merge(options.events, options.management?.events ?? Stream.empty).pipe(
     Stream.runForEach((event) =>
       Effect.gen(function* () {
         const capability =
@@ -81,13 +81,15 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
             ? "ui.compose"
             : event.event === "devtools.changed"
               ? "devtools.manage"
-              : event.event === "configuration.changed"
-                ? "configuration.read"
-                : event.event === "extensions.installation.changed"
-                  ? "extensions.install"
-                  : event.event.startsWith("pages.")
-                    ? "pages.list"
-                    : undefined;
+              : event.event === "plugins.changed"
+                ? "plugins.read"
+                : event.event === "configuration.changed"
+                  ? "configuration.read"
+                  : event.event === "extensions.installation.changed"
+                    ? "extensions.install"
+                    : event.event.startsWith("pages.")
+                      ? "pages.list"
+                      : undefined;
         if (capability === undefined) return;
         if (
           !manifest.capabilities.includes(capability) &&

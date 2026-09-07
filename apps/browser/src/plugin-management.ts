@@ -1,5 +1,5 @@
 import type { PluginManagementApi, PluginManagementSnapshot } from "@hitchhiker/runtime";
-import { Deferred, Effect, Schema } from "effect";
+import { Deferred, Effect, Schema, Stream } from "effect";
 import type { PluginManager } from "./plugin-manager.ts";
 
 export class PluginManagementError extends Schema.TaggedError<PluginManagementError>()(
@@ -9,7 +9,14 @@ export class PluginManagementError extends Schema.TaggedError<PluginManagementEr
 
 type ManagementBackend = Pick<
   PluginManager,
-  "managementSnapshot" | "enable" | "disable" | "rollback" | "uninstall" | "replaceSelf" | "replace"
+  | "events"
+  | "managementSnapshot"
+  | "enable"
+  | "disable"
+  | "rollback"
+  | "uninstall"
+  | "replaceSelf"
+  | "replace"
 >;
 
 /** Installed callers receive an identity-bound port, never the manager or its staging authority. */
@@ -68,6 +75,7 @@ export const createPluginManagement = Effect.fn("PluginManagement.create")(funct
       }),
     );
   const forPlugin = (callerId: string, isActive: () => boolean): PluginManagementApi => ({
+    events: Stream.unwrap(requireBackend.pipe(Effect.map((manager) => manager.events))),
     snapshot: () => requireBackend.pipe(Effect.flatMap((manager) => manager.managementSnapshot())),
     enable: (id) => mutate(isActive, (manager) => manager.enable(id)),
     disable: (id) => mutate(isActive, (manager) => manager.disable(id)),

@@ -86,3 +86,33 @@ and the eight-worker V4 cohort remain outstanding.
 Generic replacement passes the full repository check: 497 portable tests pass, with 45 Native-gated
 skips in that run. The separate Native replacement fixture passes without skips and closes cleanly.
 The API leaves the six-worker ceiling and current cohort unchanged.
+
+Lifecycle invalidations are now in implementation. The manager emits empty `plugins.changed` events
+after registry replacement and running-state changes, coalescing a transaction until it settles.
+Subscribe before an initial invalidation, gate each delivery with declared/current `plugins.read`,
+and re-read the public snapshot. This process-local stream covers the application manager used by
+MCP and installed plugins; it does not watch unsupported direct filesystem edits or other processes.
+
+Lifecycle transport, transaction coalescing and unexpected-worker termination tests pass. The Native
+compiled-SDK observer also reacts to another plugin being enabled/disabled, with no polling, then
+continues through generic presenter replacement and route cleanup. The source subscribes before its
+initial notification and rechecks `plugins.read` authority on every delivery.
+
+Separate Settings and Plugins source modules now build as standalone artifacts. They have independent
+owned routes and launchers, public configuration/lifecycle operations, bounded snapshots, and live
+configuration/management invalidations. Their two artifacts are deliberately outside the current V3
+bootstrap index; V4 must introduce both together with measured eight-worker acceptance. Existing
+presenters still contain the legacy management routes until that cohort transition.
+
+The standalone artifact Native fixture now passes public configuration edits, presenter replacement
+from both Settings and Plugins, unchanged management worker generations, external lifecycle refresh,
+disable/re-enable launcher cleanup, selected-route removal, retained document state and clean exit.
+The fixture runs the actual built management artifacts with minimal page/layout providers and a
+disposable mock-Keychain profile. Replacing a route fallback intentionally resets host selection;
+the originating management plugin explicitly reopens its own route after successful replacement.
+This verifies the public composition path with three or four active workers, not the V4 eight-worker
+cohort or production application startup.
+
+The full repository check passes 508 portable tests with 46 Native-gated skips, plus typecheck,
+lint, formatting and builds. The independent management Native fixture separately passes without
+skips. These results leave the global six-worker limit and the current V3 default cohort unchanged.

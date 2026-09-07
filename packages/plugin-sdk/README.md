@@ -174,3 +174,10 @@ retaining unrelated activations. A failed candidate restores the prior plan. Exi
 must already authorize its manifest; replacement does not issue grants. A stale revision requires
 a fresh snapshot before retrying. `replaceSelf` retains its existing caller-bound behavior.
 These methods are available to installed plugins, not developer directory launches.
+
+Installed plugins declaring `plugins.read` receive `onEvent("plugins.changed", {})` while their grant
+remains valid. An initial invalidation covers activation; later invalidations cover registry and
+worker lifecycle changes made by the application manager, including MCP and other installed plugins.
+Read `api.plugins.snapshot()` for current state. Events coalesce and contain no inventory, paths or
+credentials. They do not watch direct registry-file edits or other manager processes. A crash can
+produce one notice for the stopped worker and another for persisted recovery state.

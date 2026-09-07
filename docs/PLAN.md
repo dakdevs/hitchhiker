@@ -821,11 +821,18 @@ six-plugin extension flow passes with per-worker physical footprint and resident
 Whole-browser resource acceptance and abrupt-worker recovery remain open.
 
 Independent Settings and plugin management extraction follows the
-[management extraction plan](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md). Configuration invalidations are
-the first prerequisite; the new generic replacement API, separate artifacts and V4 cohort remain.
+[management extraction plan](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md). Configuration invalidations and
+generic replacement are implemented; the V4 cohort transition remains.
 
 The public `plugins.replace` prerequisite now supports an independent manager replacing another
 plugin through the existing validated transaction. Portable rollback/authority checks and a real Native
 compiled-SDK replacement/retained-page fixture pass; see the
-[extraction checkpoint](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md). The separate default artifacts and
-V4 cohort remain to be implemented.
+[extraction checkpoint](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md).
+
+Independent Settings and Plugins artifacts now use public configuration, lifecycle and owned-route
+APIs. Bounded `plugins.changed` invalidations refresh inventory without polling. The actual compiled
+artifacts pass Native configuration edits, bidirectional presenter switching, management-worker
+retention, route/launcher cleanup and retained-document checks. Full repository checks pass 508
+portable tests with 46 Native-gated skips; both separate Native management/observer fixtures pass.
+The artifacts are built outside the current V3 index. V4 bootstrap compatibility, presenter cleanup
+and eight-worker resource acceptance must precede installing them as the default composition.

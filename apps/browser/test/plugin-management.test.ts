@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Deferred, Effect, Exit, Fiber, Scope } from "effect";
+import { Deferred, Effect, Exit, Fiber, Scope, Stream } from "effect";
 import { createPluginManagement, type PluginManagement } from "../src/plugin-management.ts";
 
 type Backend = Parameters<PluginManagement["bind"]>[0];
 const backend = (overrides: Partial<Backend> = {}): Backend => ({
+  events: Stream.never,
   managementSnapshot: () => Effect.succeed({ revision: 2, plugins: [] }),
   enable: () => Effect.void,
   disable: () => Effect.void,

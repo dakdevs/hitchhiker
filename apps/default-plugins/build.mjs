@@ -64,6 +64,25 @@ for (const name of ["model", "pins", "layout"]) {
   };
 }
 const artifacts = [
+  // Standalone management artifacts await the measured V4 default cohort.
+  {
+    id: "default-settings",
+    entry: "settings-entry",
+    name: "Settings",
+    capabilities: [
+      "ui.compose",
+      "configuration.read",
+      "configuration.write",
+      "plugins.read",
+      "plugins.manage",
+    ],
+  },
+  {
+    id: "default-plugin-management",
+    entry: "management-entry",
+    name: "Plugins",
+    capabilities: ["ui.compose", "configuration.read", "plugins.read", "plugins.manage"],
+  },
   {
     id: "default-extension-management",
     entry: "extensions-entry",

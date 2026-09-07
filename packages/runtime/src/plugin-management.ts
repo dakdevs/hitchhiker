@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect";
+import { Effect, Schema, type Stream } from "effect";
 
 const PluginId = Schema.String.check(
   Schema.isPattern(/^[a-z][a-z0-9-]{1,62}$/),
@@ -52,6 +52,11 @@ export type PluginManagementSnapshot = typeof PluginManagementSnapshotSchema.Typ
 
 /** Trusted, owner-bound port. The dispatcher never accepts a caller identity on the wire. */
 export interface PluginManagementApi {
+  /** Trusted invalidations, never an SDK method or caller-supplied event source. */
+  readonly events?: Stream.Stream<
+    { readonly event: "plugins.changed"; readonly payload: Record<string, never> },
+    unknown
+  >;
   readonly snapshot: () => Effect.Effect<PluginManagementSnapshot, unknown>;
   readonly enable: (id: string) => Effect.Effect<PluginManagementSnapshot, unknown>;
   readonly disable: (id: string) => Effect.Effect<PluginManagementSnapshot, unknown>;

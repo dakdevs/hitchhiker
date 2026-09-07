@@ -43,10 +43,12 @@ test(
       const address = server.address();
       assert.ok(address && typeof address !== "string");
       const packages = await Promise.all(
-        ["browser", "alternate", "manager"].map(async (role) => {
+        ["browser", "alternate", "manager", "target"].map(async (role) => {
           const code =
-            role !== "manager"
-              ? `
+            role === "target"
+              ? "definePlugin({activate(){}});"
+              : role !== "manager"
+                ? `
         import {column, viewport} from "./packages/ui/src/index.ts";
         let api;
         async function refresh() {
@@ -59,7 +61,7 @@ test(
           await api.ui.publishLayout({root:column("root",[column("slot",[])]),bindings:[]});
           await refresh();
         },onEvent(event) { if(event.startsWith("pages.")) return refresh(); }});`
-              : `
+                : `
         import {text} from "./packages/ui/src/index.ts";
         let api;
         definePlugin({async activate(host) {
@@ -68,6 +70,12 @@ test(
           await api.ui.showRoute("main");
         },async onEvent(event) {
           if(event.startsWith("pages.")) await api.ui.hideRoute("main");
+          if(event === "plugins.changed") {
+            const current = await api.plugins.snapshot();
+            const running = current.plugins.find(plugin => plugin.id === "route-target")?.running;
+            const config = await api.configuration.get();
+            await api.configuration.set({...config, sleepAfterMs:running ? 60000 : 300000});
+          }
           if(event === "configuration.changed") {
             const config = await api.configuration.get();
             if(config.colorScheme !== "dark") return;
@@ -95,16 +103,18 @@ test(
               name: `Route ${role}`,
               version: "1.0.0",
               capabilities:
-                role === "manager"
-                  ? [
-                      "ui.compose",
-                      "pages.list",
-                      "configuration.read",
-                      "configuration.write",
-                      "plugins.read",
-                      "plugins.manage",
-                    ]
-                  : ["ui.compose", "pages.list"],
+                role === "target"
+                  ? []
+                  : role === "manager"
+                    ? [
+                        "ui.compose",
+                        "pages.list",
+                        "configuration.read",
+                        "configuration.write",
+                        "plugins.read",
+                        "plugins.manage",
+                      ]
+                    : ["ui.compose", "pages.list"],
             },
             code: bundled.outputFiles[0]!.text,
           };
@@ -203,6 +213,18 @@ test(
               (value) => value === "complete",
             );
             const managerGeneration = generations.get("route-manager");
+            yield* manager.enable("route-target");
+            yield* waitFor(
+              controller.configuration,
+              (configuration) => configuration.sleepAfterMs === 60_000,
+            );
+            yield* manager.disable("route-target");
+            yield* waitFor(
+              controller.configuration,
+              (configuration) => configuration.sleepAfterMs === 300_000,
+            );
+            assert.equal(generations.get("route-manager"), managerGeneration);
+
             yield* controller.configure({
               ...(yield* controller.configuration),
               colorScheme: "dark",

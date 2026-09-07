@@ -15,7 +15,18 @@ import {
   type PluginCompositionRecipe,
   type EngineError,
 } from "@hitchhiker/runtime";
-import { Clock, Deferred, Effect, Fiber, Option, Schema, Semaphore, Scope } from "effect";
+import {
+  Clock,
+  Deferred,
+  Effect,
+  Fiber,
+  Option,
+  PubSub,
+  Schema,
+  Semaphore,
+  Scope,
+  Stream,
+} from "effect";
 import { createPluginArtifactStore, type PluginArtifact } from "./plugin-artifacts.ts";
 import { planInstalledServices, requiredDependentClosure } from "./installed-service-plan.ts";
 import {
@@ -118,6 +129,11 @@ export interface ManagedPlugin {
 /** Metadata that an installed manager may expose to a plugin-management caller. */
 export type PublicManagedPlugin = Omit<ManagedPlugin, "hash">;
 export interface PluginManager {
+  /** Profile-local invalidations; read managementSnapshot for current public state. */
+  readonly events: Stream.Stream<{
+    readonly event: "plugins.changed";
+    readonly payload: Record<string, never>;
+  }>;
   readonly list: () => Effect.Effect<readonly ManagedPlugin[], PluginManagerError>;
   /** One coherent public view of the current plan and installed plugin metadata. */
   readonly managementSnapshot: () => Effect.Effect<
@@ -286,6 +302,18 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
   );
   const lock = yield* Semaphore.make(1);
   const managerScope = yield* Scope.make();
+  const changes = yield* PubSub.sliding<{
+    readonly event: "plugins.changed";
+    readonly payload: Record<string, never>;
+  }>({ capacity: 1 });
+  yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
+  let mutationActive = false;
+  let changePending = false;
+  const invalidate = () => {
+    if (mutationActive) changePending = true;
+    else PubSub.publishUnsafe(changes, { event: "plugins.changed", payload: {} });
+  };
+
   const running = new Map<
     string,
     {
@@ -446,6 +474,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
               await fd.close();
             }
             await rename(created, registryPath);
+            invalidate();
             temporary = undefined;
             const root = await open(directory, constants.O_RDONLY | constants.O_NOFOLLOW);
             try {
@@ -498,7 +527,20 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         () =>
           mutationPoisoned
             ? Effect.fail(failure("Plugin registry recovery failed; restart required"))
-            : effect,
+            : Effect.suspend(() => {
+                mutationActive = true;
+                return effect.pipe(
+                  Effect.ensuring(
+                    Effect.sync(() => {
+                      mutationActive = false;
+                      if (changePending) {
+                        changePending = false;
+                        invalidate();
+                      }
+                    }),
+                  ),
+                );
+              }),
         () =>
           Effect.tryPromise({
             try: () => rm(mutationLockPath, { recursive: true }),
@@ -561,6 +603,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         if (!active || (generation !== undefined && active.generation !== generation)) return;
         active.expectedStop = true;
         running.delete(id);
+        invalidate();
         yield* active.stop().pipe(Effect.catch(() => Effect.void));
       }),
     );
@@ -622,7 +665,10 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       Effect.mapError(() => failure("Plugin host stopped")),
       Effect.ensuring(
         Effect.sync(() => {
-          if (running.get(plugin.id)?.generation === generation) running.delete(plugin.id);
+          if (running.get(plugin.id)?.generation === generation) {
+            running.delete(plugin.id);
+            invalidate();
+          }
         }),
       ),
       (effect) => Effect.forkIn(effect, managerScope),
@@ -636,6 +682,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     };
     latestGeneration.set(plugin.id, generation);
     running.set(plugin.id, record);
+    invalidate();
     yield* Effect.gen(function* () {
       yield* Deferred.await(ready).pipe(
         Effect.timeoutOrElse({
@@ -836,7 +883,10 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         if (latestGeneration.get(id) !== failedGeneration) return;
         const active = running.get(id);
         if (active && active.generation !== failedGeneration) return;
-        if (active?.generation === failedGeneration) running.delete(id);
+        if (active?.generation === failedGeneration) {
+          running.delete(id);
+          invalidate();
+        }
         const registry = yield* loadLegacy();
         const plugin = registry.plugins.find((entry) => entry.id === id);
         if (!plugin || !plugin.enabled) return;
@@ -1799,6 +1849,15 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
   return {
     list,
     managementSnapshot,
+    events: Stream.unwrap(
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(changes);
+        return Stream.concat(
+          Stream.succeed({ event: "plugins.changed" as const, payload: {} }),
+          Stream.fromSubscription(subscription),
+        );
+      }),
+    ),
     inspectInstallation: (id) =>
       lock.withPermit(
         Effect.gen(function* () {

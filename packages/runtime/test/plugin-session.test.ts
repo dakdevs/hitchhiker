@@ -183,6 +183,7 @@ test("live plugin authenticates before spawn, expires idle credentials, and esca
 for (const [name, capability] of [
   ["extensions.installation.changed", "extensions.install"],
   ["configuration.changed", "configuration.read"],
+  ["plugins.changed", "plugins.read"],
 ] as const)
   test(`${name} requires a declared, current grant`, async () => {
     const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-install-events-"));
