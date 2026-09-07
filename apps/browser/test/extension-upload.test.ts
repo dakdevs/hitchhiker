@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, realpath, rename, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -297,7 +297,7 @@ test("expiration and root tampering reject stale uploads without following links
           yield* Effect.flip(owner.status(upload.uploadId));
           const uploadRoot = join(root, "hitchhiker-extension-uploads");
           const original = yield* Effect.promise(() => lstat(uploadRoot, { bigint: true }));
-          yield* Effect.promise(() => rm(uploadRoot, { recursive: true }));
+          yield* Effect.promise(() => rename(uploadRoot, join(root, "original-upload-root")));
           yield* Effect.promise(() => symlink(outside, uploadRoot));
           const replacement = yield* Effect.promise(() => lstat(uploadRoot, { bigint: true }));
           assert.notEqual(replacement.ino, original.ino);

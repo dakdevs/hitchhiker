@@ -110,3 +110,10 @@ abandonment path must match exact ownership while permitting cleanup after revoc
 must continue requiring live authority. Reconcile existing grants at startup as well as watching
 revocation events. Legacy controls must suppress actions for public pending reviews. These requirements
 remain open and are not satisfied by the manager's new optional owner argument.
+
+Linux CI exposed an inode-reuse assumption in the upload tampering fixture: deleting the original
+root allowed the replacement symlink to receive the same inode. The test now renames and retains
+the original root before replacement, making the identity check deterministic. Production code did
+not change. The accompanying runtime cancellation followed Turbo stopping remaining work after
+that failure; its focused ten-test suite passes. The corrected full local check passes 429 portable
+tests (`work/extension-owner-portable-fix-check.log`).
