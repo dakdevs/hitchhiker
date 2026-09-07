@@ -312,3 +312,23 @@ before their toolbar launchers. The portable presenter fixture rejects launchers
 are absent. Packaging now compares every complete manifest to the fixed V3 declaration, and a portable
 regression rejects excess extension authority even when the artifact and index are rehashed. A
 distribution hash alone does not prove that its capabilities match the approved default cohort.
+
+## Six-worker lifecycle acceptance
+
+The Native startup fixture now revokes extension management while its route is selected. It verifies
+that the other five activation generations, both live documents, open DevTools inspector, and durable
+recipe survive while the browser fallback returns. The revoked worker stops and its launcher is
+withdrawn. This passes with a disposable test Keychain (`work/default-revocation-native.log`).
+
+The sidebar and top fixtures now activate all six default workers. Each verifies optional pin-provider
+removal/restoration, presenter switching, actual failing-candidate activation followed by rollback,
+and manager teardown/recreation with the saved plan. All prior activations finish before restart;
+each restored plugin receives a fresh generation, and Chromium document markers and pin state remain.
+Both cases pass (`work/default-six-restart-native.log`). This is a plugin-manager restart within a
+live Chromium process, not a complete application restart. Abrupt worker crashes, full process
+restart, attributable resource samples and production Keychain startup still require acceptance.
+
+Worker identity research found that the trusted native client already receives the broker's PID and
+generation and samples physical footprint. Those identifiers currently remain private to the native
+client. A future diagnostic boundary must preserve that trusted provenance rather than accepting
+worker-supplied identity or collecting unrelated processes by executable name.

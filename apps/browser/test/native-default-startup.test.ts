@@ -150,7 +150,7 @@ test(
               onRecoveryFailure,
             });
             const management = yield* createPluginManagement({ startPaused: true });
-            const launch = yield* createInstalledPluginLauncher({
+            const launchWorker = yield* createInstalledPluginLauncher({
               executable: pluginHost!,
               grants,
               controller,
@@ -158,6 +158,11 @@ test(
               management,
               onRecoveryFailure,
             });
+            const generations = new Map<string, number>();
+            const launch: typeof launchWorker = (artifact, grant, ready, activation) => {
+              generations.set(artifact.manifest.id, activation.generation);
+              return launchWorker(artifact, grant, ready, activation);
+            };
             const manager = yield* createPluginManager({
               profileRoot: lease.profileRoot,
               grants,
@@ -333,6 +338,40 @@ test(
               "default DevTools reopens before revocation",
               inspector.pipe(Effect.map((value) => value.state === "open")),
             );
+            const retainedGenerations = new Map(generations);
+            const retainedPlan = yield* manager.plan();
+            yield* press("Extensions");
+            yield* waitUntil(
+              "extension screen replaces the browser viewport before revocation",
+              controller.snapshot.pipe(Effect.map((state) => state.viewports.length === 0)),
+            );
+            const extensionGrant = (yield* grants.list()).find(
+              (grant) => grant.principal === "default-extension-management",
+            );
+            assert.ok(extensionGrant);
+            yield* grants.revoke(extensionGrant.id);
+            yield* waitUntil(
+              "revocation removes only the extension worker and restores browser fallback",
+              Effect.gen(function* () {
+                const state = yield* controller.snapshot;
+                const running = (yield* manager.list()).filter((item) => item.running);
+                return (
+                  running.length === 5 &&
+                  !running.some((item) => item.id === "default-extension-management") &&
+                  !buttons.has("Extensions") &&
+                  state.viewports.length === 1 &&
+                  state.viewports[0]?.pageId === "second"
+                );
+              }),
+            );
+            assert.deepEqual(yield* manager.plan(), retainedPlan);
+            for (const [id, generation] of retainedGenerations)
+              if (id !== "default-extension-management")
+                assert.equal(generations.get(id), generation, `${id} must survive revocation`);
+            assert.equal((yield* inspector).state, "open");
+            for (const [pageId, marker] of markers)
+              assert.equal(yield* evaluate(pageId, "globalThis.retentionMarker"), marker);
+
             const devtoolsGrant = (yield* grants.list()).find(
               (grant) => grant.principal === "default-devtools",
             );

@@ -26,7 +26,7 @@ const artifactsRoot = new URL("../../default-plugins/dist/", import.meta.url);
 const Value = Schema.Struct({ result: Schema.Struct({ value: Schema.Json }) });
 for (const placement of ["sidebar", "top"] as const)
   test(
-    `five default ${placement} plugins switch presenters live with retained Chromium documents and rollback`,
+    `six default ${placement} plugins switch presenters live with retained Chromium documents and rollback`,
     { skip: !binary || !pluginHost, timeout: 60_000 },
     async () => {
       const profile = await realpath(
@@ -62,6 +62,7 @@ for (const placement of ["sidebar", "top"] as const)
             presenter,
             alternatePresenter,
             "default-devtools",
+            "default-extension-management",
           ].map(async (id) => ({
             manifest: JSON.parse(
               await readFile(new URL(`${id}/hitchhiker.plugin.json`, artifactsRoot), "utf8"),
@@ -202,6 +203,7 @@ for (const placement of ["sidebar", "top"] as const)
                     "default-browser-layout",
                     presenter,
                     "default-devtools",
+                    "default-extension-management",
                   ],
                   composition: recipe,
                   serviceBindings: services.bindings,
@@ -213,6 +215,7 @@ for (const placement of ["sidebar", "top"] as const)
                     "default-browser-layout",
                     alternatePresenter,
                     "default-devtools",
+                    "default-extension-management",
                   ],
                   composition: alternateRecipe,
                   serviceBindings: alternateServices.bindings,
@@ -224,9 +227,9 @@ for (const placement of ["sidebar", "top"] as const)
                 yield* apply(full);
                 yield* selected();
                 process.stdout.write(
-                  `Default ${placement} five-plugin install and first viewport: ${Math.round(performance.now() - started)}ms\n`,
+                  `Default ${placement} six-plugin install and first viewport: ${Math.round(performance.now() - started)}ms\n`,
                 );
-                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 5);
+                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 6);
                 assert(
                   committedSurface.includes("Tab /second"),
                   "SDK presenter must publish tab controls",
@@ -267,6 +270,7 @@ for (const placement of ["sidebar", "top"] as const)
                   "default-tab-pins",
                   "default-browser-layout",
                   "default-devtools",
+                  "default-extension-management",
                 ])
                   assert.equal(generations.get(id), stableGenerations.get(id));
                 assert.equal(active.has(presenter), false);
@@ -279,6 +283,7 @@ for (const placement of ["sidebar", "top"] as const)
                   "default-tab-pins",
                   "default-browser-layout",
                   "default-devtools",
+                  "default-extension-management",
                 ])
                   assert.equal(generations.get(id), stableGenerations.get(id));
                 const failedPackage = packages.find(
@@ -308,6 +313,19 @@ for (const placement of ["sidebar", "top"] as const)
                           ...alternateRecipe,
                           slots: alternateRecipe.slots.map((slot) => ({
                             ...slot,
+                            ...(slot.route === undefined
+                              ? {}
+                              : {
+                                  route: {
+                                    fallback: {
+                                      ...slot.route.fallback,
+                                      pluginId:
+                                        slot.route.fallback.pluginId === alternatePresenter
+                                          ? "failing-presenter"
+                                          : slot.route.fallback.pluginId,
+                                    },
+                                  },
+                                }),
                             contributions: slot.contributions.map((entry) =>
                               entry.pluginId === alternatePresenter
                                 ? { ...entry, pluginId: "failing-presenter" }
@@ -325,27 +343,42 @@ for (const placement of ["sidebar", "top"] as const)
                   ),
                 );
                 yield* selected();
+                assert.ok(
+                  generations.has("failing-presenter"),
+                  "rollback must follow actual candidate activation",
+                );
                 assert.deepEqual(yield* manager.plan(), beforeFailure);
                 for (const id of [
                   "default-tab-model",
                   "default-tab-pins",
                   "default-browser-layout",
                   "default-devtools",
+                  "default-extension-management",
                 ])
                   assert.equal(generations.get(id), stableGenerations.get(id));
                 assert.deepEqual(yield* modelStorage.read(), modelBefore);
                 assert.deepEqual(yield* pinsStorage.read(), pinsBefore);
-                assert.equal(peak, 5);
+                assert.equal(peak, 6);
                 assert.equal(yield* evaluate(ids[0]!, "globalThis.marker"), "first");
                 assert.equal(yield* evaluate(ids[1]!, "globalThis.marker"), "second");
               }),
             );
+            assert.equal(active.size, 0, "all six activations must finish before manager restart");
+            const beforeRestart = new Map(generations);
             yield* Effect.scoped(
               Effect.gen(function* () {
                 const manager = yield* createPluginManager(options);
                 yield* manager.restore();
                 yield* selected();
-                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 5);
+                assert.equal((yield* manager.list()).filter((entry) => entry.running).length, 6);
+                for (const id of active) {
+                  assert.ok(beforeRestart.has(id));
+                  assert.notEqual(
+                    generations.get(id),
+                    beforeRestart.get(id),
+                    `${id} must get a new activation`,
+                  );
+                }
                 assert(
                   committedSurface.includes("Tab /second"),
                   "SDK presenter must publish tab controls",
