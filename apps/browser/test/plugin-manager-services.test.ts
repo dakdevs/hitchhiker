@@ -7,7 +7,8 @@ import { NodeServices } from "@effect/platform-node";
 import { Deferred, Effect } from "effect";
 import { createGrantStore } from "@hitchhiker/runtime";
 import { createPluginArtifactStore } from "../src/plugin-artifacts.ts";
-import { createPluginManager } from "../src/plugin-manager.ts";
+import { createPluginManager, type PluginManager } from "../src/plugin-manager.ts";
+import type { InstalledPluginPlanInput } from "@hitchhiker/runtime";
 
 const contract = { name: "test.source", version: "1.0.0", digest: "a".repeat(64) };
 const provider = (version = "1.0.0", digest = contract.digest) => ({
@@ -26,6 +27,14 @@ const consumer = (optional = false) => ({
   provides: [],
   requires: [{ id: "source", optional, contract }],
 });
+const binding = {
+  consumer: "consumer",
+  dependency: "source",
+  provider: "provider",
+  service: "source",
+} as const;
+const apply = (manager: PluginManager, candidate: InstalledPluginPlanInput) =>
+  manager.plan().pipe(Effect.flatMap(({ revision }) => manager.applyPlan(revision, candidate)));
 
 test("manager service reconciliation stops required consumers with providers and restores provider-first", async () => {
   const root = await mkdtemp(join(tmpdir(), "hitchhiker-manager-services-"));
@@ -53,9 +62,6 @@ test("manager service reconciliation stops required consumers with providers and
         const manager = yield* createPluginManager({
           profileRoot: root,
           grants,
-          serviceBindings: [
-            { consumer: "consumer", dependency: "source", provider: "provider", service: "source" },
-          ],
           launch: (artifact, grantId, ready, activation) => {
             const party = {
               id: artifact.manifest.id,
@@ -82,8 +88,9 @@ test("manager service reconciliation stops required consumers with providers and
             );
           },
         });
-        yield* manager.install(p.hash, providerGrant.grant.id);
-        yield* manager.install(c.hash, consumerGrant.grant.id);
+        yield* manager.install(p.hash, providerGrant.grant.id, { staged: true });
+        yield* manager.install(c.hash, consumerGrant.grant.id, { staged: true });
+        yield* apply(manager, { enabled: ["provider", "consumer"], serviceBindings: [binding] });
         assert.deepEqual(
           new Map((yield* manager.list()).map(({ id, running }) => [id, running])),
           new Map([
@@ -92,7 +99,7 @@ test("manager service reconciliation stops required consumers with providers and
           ]),
         );
         const firstProviderGeneration = starts.find(([id]) => id === "provider")![1];
-        yield* manager.disable("provider");
+        yield* apply(manager, { enabled: ["consumer"], serviceBindings: [binding] });
         assert.deepEqual(
           new Map(
             (yield* manager.list()).map(({ id, enabled, running }) => [id, [enabled, running]]),
@@ -103,7 +110,7 @@ test("manager service reconciliation stops required consumers with providers and
           ]),
         );
         const startsBeforeRestore = starts.length;
-        yield* manager.enable("provider");
+        yield* apply(manager, { enabled: ["provider", "consumer"], serviceBindings: [binding] });
         assert.deepEqual(
           new Map(
             (yield* manager.list()).map(({ id, enabled, running }) => [id, [enabled, running]]),
@@ -168,9 +175,6 @@ test("optional consumers stay running and incompatible provider replacements fai
         const manager = yield* createPluginManager({
           profileRoot: root,
           grants,
-          serviceBindings: [
-            { consumer: "consumer", dependency: "source", provider: "provider", service: "source" },
-          ],
           launch: (artifact, grantId, ready, activation) => {
             const party = {
               id: artifact.manifest.id,
@@ -197,14 +201,15 @@ test("optional consumers stay running and incompatible provider replacements fai
             );
           },
         });
-        yield* manager.install(p.hash, pg.grant.id);
-        yield* manager.install(c.hash, cg.grant.id);
+        yield* manager.install(p.hash, pg.grant.id, { staged: true });
+        yield* manager.install(c.hash, cg.grant.id, { staged: true });
+        yield* apply(manager, { enabled: ["provider", "consumer"], serviceBindings: [binding] });
         const before = (yield* manager.list()).find((item) => item.id === "provider")!;
         yield* manager.install(bad.hash, pg.grant.id).pipe(Effect.flip);
         const after = (yield* manager.list()).find((item) => item.id === "provider")!;
         assert.equal(after.hash, before.hash);
         assert.equal(started.filter((id) => id === "consumer").length, 1);
-        yield* manager.disable("provider");
+        yield* apply(manager, { enabled: ["consumer"], serviceBindings: [binding] });
         assert.equal((yield* manager.list()).find((item) => item.id === "consumer")?.running, true);
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
@@ -245,9 +250,6 @@ test("provider crash waits for required consumer cleanup before fallback and res
         const manager = yield* createPluginManager({
           profileRoot: root,
           grants,
-          serviceBindings: [
-            { consumer: "consumer", dependency: "source", provider: "provider", service: "source" },
-          ],
           launch: (artifact, grantId, ready, activation) => {
             const party = {
               id: artifact.manifest.id,
@@ -291,8 +293,9 @@ test("provider crash waits for required consumer cleanup before fallback and res
             );
           },
         });
-        yield* manager.install(stable.hash, pg.grant.id);
-        yield* manager.install(c.hash, cg.grant.id);
+        yield* manager.install(stable.hash, pg.grant.id, { staged: true });
+        yield* manager.install(c.hash, cg.grant.id, { staged: true });
+        yield* apply(manager, { enabled: ["provider", "consumer"], serviceBindings: [binding] });
         yield* manager.install(crashing.hash, pg.grant.id);
         armed = true;
         yield* Effect.sleep(300);

@@ -116,19 +116,42 @@ const program = Effect.gen(function* () {
         message: "The trusted interface could not be restored; closing the browser",
       }),
     ).pipe(Effect.asVoid);
-    const recipe = safeMode ? undefined : yield* readCompositionRecipe(profileLease.profileRoot);
-    const serviceRecipe = safeMode ? undefined : yield* readServiceRecipe(profileLease.profileRoot);
-    if ((recipe || serviceRecipe) && pluginDirectory)
-      return yield* Effect.die(
-        "A profile composition uses installed plugins; --plugin cannot replace it. Use a separate developer profile.",
-      );
-    const composition = recipe
-      ? yield* createBrowserComposition({ recipe, controller, onRecoveryFailure: recoveryFailure })
-      : undefined;
+    const readLegacyPlan = Effect.gen(function* () {
+      const composition = yield* readCompositionRecipe(profileLease.profileRoot);
+      const services = yield* readServiceRecipe(profileLease.profileRoot);
+      return { composition, serviceBindings: services?.bindings ?? [] };
+    });
+    if (pluginDirectory && !safeMode) {
+      const legacy = yield* readLegacyPlan;
+      const inspector = yield* createPluginManager({
+        profileRoot,
+        grants,
+        safeMode: true,
+        launch: () => Effect.never,
+      });
+      const installed = yield* inspector.plan();
+      if (
+        installed.enabled.length > 0 ||
+        installed.composition ||
+        legacy.composition ||
+        legacy.serviceBindings.length > 0
+      )
+        return yield* Effect.die(
+          "A profile composition uses installed plugins; --plugin cannot replace it. Use a separate developer profile.",
+        );
+    }
+    const pluginExecutable = process.env.HITCHHIKER_PLUGIN_HOST;
+    const composition =
+      pluginExecutable !== undefined && !safeMode && pluginDirectory === undefined
+        ? yield* createBrowserComposition({
+            recipe: undefined,
+            controller,
+            onRecoveryFailure: recoveryFailure,
+          })
+        : undefined;
     let plugins: McpPluginApi | undefined;
     let stopDeveloperPlugin: Effect.Effect<void> = Effect.void;
     let stopInstalledPlugins: Effect.Effect<void, unknown> = Effect.void;
-    const pluginExecutable = process.env.HITCHHIKER_PLUGIN_HOST;
     if (
       pluginExecutable !== undefined &&
       !process.argv.includes("--safe-mode") &&
@@ -147,20 +170,20 @@ const program = Effect.gen(function* () {
         profileRoot,
         grants,
         launch,
-        compositionOwners: composition?.owners,
-        serviceBindings: serviceRecipe?.bindings,
+        composition,
+        readLegacyPlan,
         safeMode: process.argv.includes("--safe-mode") || pluginDirectory !== undefined,
         onRecoveryFailure: recoveryFailure,
       });
       const artifacts = yield* createPluginArtifactStore(profileRoot);
-      stopInstalledPlugins = manager.list().pipe(
-        Effect.flatMap((entries) =>
-          Effect.forEach(
-            entries.filter((entry) => entry.enabled),
-            (entry) => manager.disable(entry.id),
-            { discard: true },
-          ),
+      stopInstalledPlugins = manager.plan().pipe(
+        Effect.flatMap((current) =>
+          manager.applyPlan(current.revision, {
+            enabled: [],
+            serviceBindings: current.serviceBindings,
+          }),
         ),
+        Effect.asVoid,
       );
       plugins = {
         stage: artifacts.stage,
@@ -170,6 +193,11 @@ const program = Effect.gen(function* () {
         disable: manager.disable,
         uninstall: manager.uninstall,
         rollback: manager.rollback,
+        plans: {
+          current: manager.plan,
+          apply: manager.applyPlan,
+          stageInstall: (hash, grantId) => manager.install(hash, grantId, { staged: true }),
+        },
         requirements: () =>
           manager.list().pipe(
             Effect.flatMap((entries) =>

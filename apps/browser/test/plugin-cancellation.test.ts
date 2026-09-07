@@ -87,12 +87,21 @@ for (const operation of ["initial", "update", "rollback", "enable", "disable"] a
                 assert.match(failure.message, /mutation lock is held/);
                 release.resolve();
                 yield* Fiber.join(interruption).pipe(Effect.timeout(4_000));
-                const [plugin] = yield* manager.list();
-                assert.equal(plugin.hash, operation === "rollback" ? candidate.hash : stable.hash);
-                if (operation === "rollback") assert.equal(plugin.previousVersion, "1.0.0");
-                const active = operation === "update" || operation === "rollback";
-                assert.equal(plugin.enabled, active);
-                assert.equal(plugin.running, active);
+                const plugins = yield* manager.list();
+                if (operation === "initial") {
+                  assert.deepEqual(plugins, []);
+                } else {
+                  const [plugin] = plugins;
+                  assert.equal(
+                    plugin.hash,
+                    operation === "rollback" ? candidate.hash : stable.hash,
+                  );
+                  if (operation === "rollback") assert.equal(plugin.previousVersion, "1.0.0");
+                  const active =
+                    operation === "update" || operation === "rollback" || operation === "disable";
+                  assert.equal(plugin.enabled, active);
+                  assert.equal(plugin.running, active);
+                }
                 assert.equal(
                   (yield* Effect.promise(() => fs.readdir(join(root, "hitchhiker-plugins")))).some(
                     (name) => name.endsWith(".tmp") || name === ".plugin-write-lock",
@@ -146,11 +155,11 @@ test(
             yield* manager.install(stable.hash, "grant");
             failWrites = true;
             yield* manager.install(candidate.hash, "grant").pipe(Effect.flip);
-            assert.equal(writes, 2, "failed promotion must attempt durable recovery");
+            assert.equal(writes, 3, "failed promotion must retain and recover its durable journal");
             failWrites = false;
             const denied = yield* manager.disable(manifest.id).pipe(Effect.flip);
             assert.match(denied.message, /restart required/);
-            assert.equal(writes, 2);
+            assert.equal(writes, 3);
             const restarted = yield* createPluginManager({ profileRoot: root, grants, launch });
             yield* restarted.restore();
             const [plugin] = yield* restarted.list();
@@ -192,7 +201,7 @@ test("failed disable persistence prevents subsequent mutations", { timeout: 10_0
           failWrites = false;
           const denied = yield* manager.enable(manifest.id).pipe(Effect.flip);
           assert.match(denied.message, /restart required/);
-          assert.equal((yield* manager.list())[0].running, false);
+          assert.equal((yield* manager.list())[0].running, true);
         }),
       ),
     );

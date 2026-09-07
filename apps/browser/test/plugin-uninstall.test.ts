@@ -200,7 +200,7 @@ for (const revision of ["revision", "previous"] as const) {
   });
 }
 
-test("partial revocation leaves a disabled retryable installation across restart", async () => {
+test("partial revocation records pending removal and startup finishes cleanup", async () => {
   await inProfile(async (root) => {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -241,9 +241,8 @@ test("partial revocation leaves a disabled retryable installation across restart
           }),
         );
         const restarted = yield* createPluginManager({ profileRoot: root, grants, launch });
+        assert.equal((yield* restarted.list())[0].removing, true);
         yield* restarted.restore();
-        assert.equal((yield* restarted.list())[0].running, false);
-        yield* restarted.uninstall(manifest.id);
         assert.deepEqual(yield* restarted.list(), []);
         yield* grants.authenticateGrant(nextGrant.id, { profileId: "default" }).pipe(Effect.flip);
         yield* grants.authenticate(parent.token, { profileId: "default" });
@@ -252,9 +251,9 @@ test("partial revocation leaves a disabled retryable installation across restart
   });
 });
 
-for (const gate of ["stop", "disable-write", "remove-write"] as const) {
+for (const gate of ["stop", "pending-write", "promotion-write", "remove-write"] as const) {
   test(
-    `uninstall cancellation waits for ${gate} and commits removal under the mutation lock`,
+    `uninstall cancellation at ${gate} respects the promotion commit point and mutation lock`,
     { timeout: 10_000 },
     async () => {
       await inProfile(async (root) => {
@@ -267,8 +266,9 @@ for (const gate of ["stop", "disable-write", "remove-write"] as const) {
           if (armed && destination === join(root, "hitchhiker-plugins", "plugins.json")) {
             writes++;
             if (
-              (gate === "disable-write" && writes === 1) ||
-              (gate === "remove-write" && writes === 2)
+              (gate === "pending-write" && writes === 1) ||
+              (gate === "promotion-write" && writes === 2) ||
+              (gate === "remove-write" && writes === 3)
             ) {
               entered.resolve();
               await release.promise;
@@ -312,6 +312,15 @@ for (const gate of ["stop", "disable-write", "remove-write"] as const) {
                 );
                 release.resolve();
                 yield* Fiber.join(interrupt).pipe(Effect.timeout(3_000));
+                if (gate === "stop" || gate === "pending-write") {
+                  const [entry] = yield* manager.list();
+                  assert.equal(entry.enabled, true);
+                  assert.equal(entry.running, true);
+                  yield* grants.authenticateGrant(child.id, { profileId: "default" });
+                  // Recovery completed before releasing the lock, so a retry can finish.
+                  armed = false;
+                  yield* manager.uninstall(manifest.id);
+                }
                 assert.deepEqual(yield* manager.list(), []);
                 yield* grants
                   .authenticateGrant(child.id, { profileId: "default" })
@@ -334,7 +343,7 @@ for (const gate of ["stop", "disable-write", "remove-write"] as const) {
   );
 }
 
-for (const failAt of [1, 2] as const) {
+for (const failAt of [1, 2, 3] as const) {
   test(`uninstall registry write ${failAt} failure stops mutation and preserves durable retry state`, async () => {
     await inProfile(async (root) => {
       const originalRename = fs.rename;
@@ -362,12 +371,21 @@ for (const failAt of [1, 2] as const) {
                 yield* manager.uninstall(manifest.id).pipe(Effect.flip);
                 armed = false;
                 const [entry] = yield* manager.list();
-                assert.equal(entry.enabled, failAt === 1);
-                assert.equal(entry.running, false);
-                assert.match(
-                  (yield* manager.uninstall(manifest.id).pipe(Effect.flip)).message,
-                  /restart required/,
-                );
+                assert.equal(entry.enabled, failAt < 3);
+                assert.equal(entry.running, failAt < 3);
+                if (failAt < 3) {
+                  yield* grants.authenticateGrant(child.id, { profileId: "default" });
+                  yield* manager.uninstall(manifest.id);
+                  assert.deepEqual(yield* manager.list(), []);
+                } else {
+                  yield* grants
+                    .authenticateGrant(child.id, { profileId: "default" })
+                    .pipe(Effect.flip);
+                  assert.match(
+                    (yield* manager.uninstall(manifest.id).pipe(Effect.flip)).message,
+                    /restart required/,
+                  );
+                }
               }),
             );
             const restarted = yield* createPluginManager({
@@ -376,7 +394,10 @@ for (const failAt of [1, 2] as const) {
               launch,
               safeMode: true,
             });
-            yield* restarted.uninstall(manifest.id);
+            if (failAt === 3) {
+              assert.equal((yield* restarted.list())[0]?.removing, true);
+              yield* restarted.restore();
+            }
             assert.deepEqual(yield* restarted.list(), []);
           }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
         );

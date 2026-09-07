@@ -90,7 +90,7 @@ export interface PluginApi {
     set(configuration: BrowserConfiguration): Promise<void>;
   };
   readonly ui: {
-    /** Legacy whole-window replacement for hosts that do not enable composition. */
+    /** Legacy whole-window API; aliases publishLayout for the configured layout in composition mode. */
     publish(surface: Omit<Surface, "identity">): Promise<{ readonly revision: number }>;
     /** Publish this plugin's configured layout; the host owns identity, slots, and bindings. */
     publishLayout(surface: Omit<Surface, "identity">): Promise<{ readonly revision: number }>;

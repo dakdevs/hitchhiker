@@ -122,7 +122,7 @@ The public SDK now has `ui.publishLayout`, `ui.publishContribution`, and `ui.wit
 A profile-local `hitchhiker-plugins/composition.json` binds installed plugin identities to layout slots.
 The installed launcher assigns activation generations and shares one host composition session.
 Only configured UI owners may activate together; the four-worker limit remains unchanged. Legacy
-whole-window publication is denied in a composed profile. `ui.release` clears the caller's publications
+`ui.publish` is a layout-owner alias in a composed profile; contributors cannot replace the layout. `ui.release` clears the caller's publications
 without disabling its activation; stopping a worker removes that generation. Missing layout keeps the trusted plugin-management interface visible so the user can repair it without MCP. The existing native emergency recovery also exposes the legacy
 plugin-management interface during migration; it is not the final plugin-based recovery architecture.
 

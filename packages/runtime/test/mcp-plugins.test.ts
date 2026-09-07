@@ -352,3 +352,126 @@ test("uninstall validates its ID, dispatches once, and observes durable grant re
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("plan tools are optional, validate the envelope, forward revision and reread grants", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hitchhiker-mcp-plans-"));
+  try {
+    const directory = join(root, "grants");
+    const marker = join(root, "marker");
+    const issued = await provision(directory, ["plugins.install", "pages.list"]);
+    const absent = await connect(directory, issued.token, marker);
+    try {
+      assert.equal(
+        (await absent.client.listTools()).tools.some(
+          (tool) => tool.name === "hitchhiker_plugin_apply_plan",
+        ),
+        false,
+      );
+    } finally {
+      await absent.transport.close();
+    }
+    const connection = await connect(directory, issued.token, marker, { MCP_PLUGIN_PLANS: "yes" });
+    try {
+      const names = (await connection.client.listTools()).tools.map((tool) => tool.name);
+      for (const name of [
+        "hitchhiker_plugin_plan",
+        "hitchhiker_plugin_apply_plan",
+        "hitchhiker_plugin_stage",
+      ])
+        assert(names.includes(name));
+      const candidate = {
+        enabled: ["managed-plugin"],
+        composition: { layout: "managed-plugin", slots: [] },
+        serviceBindings: [],
+      };
+      for (const args of [
+        { expectedRevision: -1, candidate },
+        { expectedRevision: 1.5, candidate },
+        { expectedRevision: 7, candidate: { ...candidate, grantId: issued.grant.id } },
+        { expectedRevision: 7, candidate, profileId: "other" },
+      ])
+        await expectToolError(
+          connection.client.callTool({ name: "hitchhiker_plugin_apply_plan", arguments: args }),
+        );
+      assert.deepEqual(await readRecords(marker), []);
+      assert.equal(
+        (await connection.client.callTool({ name: "hitchhiker_plugin_plan", arguments: {} }))
+          .isError,
+        false,
+      );
+      assert.equal(
+        (
+          await connection.client.callTool({
+            name: "hitchhiker_plugin_apply_plan",
+            arguments: { expectedRevision: 7, candidate },
+          })
+        ).isError,
+        false,
+      );
+      const staged = await connection.client.callTool({
+        name: "hitchhiker_plugin_stage",
+        arguments: { manifest: manifest(), code: "globalThis.HitchhikerPlugin={activate(){}}" },
+      });
+      assert.equal(staged.isError, false);
+      assert.equal(/grantId|token|credential/.test(JSON.stringify(staged)), false);
+      const records = await readRecords(marker);
+      assert.deepEqual(
+        records.map((record) => record.operation),
+        ["plan", "applyPlan", "stage", "stageInstall"],
+      );
+      assert.deepEqual(records[1], { operation: "applyPlan", expectedRevision: 7, candidate });
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const grants = yield* create({ directory });
+          yield* grants.revoke(issued.grant.id);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+      for (const [name, args] of [
+        ["hitchhiker_plugin_plan", {}],
+        ["hitchhiker_plugin_apply_plan", { expectedRevision: 7, candidate }],
+        ["hitchhiker_plugin_stage", { manifest: manifest(), code: "code" }],
+      ] as const)
+        await expectToolError(connection.client.callTool({ name, arguments: args }));
+      assert.deepEqual(await readRecords(marker), records);
+    } finally {
+      await connection.transport.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed disabled staging revokes its delegated grant", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hitchhiker-mcp-stage-"));
+  try {
+    const directory = join(root, "grants");
+    const marker = join(root, "marker");
+    const issued = await provision(directory, ["plugins.install", "pages.list"]);
+    const connection = await connect(directory, issued.token, marker, {
+      MCP_PLUGIN_PLANS: "yes",
+      MCP_PLUGIN_INSTALL: "fail",
+    });
+    try {
+      await expectToolError(
+        connection.client.callTool({
+          name: "hitchhiker_plugin_stage",
+          arguments: { manifest: manifest(), code: "globalThis.HitchhikerPlugin={activate(){}}" },
+        }),
+      );
+      const records = await readRecords(marker);
+      const childId = records.find((record) => record.operation === "stageInstall")?.grantId;
+      assert.equal(typeof childId, "string");
+      const grants = await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* create({ directory });
+          return yield* store.list();
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+      assert(grants.find((grant) => grant.id === childId)?.revokedAt !== undefined);
+    } finally {
+      await connection.transport.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

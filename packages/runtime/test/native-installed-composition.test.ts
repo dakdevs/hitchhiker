@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,9 +19,26 @@ const example = new URL("../../../apps/composition-example/", import.meta.url);
 const Plugins = Schema.Array(
   Schema.Struct({ id: Schema.String, enabled: Schema.Boolean, running: Schema.Boolean }),
 );
+const Plan = Schema.Struct({ revision: Schema.Number });
+const composition = {
+  layout: "split-layout",
+  slots: [
+    {
+      key: "content",
+      contributions: [
+        { pluginId: "split-left", id: "page" },
+        { pluginId: "split-right", id: "page" },
+      ],
+    },
+  ],
+};
+const withoutLeft = {
+  layout: "split-layout",
+  slots: [{ key: "content", contributions: [{ pluginId: "split-right", id: "page" }] }],
+};
 
 test(
-  "MCP installs a profile composition and a fresh app restores it without re-enabling removed features",
+  "MCP stages a profile composition plan and a fresh app restores it without re-enabling removed features",
   { skip: !binary || !pluginHost, timeout: 45000 },
   async () => {
     const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-composition-mcp-")));
@@ -42,9 +59,6 @@ test(
         });
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
-    const recipePath = join(profile, "hitchhiker-plugins", "composition.json");
-    await mkdir(join(profile, "hitchhiker-plugins"));
-    await writeFile(recipePath, await readFile(new URL("composition.json", example)));
     const connect = async (safeMode = false) => {
       const transport = new StdioClientTransport({
         command: launcher ?? process.execPath,
@@ -92,20 +106,44 @@ test(
         await session.call("hitchhiker_page_open", {
           url: `http://127.0.0.1:${address.port}/${page}`,
         });
-      for (const name of ["right", "left", "layout"])
-        await session.call("hitchhiker_plugin_install", {
+      const stage = async (name: string) =>
+        session!.call("hitchhiker_plugin_stage", {
           manifest: JSON.parse(
             await readFile(new URL(`${name}.hitchhiker.plugin.json`, example), "utf8"),
           ),
           code: await readFile(new URL(`dist/${name}.js`, example), "utf8"),
         });
-      assert.equal(
-        Schema.decodeUnknownSync(Plugins)(await session.call("hitchhiker_plugins_list")).filter(
-          (plugin) => plugin.running,
-        ).length,
-        3,
+      const list = async () =>
+        Schema.decodeUnknownSync(Plugins)(await session!.call("hitchhiker_plugins_list"));
+      const plan = async () =>
+        Schema.decodeUnknownSync(Plan)(await session!.call("hitchhiker_plugin_plan"));
+      const apply = async (candidate: Record<string, unknown>) =>
+        session!.call("hitchhiker_plugin_apply_plan", {
+          expectedRevision: (await plan()).revision,
+          candidate,
+        });
+      for (const name of ["right", "left", "layout"]) await stage(name);
+      assert((await list()).every((plugin) => !plugin.enabled && !plugin.running));
+      await apply({
+        enabled: ["split-layout", "split-left", "split-right"],
+        composition,
+        serviceBindings: [],
+      });
+      assert.equal((await list()).filter((plugin) => plugin.running).length, 3);
+      await apply({
+        enabled: ["split-layout", "split-right"],
+        composition: withoutLeft,
+        serviceBindings: [],
+      });
+      assert.deepEqual(
+        (await list()).find((plugin) => plugin.id === "split-left"),
+        {
+          id: "split-left",
+          enabled: false,
+          running: false,
+        },
       );
-      await session.call("hitchhiker_plugin_disable", { id: "split-left" });
+      await session.call("hitchhiker_plugin_uninstall", { id: "split-left" });
       await session.transport.close();
       const firstLog = session.diagnostics();
       const afterClose = JSON.parse(
@@ -124,11 +162,16 @@ test(
         2,
         `${JSON.stringify(restoredData)}\nafter-close=${JSON.stringify(afterClose)}\nfirst=${firstLog}\nsecond=${session.diagnostics()}`,
       );
-      assert.deepEqual(
+      assert.equal(
         restored.find((plugin) => plugin.id === "split-left"),
-        { id: "split-left", enabled: false, running: false },
+        undefined,
       );
-      await session.call("hitchhiker_plugin_enable", { id: "split-left" });
+      await stage("left");
+      await apply({
+        enabled: ["split-layout", "split-left", "split-right"],
+        composition,
+        serviceBindings: [],
+      });
       assert.equal(
         Schema.decodeUnknownSync(Plugins)(await session.call("hitchhiker_plugins_list")).filter(
           (plugin) => plugin.running,
@@ -143,7 +186,6 @@ test(
       );
       await session.transport.close();
       session = undefined;
-      await writeFile(recipePath, "{invalid");
       session = await connect(true);
       assert.equal(
         Schema.decodeUnknownSync(Schema.Array(Schema.Unknown))(

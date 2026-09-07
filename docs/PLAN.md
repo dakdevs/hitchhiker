@@ -548,3 +548,13 @@ with eleven local pages confirmed the layout. Site initials are the current pinn
 favicon acquisition remains unfinished. See [SIDEBAR-TABS-PLAN.md](SIDEBAR-TABS-PLAN.md) for the
 restore starvation and close-cancellation fixes discovered during this verification, plus final
 portable/native/bundle evidence.
+
+## Live installed plugin plans
+
+The installed manager now persists a revisioned V2 plan for enabled plugins, composition and service
+bindings. MCP can stage disabled artifacts and atomically apply a complete replacement plan; compatible
+workers retain their generations. Cancellation, rollback, interrupted uninstall cleanup and pending
+startup recovery have portable behavioral coverage. The final portable check passed with 316 passing
+tests and 29 native-gated skips, plus all builds. The real native sidebar-switch fixture failed during
+initial model activation, before any switch assertion. Default bootstrap and the complete feature-plugin
+cutover remain unfinished. See [LIVE-PLUGIN-PLAN.md](LIVE-PLUGIN-PLAN.md) for contracts and evidence.

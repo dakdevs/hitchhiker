@@ -110,3 +110,9 @@ export {
   PageLifecycleEvent,
   decodePageLifecycleEvent,
 } from "./page-lifecycle.ts";
+
+export {
+  InstalledPluginPlanInputSchema,
+  InstalledPluginPlanSchema,
+} from "./installed-plugin-plan.ts";
+export type { InstalledPluginPlanInput, InstalledPluginPlan } from "./installed-plugin-plan.ts";

@@ -7,6 +7,8 @@ import { NodeServices } from "@effect/platform-node";
 import { Effect, Exit } from "effect";
 import { create } from "../src/grants.ts";
 import { createPluginDispatcher } from "../src/plugin-dispatch.ts";
+import { makePluginComposition } from "../src/composition-session.ts";
+import { button, column, text, viewport, type Surface } from "@hitchhiker/ui";
 
 test("services dispatch uses the durable identity and forwards only declared, owner-bound envelopes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-services-"));
@@ -301,7 +303,9 @@ test("composition UI dispatches only host-declared calls with an active ui.compo
         const dispatch = createPluginDispatcher(options);
         assert(
           Exit.isFailure(
-            yield* Effect.exit(dispatch("ui.publish", { surface: { root: {}, bindings: [] } })),
+            yield* Effect.exit(
+              dispatch("ui.publish", { surface: { identity: "spoofed", root: {}, bindings: [] } }),
+            ),
           ),
         );
         assert(
@@ -377,7 +381,93 @@ test("composition UI dispatches only host-declared calls with an active ui.compo
             ),
           ),
         );
+        const owner = { id: "sample-plugin", generation: 1 };
+        const committed: Surface[] = [];
+        const session = yield* makePluginComposition({
+          recipe: { layout: owner.id, slots: [] },
+          recovery: { root: text("recovery", "Recovery"), bindings: [] },
+          commit: (surface) =>
+            Effect.sync(() => {
+              committed.push(surface);
+              return committed.length;
+            }),
+        });
+        yield* session.activate(owner);
+        const composed = createPluginDispatcher({
+          ...options,
+          release: session.release(owner).pipe(Effect.asVoid),
+          composition: {
+            publishLayout: (surface) => session.publishLayout(owner, surface),
+            publishContribution: (id, surface) => session.publishContribution(owner, id, surface),
+            withdrawContribution: (id) => session.withdrawContribution(owner, id),
+          },
+        });
+        const wholeWindow = {
+          root: column("root", [
+            button("back", "Back", "navigate.back"),
+            viewport("page", "content", { flex: 1 }),
+          ]),
+          bindings: [{ viewportId: "content", pageId: "existing-page" }],
+        };
+        yield* composed("ui.publish", { surface: wholeWindow });
+        assert.equal(yield* session.complete, true);
+        const surface = committed.at(-1)!;
+        assert.equal(surface.bindings[0]?.pageId, "existing-page");
+        assert("children" in surface.root);
+        const control = surface.root.children[0]!;
+        assert.equal(control.kind, "button");
+        const event = session.route({
+          surfaceId: "main",
+          revision: committed.length,
+          nodeId: control.key,
+          event: "press",
+          payload: { action: control.action },
+        });
+        assert.equal(event?.owner.id, owner.id);
+        assert.equal(event?.event.nodeId, "back");
+        assert.equal(event?.event.payload.action, "navigate.back");
+        const beforeInvalid = committed.length;
+        assert(
+          Exit.isFailure(
+            yield* Effect.exit(composed("ui.publish", { surface: { root: {}, bindings: [] } })),
+          ),
+        );
+        assert.equal(committed.length, beforeInvalid);
+        yield* composed("ui.release", {});
+        assert.equal(yield* session.complete, false);
+        yield* composed("ui.publish", { surface: wholeWindow });
+        assert.equal(yield* session.complete, true);
+        yield* session.remove(owner);
+        yield* session.reconfigure({
+          layout: "other-layout",
+          slots: [{ key: "slot", contributions: [{ pluginId: owner.id, id: "main" }] }],
+        });
+        yield* session.activate({ ...owner, generation: 2 });
+        const contributor = createPluginDispatcher({
+          ...options,
+          composition: {
+            publishLayout: (value) => session.publishLayout({ ...owner, generation: 2 }, value),
+            publishContribution: (id, value) =>
+              session.publishContribution({ ...owner, generation: 2 }, id, value),
+            withdrawContribution: (id) =>
+              session.withdrawContribution({ ...owner, generation: 2 }, id),
+          },
+        });
+        const beforeDenied = committed.length;
+        assert(
+          Exit.isFailure(yield* Effect.exit(contributor("ui.publish", { surface: wholeWindow }))),
+        );
+        assert.equal(committed.length, beforeDenied);
+        // Keep the activation current and make it a layout again so revocation,
+        // rather than a stale generation or contributor role, causes the denial.
+        yield* session.reconfigure({ layout: owner.id, slots: [] });
+        yield* contributor("ui.publish", { surface: wholeWindow });
+        const beforeRevocation = committed.length;
         yield* grants.revoke(issued.grant.id);
+        assert(
+          Exit.isFailure(yield* Effect.exit(contributor("ui.publish", { surface: wholeWindow }))),
+        );
+        assert.equal(committed.length, beforeRevocation);
         assert(
           Exit.isFailure(yield* Effect.exit(dispatch("ui.withdrawContribution", { id: "main" }))),
         );

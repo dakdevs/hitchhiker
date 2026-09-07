@@ -1,7 +1,7 @@
 # Live installed plugin plans
 
-This document defines the next plugin-first prerequisite. It is an implementation plan, not a claim
-that live plan switching or the default-interface cutover is complete.
+This document defines the live-plan prerequisite. The manager transaction and public MCP adapters
+are implemented and under integration verification. The default-interface cutover remains incomplete.
 
 At the start of this migration, the application reads `composition.json` and `services.json` once in
 [`apps/browser/src/main.ts`](../apps/browser/src/main.ts), constructs a fixed composition in
@@ -9,8 +9,8 @@ At the start of this migration, the application reads `composition.json` and `se
 `compositionOwners` and `serviceBindings` options. The service broker can already reconfigure a
 validated graph, but [`packages/runtime/src/composition-session.ts`](../packages/runtime/src/composition-session.ts)
 previously captured one recipe for its entire lifetime. Dynamic composition is now implemented,
-but fixed manager configuration still prevents a sidebar-to-top switch from being one live,
-recoverable operation.
+and the manager now owns a durable active plan rather than fixed startup-only composition and
+service choices. Native verification of the complete switching path is tracked below.
 
 ## Public manager contract
 
@@ -40,9 +40,12 @@ interface PluginManager {
 The host assigns monotonically increasing safe-integer revisions. `expectedRevision` prevents a
 stale Settings, MCP, or future customization client from replacing a newer plan. Existing
 `enable` and `disable` operations become small plan updates. Disabling an identity required by the
-current composition must fail unless the caller supplies a complete replacement plan. Newly
-installed identities should be registered disabled; a caller stages and installs every artifact,
-then admits the intended cohort with one `applyPlan` call. Updating or rolling back the artifact for
+current composition must fail unless the caller supplies a complete replacement plan. For cohort construction, install new identities disabled with `install(hash, grantId, { staged: true })`;
+a caller stages every artifact, then admits the intended cohort with one `applyPlan` call. The
+existing two-argument install and `hitchhiker_plugin_install` retain automatic admission temporarily
+for compatibility. New cohort workflows use `hitchhiker_plugin_stage`, `hitchhiker_plugin_plan` and
+`hitchhiker_plugin_apply_plan`. Removing that legacy automatic admission is part of default cutover,
+not a completed requirement of this migration. Updating or rolling back the artifact for
 an already enabled identity must validate and reconcile against the same active plan.
 
 `enabled` records the desired durable preference. It does not mean that every identity is currently
@@ -131,7 +134,7 @@ profile, so neither is recreated or deleted by a plan switch.
 
 The first cohesive implementation slice is composition reconfiguration. Its source and focused
 checks are implemented; final evidence is recorded in [PLUGIN-FIRST-PLAN.md](PLUGIN-FIRST-PLAN.md).
-The durable manager transaction remains unimplemented.
+The durable manager transaction is implemented; final integration evidence is still being collected.
 
 In [`packages/runtime/src/composition-session.ts`](../packages/runtime/src/composition-session.ts):
 
@@ -161,12 +164,13 @@ generations at capacity; admitting another identity requires restarting the brow
 The next slices are:
 
 1. The internal `apps/browser/src/installed-plugin-plan.ts` preparer and diff policy are implemented.
-   They validate candidate cohorts and compute restart sets; the manager does not invoke them yet.
-2. Add Registry V2 migration, `plan`, `applyPlan`, journaling, forward reconciliation, and rollback to
+   The manager uses them to validate candidate cohorts and compute restart sets.
+2. Registry V2 migration, `plan`, `applyPlan`, journaling, forward reconciliation, and rollback are implemented in
    [`apps/browser/src/plugin-manager.ts`](../apps/browser/src/plugin-manager.ts).
-3. Make [`apps/browser/src/plugin.ts`](../apps/browser/src/plugin.ts) use the stable dynamic composition
-   coordinator and update [`apps/browser/src/main.ts`](../apps/browser/src/main.ts) to restore the
-   manager-owned active plan.
+3. The installed launcher in [`apps/browser/src/plugin.ts`](../apps/browser/src/plugin.ts) uses the stable dynamic composition
+   coordinator; [`apps/browser/src/main.ts`](../apps/browser/src/main.ts) restores the manager-owned
+   active plan. Emergency recovery applies one empty enabled plan instead of disabling UI owners
+   individually.
 4. Keep [`apps/browser/src/composition-recipe.ts`](../apps/browser/src/composition-recipe.ts) and
    [`apps/browser/src/service-recipe.ts`](../apps/browser/src/service-recipe.ts) only as bounded legacy
    migration readers. On a Version 1 profile, construct the initial plan from its enabled flags and
@@ -180,16 +184,17 @@ During migration, synthesize `{ layout: pluginId, slots: [] }` for that identity
 plugins produces a headless plan; more than one is invalid and must remain repairable without
 rewriting Version 1. An existing explicit composition recipe remains authoritative.
 
-The dispatcher will support `ui.publish` as a deprecated alias for `ui.publishLayout` only for the
+The dispatcher supports `ui.publish` as a deprecated alias for `ui.publishLayout` only for the
 host-assigned current layout owner. Contributors cannot select that role or publish a whole-window
 surface. This uses the same surface validation, grant checks, owner namespacing, viewport bindings
 and event routing as ordinary layout publication; it grants no additional authority. All installed
 Version 2 UI still uses the compositor, with no parallel legacy execution path or durable exception
 flag. Developer `--plugin` retains its separately selected direct path.
 
-This adapter and migration are planned, not implemented. Verify publication with viewports and
-actions, release and re-publication, contributor denial, malformed input rejection, and invalid
-multi-UI legacy profiles before enabling the migration.
+The dispatcher adapter is implemented and its portable test covers viewport binding, original action
+routing, release/re-publication, malformed input, contributor denial and revoked grants. Profile
+migration is implemented and its invalid-input preservation and concurrent safe-mode writer are
+covered by portable tests. Native migration verification remains unfinished.
 
 ## Acceptance evidence
 
@@ -231,7 +236,59 @@ manager and uninstall run also passed. Logs are local under `work/plugin-plan-{c
 regression,build}.log`. No native test was rerun for this pure planning change. The earlier native
 shutdown/startup failures remain unresolved.
 
-The manager's registry rewrite helpers now preserve the existing registry envelope in preparation
-for Version 2. This does not implement Version 2, `applyPlan`, or journaled reconciliation; the new
-preparer is not yet connected to runtime mutations. The next step remains that integration and its
-failure/cancellation recovery tests.
+That preparer-only checkpoint has now been superseded by the manager integration below.
+
+## Manager integration in progress
+
+The existing registry directory checks, no-follow reads, bounded read loop, artifact metadata checks,
+mutation lock and fsync/rename writes are retained. Version 2 adds strict active/pending plan schemas,
+a 256 KiB registry bound and an enabled-preference mirror. New profiles start with an empty V2 plan;
+legacy composition and service files are read only while migrating an actual V1 registry. Invalid
+migration input does not overwrite V1. A safe-mode legacy writer rechecks the registry version under
+its mutation lock, so a concurrent V2 migration cannot send it through a legacy write path.
+
+Forward switching writes old metadata plus the pending candidate before changing runtime state.
+Rollback compares actual generations with the pre-switch snapshot so it does not restart old workers
+that were never touched. A failed restore preserves the pending marker and poisons mutations. Startup
+restores the active plan before clearing the marker. A worker crash persists suspension and stops its
+required dependents while keeping enabled preferences; explicit enable retries it. The existing
+single revision fallback remains bounded to one attempt.
+
+Uninstall has two commit boundaries. Cancellation before plan promotion restores the previous plan
+and grants. Promotion atomically disables the identity and marks it `removing`; revocation and storage
+cleanup then run under the same interruption mask, outside plan rollback. A crash or cleanup failure
+leaves that marker durable. Startup, including safe-mode manager recovery, validates the recorded
+grant ownership and resumes idempotent cleanup before launching workers. The marker is removed only
+with the final registry deletion. Read-only plugin metadata exposes `removing: true` while recovery is
+pending.
+
+The public MCP plan tools require `plugins.install` on every call and reject caller-selected profiles,
+grants and malformed plan envelopes. Disabled staging delegates a grant within the connection's
+existing authority and revokes it if staging fails. Plan input schemas are shared by MCP and the
+manager. The developer `--plugin` path remains direct and rejects a profile with an active installed
+plan.
+
+Portable acceptance now covers four-worker presenter replacement, generation retention, failed
+presenter rollback, stale/capacity/grant rejection before side effects, cancellation with an untouched
+worker, poisoned rollback with a retained journal, pending startup recovery, strict migration, the
+safe-mode migration race, and uninstall cancellation/partial cleanup. Native fixtures have been
+updated to stage complete cohorts and switch sidebar/top presenters through the manager. Their actual
+run results, and the unresolved prior CEF shutdown behavior, must be recorded before claiming native
+completion. Default bootstrap, Settings/Plugins extraction, performance proof and full Chromium/API
+coverage remain separate unfinished work.
+
+Native switch attempt: `work/live-plan-native-switch.log` reached Chromium page creation and then
+failed while activating `default-tab-model` with `PluginHostError: Plugin host did not reply`. No
+presenter switch assertion was reached, so this run does not prove native switching. The fixture
+and owned host exited; the previous multi-minute `CefShutdown` hang was not reproduced in this run.
+Machine load was above 500 during verification, but the timeout alone does not establish its cause.
+A read-only shutdown audit found queued audio/CDP tasks worth tracing, not a confirmed shutdown fix.
+
+Recovery verification: failed crash-state persistence now poisons subsequent mutations. Pending-plan
+startup fails without changing the recorded old state if an expected worker cannot authorize or
+activate; it retains the journal and invokes recovery instead of persisting a suspension that the
+next restart could skip. The headless regression exercises both failures and a successful later
+restart. Ordinary startup without a pending transaction still records unavailable workers as suspended.
+The final `pnpm check` passed after this correction: 316 portable tests passed, 29 native-gated tests
+were skipped, and dependency validation, typecheck, lint, formatting and all builds passed.
+Evidence: `work/live-plan-check.log`. Native switch verification remains failed as recorded above.

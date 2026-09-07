@@ -272,7 +272,14 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
       }
       case "ui.publish": {
         yield* authorize("ui.compose");
-        if (options.composition) return yield* denied();
+        if (options.composition) {
+          const { surface } = yield* decode(Schema.Struct({ surface: PublicSurface }), params);
+          return {
+            revision: yield* options.composition
+              .publishLayout(surface)
+              .pipe(Effect.mapError(denied)),
+          };
+        }
         const { surface } = yield* decode(Schema.Struct({ surface: Schema.Unknown }), params);
         return { revision: yield* options.publish(surface).pipe(Effect.mapError(denied)) };
       }

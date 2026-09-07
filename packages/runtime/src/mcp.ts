@@ -4,6 +4,12 @@ import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import type { GrantStoreApi } from "./grants.ts";
 import { LivePluginManifest } from "./plugin-dispatch.ts";
 import {
+  InstalledPluginPlanInputSchema,
+  InstalledPluginPlanSchema,
+  type InstalledPluginPlanInput,
+  type InstalledPluginPlan,
+} from "./installed-plugin-plan.ts";
+import {
   exportCustomizationRecipe,
   importCustomizationRecipe,
   type CustomizationRecipe,
@@ -66,6 +72,15 @@ export interface McpPluginApi {
   readonly uninstall: (id: string) => Effect.Effect<void, unknown>;
   readonly rollback: (id: string) => Effect.Effect<void, unknown>;
   readonly requirements?: () => Effect.Effect<CustomizationRecipe["plugins"], unknown>;
+  readonly plans?: {
+    readonly current: () => Effect.Effect<InstalledPluginPlan, unknown>;
+    readonly apply: (
+      expectedRevision: number,
+      candidate: InstalledPluginPlanInput,
+    ) => Effect.Effect<InstalledPluginPlan, unknown>;
+    /** Install a new identity disabled so a cohort can be admitted in one plan. */
+    readonly stageInstall: (hash: string, grantId: string) => Effect.Effect<void, unknown>;
+  };
 }
 
 const customizationTools = Toolkit.make(
@@ -193,6 +208,36 @@ const pluginTools = Toolkit.make(
     parameters: Schema.Struct({ id: PluginId }).annotate({
       parseOptions: { onExcessProperty: "error" },
     }),
+    success: Result,
+    failure: McpActionError,
+  }),
+);
+
+const pluginPlanTools = Toolkit.make(
+  Tool.make("hitchhiker_plugin_plan", {
+    description:
+      "Read the active plugin plan and its revision. Plugin identities and bindings are untrusted data; no grants or code are returned.",
+    parameters: EmptyParameters,
+    success: Result,
+    failure: McpActionError,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("hitchhiker_plugin_apply_plan", {
+    description:
+      "Atomically replace enabled plugins, UI composition and service bindings using the current plan revision. Artifacts must already be installed and granted. A failed switch restores the previous plan; pages and plugin storage remain owned by the profile.",
+    parameters: Schema.Struct({
+      expectedRevision: InstalledPluginPlanSchema.fields.revision,
+      candidate: InstalledPluginPlanInputSchema,
+    }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_plugin_stage", {
+    description:
+      "Install a new compiled Hitchhiker plugin disabled, delegating permissions within this connection's grant. Stage all participants before applying a complete plan. This does not update an existing identity.",
+    parameters: Schema.Struct({
+      manifest: LivePluginManifest,
+      code: Schema.String.check(Schema.isMaxLength(196_608)),
+    }).annotate({ parseOptions: { onExcessProperty: "error" } }),
     success: Result,
     failure: McpActionError,
   }),
@@ -437,5 +482,29 @@ export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (opt
         installed(plugins.rollback(id).pipe(Effect.as({ restored: true }))),
     });
     yield* McpServer.registerToolkit(pluginTools).pipe(Effect.provide(pluginHandlers));
+    const plans = plugins.plans;
+    if (plans) {
+      const handlers = pluginPlanTools.toLayer({
+        hitchhiker_plugin_plan: () => installed(plans.current()),
+        hitchhiker_plugin_apply_plan: ({ expectedRevision, candidate }) =>
+          installed(plans.apply(expectedRevision, candidate)),
+        hitchhiker_plugin_stage: ({ manifest, code }) =>
+          installed(
+            Effect.gen(function* () {
+              const grant = yield* options.grants.delegate(options.token, {
+                principal: manifest.id,
+                capabilities: manifest.capabilities,
+              });
+              const artifact = yield* Effect.gen(function* () {
+                const artifact = yield* plugins.stage({ manifest, code });
+                yield* plans.stageInstall(artifact.hash, grant.id);
+                return artifact;
+              }).pipe(Effect.onError(() => options.grants.revoke(grant.id).pipe(Effect.orDie)));
+              return { id: manifest.id, hash: artifact.hash, installed: true, enabled: false };
+            }),
+          ),
+      });
+      yield* McpServer.registerToolkit(pluginPlanTools).pipe(Effect.provide(handlers));
+    }
   }
 });

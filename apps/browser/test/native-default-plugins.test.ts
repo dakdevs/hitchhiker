@@ -5,7 +5,7 @@ import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NodeServices } from "@effect/platform-node";
-import { Cause, Effect, Layer, Schedule, Schema } from "effect";
+import { Cause, Effect, Exit, Layer, Schedule, Schema } from "effect";
 import {
   EngineConnection,
   NativeSurface,
@@ -26,7 +26,7 @@ const artifactsRoot = new URL("../../default-plugins/dist/", import.meta.url);
 const Value = Schema.Struct({ result: Schema.Struct({ value: Schema.Json }) });
 for (const placement of ["sidebar", "top"] as const)
   test(
-    `four default ${placement} plugins retain Chromium documents through optional pins and worker restore`,
+    `four default ${placement} plugins switch presenters live with retained Chromium documents and rollback`,
     { skip: !binary || !pluginHost, timeout: 60_000 },
     async () => {
       const profile = await realpath(
@@ -46,15 +46,27 @@ for (const placement of ["sidebar", "top"] as const)
           await readFile(new URL(`${placement}/services.json`, artifactsRoot), "utf8"),
         );
         const presenter = `default-${placement}-tabs`;
+        const alternate = placement === "sidebar" ? "top" : "sidebar";
+        const alternatePresenter = `default-${alternate}-tabs`;
+        const alternateRecipe = Schema.decodeUnknownSync(
+          Schema.fromJsonString(PluginCompositionRecipeSchema),
+        )(await readFile(new URL(`${alternate}/composition.json`, artifactsRoot), "utf8"));
+        const alternateServices = Schema.decodeUnknownSync(
+          Schema.fromJsonString(PluginServiceRecipeSchema),
+        )(await readFile(new URL(`${alternate}/services.json`, artifactsRoot), "utf8"));
         const packages = await Promise.all(
-          ["default-tab-model", "default-tab-pins", "default-browser-layout", presenter].map(
-            async (id) => ({
-              manifest: JSON.parse(
-                await readFile(new URL(`${id}/hitchhiker.plugin.json`, artifactsRoot), "utf8"),
-              ),
-              code: await readFile(new URL(`${id}/plugin.js`, artifactsRoot), "utf8"),
-            }),
-          ),
+          [
+            "default-tab-model",
+            "default-tab-pins",
+            "default-browser-layout",
+            presenter,
+            alternatePresenter,
+          ].map(async (id) => ({
+            manifest: JSON.parse(
+              await readFile(new URL(`${id}/hitchhiker.plugin.json`, artifactsRoot), "utf8"),
+            ),
+            code: await readFile(new URL(`${id}/plugin.js`, artifactsRoot), "utf8"),
+          })),
         );
         await Effect.runPromise(
           Effect.gen(function* () {
@@ -118,7 +130,7 @@ for (const placement of ["sidebar", "top"] as const)
               fatal = true;
             });
             const composition = yield* createBrowserComposition({
-              recipe,
+              recipe: undefined,
               controller,
               onRecoveryFailure,
             });
@@ -130,11 +142,24 @@ for (const placement of ["sidebar", "top"] as const)
               onRecoveryFailure,
             });
             const artifacts = yield* createPluginArtifactStore(profile);
+            const generations = new Map<string, number>();
+            const active = new Set<string>();
+            let peak = 0;
             const options = {
               profileRoot: profile,
               grants,
               launch: (...args: Parameters<typeof launch>) =>
-                launch(...args).pipe(
+                Effect.sync(() => {
+                  generations.set(args[0].manifest.id, args[3].generation);
+                  active.add(args[0].manifest.id);
+                  peak = Math.max(peak, active.size);
+                }).pipe(
+                  Effect.andThen(launch(...args)),
+                  Effect.ensuring(
+                    Effect.sync(() => {
+                      active.delete(args[0].manifest.id);
+                    }),
+                  ),
                   Effect.tapCause((cause) =>
                     Effect.sync(() =>
                       process.stderr.write(
@@ -143,8 +168,7 @@ for (const placement of ["sidebar", "top"] as const)
                     ),
                   ),
                 ),
-              compositionOwners: composition.owners,
-              serviceBindings: services.bindings,
+              composition,
               onRecoveryFailure,
             };
             const selected = () =>
@@ -168,8 +192,33 @@ for (const placement of ["sidebar", "top"] as const)
                     capabilities: artifact.manifest.capabilities,
                     origins: [],
                   });
-                  yield* manager.install(artifact.hash, grant.grant.id);
+                  yield* manager.install(artifact.hash, grant.grant.id, { staged: true });
                 }
+                const full = {
+                  enabled: [
+                    "default-tab-model",
+                    "default-tab-pins",
+                    "default-browser-layout",
+                    presenter,
+                  ],
+                  composition: recipe,
+                  serviceBindings: services.bindings,
+                };
+                const alternatePlan = {
+                  enabled: [
+                    "default-tab-model",
+                    "default-tab-pins",
+                    "default-browser-layout",
+                    alternatePresenter,
+                  ],
+                  composition: alternateRecipe,
+                  serviceBindings: alternateServices.bindings,
+                };
+                const apply = (plan: typeof full) =>
+                  manager
+                    .plan()
+                    .pipe(Effect.flatMap((current) => manager.applyPlan(current.revision, plan)));
+                yield* apply(full);
                 yield* selected();
                 process.stdout.write(
                   `Default ${placement} four-plugin install and first viewport: ${Math.round(performance.now() - started)}ms\n`,
@@ -205,6 +254,80 @@ for (const placement of ["sidebar", "top"] as const)
                   ),
                   Effect.retry({ times: 100, schedule: Schedule.spaced(25) }),
                 );
+                const stableGenerations = new Map(generations);
+                const modelBefore = yield* modelStorage.read();
+                const pinsBefore = yield* pinsStorage.read();
+                yield* apply(alternatePlan);
+                yield* selected();
+                for (const id of [
+                  "default-tab-model",
+                  "default-tab-pins",
+                  "default-browser-layout",
+                ])
+                  assert.equal(generations.get(id), stableGenerations.get(id));
+                assert.equal(active.has(presenter), false);
+                assert.equal(active.has(alternatePresenter), true);
+                yield* apply(full);
+                yield* selected();
+                assert.notEqual(generations.get(presenter), stableGenerations.get(presenter));
+                for (const id of [
+                  "default-tab-model",
+                  "default-tab-pins",
+                  "default-browser-layout",
+                ])
+                  assert.equal(generations.get(id), stableGenerations.get(id));
+                const failedPackage = packages.find(
+                  (pkg) => pkg.manifest.id === alternatePresenter,
+                )!;
+                const failed = yield* artifacts.stage({
+                  manifest: { ...failedPackage.manifest, id: "failing-presenter" },
+                  code: `${failedPackage.code}\n{const activate=globalThis.HitchhikerPlugin.activate;globalThis.HitchhikerPlugin.activate=async()=>{await activate();throw new Error("fixture failed after publication")}}`,
+                });
+                const failedGrant = yield* grants.issue({
+                  principal: "failing-presenter",
+                  profileId: "default",
+                  capabilities: failed.manifest.capabilities,
+                  origins: [],
+                });
+                yield* manager.install(failed.hash, failedGrant.grant.id, { staged: true });
+                const beforeFailure = yield* manager.plan();
+                assert(
+                  Exit.isFailure(
+                    yield* Effect.exit(
+                      apply({
+                        ...alternatePlan,
+                        enabled: alternatePlan.enabled.map((id) =>
+                          id === alternatePresenter ? "failing-presenter" : id,
+                        ),
+                        composition: {
+                          ...alternateRecipe,
+                          slots: alternateRecipe.slots.map((slot) => ({
+                            ...slot,
+                            contributions: slot.contributions.map((entry) => ({
+                              ...entry,
+                              pluginId: "failing-presenter",
+                            })),
+                          })),
+                        },
+                        serviceBindings: alternateServices.bindings.map((binding) => ({
+                          ...binding,
+                          consumer: "failing-presenter",
+                        })),
+                      }),
+                    ),
+                  ),
+                );
+                yield* selected();
+                assert.deepEqual(yield* manager.plan(), beforeFailure);
+                for (const id of [
+                  "default-tab-model",
+                  "default-tab-pins",
+                  "default-browser-layout",
+                ])
+                  assert.equal(generations.get(id), stableGenerations.get(id));
+                assert.deepEqual(yield* modelStorage.read(), modelBefore);
+                assert.deepEqual(yield* pinsStorage.read(), pinsBefore);
+                assert.equal(peak, 4);
                 assert.equal(yield* evaluate(ids[0]!, "globalThis.marker"), "first");
                 assert.equal(yield* evaluate(ids[1]!, "globalThis.marker"), "second");
               }),

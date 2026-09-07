@@ -4,6 +4,7 @@ import type { BrowserConfiguration } from "@hitchhiker/core";
 import { Effect } from "effect";
 import { create } from "../../src/grants.ts";
 import { runMcpStdio } from "../../src/mcp-stdio.ts";
+import type { InstalledPluginPlanInput } from "../../src/installed-plugin-plan.ts";
 
 const directory = process.env.MCP_PLUGIN_GRANTS;
 const token = process.env.MCP_PLUGIN_TOKEN;
@@ -46,6 +47,27 @@ const program = Effect.gen(function* () {
           disable: (id: string) => record({ operation: "disable", id }),
           uninstall: (id: string) => record({ operation: "uninstall", id }),
           rollback: (id: string) => record({ operation: "rollback", id }),
+          plans:
+            process.env.MCP_PLUGIN_PLANS === "yes"
+              ? {
+                  current: () =>
+                    record({ operation: "plan" }).pipe(
+                      Effect.as({ revision: 7, enabled: [], serviceBindings: [] }),
+                    ),
+                  apply: (expectedRevision: number, candidate: InstalledPluginPlanInput) =>
+                    record({ operation: "applyPlan", expectedRevision, candidate }).pipe(
+                      Effect.as({ ...candidate, revision: expectedRevision + 1 }),
+                    ),
+                  stageInstall: (hash: string, grantId: string) =>
+                    record({ operation: "stageInstall", hash, grantId }).pipe(
+                      Effect.andThen(
+                        process.env.MCP_PLUGIN_INSTALL === "fail"
+                          ? Effect.fail("stage failed")
+                          : Effect.void,
+                      ),
+                    ),
+                }
+              : undefined,
         };
   yield* runMcpStdio({
     profileId: "profile",

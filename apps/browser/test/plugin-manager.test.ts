@@ -6,7 +6,8 @@ import test from "node:test";
 import type { GrantStoreApi } from "@hitchhiker/runtime";
 import { Deferred, Effect, Exit, Fiber } from "effect";
 import { createPluginArtifactStore } from "../src/plugin-artifacts.ts";
-import { createPluginManager } from "../src/plugin-manager.ts";
+import { createPluginManager, type PluginManager } from "../src/plugin-manager.ts";
+import type { InstalledPluginPlanInput } from "@hitchhiker/runtime";
 
 const baseManifest = {
   id: "manager-plugin",
@@ -45,6 +46,10 @@ const withProfile = async (run: (root: string) => Promise<void>) => {
   }
 };
 
+/** Admit a staged cohort through the durable V2 plan, never manager startup options. */
+const apply = (manager: PluginManager, candidate: InstalledPluginPlanInput) =>
+  manager.plan().pipe(Effect.flatMap(({ revision }) => manager.applyPlan(revision, candidate)));
+
 test("installs durably and disables then re-enables within the manager scope", async () => {
   await withProfile(async (root) => {
     let launched = 0;
@@ -66,7 +71,9 @@ test("installs durably and disables then re-enables within the manager scope", a
                 Effect.andThen(Effect.never),
               ),
           });
-          yield* manager.install(staged.hash, "grant-1");
+          yield* manager.install(staged.hash, "grant-1", { staged: true });
+          assert.equal((yield* manager.list())[0]?.enabled, false);
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
           assert.deepEqual(yield* manager.list(), [
             {
               id: "manager-plugin",
@@ -108,7 +115,8 @@ test("failed replacement preserves and restarts the known-good revision", async 
                 ? Effect.fail("candidate failed")
                 : ready.pipe(Effect.andThen(Effect.never)),
           });
-          yield* manager.install(one.hash, "grant-1");
+          yield* manager.install(one.hash, "grant-1", { staged: true });
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
           yield* manager.install(two.hash, "grant-1").pipe(Effect.flip);
           const [plugin] = yield* manager.list();
           assert.equal(plugin.version, "1.0.0");
@@ -121,7 +129,7 @@ test("failed replacement preserves and restarts the known-good revision", async 
   });
 });
 
-test("allows only one enabled UI owner", async () => {
+test("a UI cohort is staged and admitted only by a complete replacement plan", async () => {
   await withProfile(async (root) => {
     await Effect.runPromise(
       Effect.scoped(
@@ -142,19 +150,31 @@ test("allows only one enabled UI owner", async () => {
           });
           const manager = yield* createPluginManager({
             profileRoot: root,
-            grants,
+            grants: compositionGrants({ "grant-1": "manager-plugin", "grant-2": "other-plugin" }),
             launch: (_a, _g, ready) => ready.pipe(Effect.andThen(Effect.never)),
           });
-          yield* manager.install(first.hash, "grant-1");
-          yield* manager.install(second.hash, "grant-1").pipe(Effect.flip);
-          assert.equal((yield* manager.list()).length, 1);
+          yield* manager.install(first.hash, "grant-1", { staged: true });
+          yield* manager.install(second.hash, "grant-2", { staged: true });
+          assert.deepEqual(
+            (yield* manager.list()).map((plugin) => plugin.enabled),
+            [false, false],
+          );
+          yield* apply(manager, {
+            enabled: ["manager-plugin", "other-plugin"],
+            composition: {
+              layout: "manager-plugin",
+              slots: [{ key: "main", contributions: [{ pluginId: "other-plugin", id: "panel" }] }],
+            },
+            serviceBindings: [],
+          });
+          assert((yield* manager.list()).every((plugin) => plugin.running));
         }),
       ),
     );
   });
 });
 
-test("composition owners allow configured UI plugins while disabling removed or unconfigured owners", async () => {
+test("restore honors the persisted V2 UI plan instead of startup composition owners", async () => {
   await withProfile(async (root) => {
     const grants = compositionGrants({
       "left-grant": "split-left",
@@ -180,30 +200,26 @@ test("composition owners allow configured UI plugins while disabling removed or 
           const manager = yield* createPluginManager({
             profileRoot: root,
             grants,
-            compositionOwners: new Set(["split-left", "split-right", "split-removed"]),
             launch: (artifact, _grant, ready) =>
               ready.pipe(
                 Effect.andThen(Effect.sync(() => launched.push(artifact.manifest.id))),
                 Effect.andThen(Effect.never),
               ),
           });
-          yield* manager.install(artifacts.left.hash, "left-grant");
-          yield* manager.install(artifacts.right.hash, "right-grant");
+          yield* manager.install(artifacts.left.hash, "left-grant", { staged: true });
+          yield* manager.install(artifacts.right.hash, "right-grant", { staged: true });
+          yield* manager.install(artifacts.removed.hash, "removed-grant", { staged: true });
+          yield* manager.install(artifacts.outside.hash, "outside-grant", { staged: true });
+          yield* apply(manager, {
+            enabled: ["split-left", "split-right"],
+            composition: {
+              layout: "split-left",
+              slots: [{ key: "right", contributions: [{ pluginId: "split-right", id: "panel" }] }],
+            },
+            serviceBindings: [],
+          });
           assert.deepEqual(launched, ["split-left", "split-right"]);
-          assert.equal((yield* manager.list()).filter((plugin) => plugin.running).length, 2);
-
-          assert(
-            Exit.isFailure(
-              yield* Effect.exit(manager.install(artifacts.outside.hash, "outside-grant")),
-            ),
-          );
-          assert.equal(
-            (yield* manager.list()).find((plugin) => plugin.id === "outside-plugin")?.enabled,
-            false,
-          );
-          assert(Exit.isFailure(yield* Effect.exit(manager.enable("outside-plugin"))));
-
-          yield* manager.install(artifacts.removed.hash, "removed-grant");
+          assert(Exit.isFailure(yield* Effect.exit(manager.disable("split-left"))));
         }),
       ),
     );
@@ -214,7 +230,6 @@ test("composition owners allow configured UI plugins while disabling removed or 
           const manager = yield* createPluginManager({
             profileRoot: root,
             grants,
-            compositionOwners: new Set(["split-left", "split-right"]),
             launch: (artifact, _grant, ready) =>
               ready.pipe(
                 Effect.andThen(Effect.sync(() => launched.push(artifact.manifest.id))),
@@ -227,7 +242,7 @@ test("composition owners allow configured UI plugins while disabling removed or 
           assert.equal(plugins.find((plugin) => plugin.id === "split-left")?.running, true);
           assert.equal(plugins.find((plugin) => plugin.id === "split-right")?.running, true);
           assert.equal(plugins.find((plugin) => plugin.id === "split-removed")?.enabled, false);
-          assert.equal(plugins.find((plugin) => plugin.id === "split-removed")?.running, false);
+          assert.equal(plugins.find((plugin) => plugin.id === "outside-plugin")?.running, false);
         }),
       ),
     );
@@ -260,7 +275,8 @@ test("restore starts durable enabled preferences in a fresh manager scope", asyn
             grants,
             launch: launcher,
           });
-          yield* manager.install(stage.hash, "grant-1");
+          yield* manager.install(stage.hash, "grant-1", { staged: true });
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
         }),
       ),
     );
@@ -308,7 +324,8 @@ test("manager shutdown preserves enabled plugins for the next manager restore", 
             grants,
             launch: launcher,
           });
-          yield* manager.install(staged.hash, "grant-1");
+          yield* manager.install(staged.hash, "grant-1", { staged: true });
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
           const [plugin] = yield* manager.list();
           assert.equal(plugin.enabled, true);
           assert.equal(plugin.lastFailure, undefined);
@@ -337,7 +354,7 @@ test("manager shutdown preserves enabled plugins for the next manager restore", 
   });
 });
 
-test("configured layout owners without UI authority fail install and restore", async () => {
+test("a failed new staged install leaves no disabled registry entry", async () => {
   await withProfile(async (root) => {
     const layout = { ...baseManifest, id: "split-layout", name: "Split layout" };
     const layoutGrants = compositionGrants({ "layout-grant": "split-layout" });
@@ -356,45 +373,14 @@ test("configured layout owners without UI authority fail install and restore", a
           const manager = yield* createPluginManager({
             profileRoot: root,
             grants: layoutGrants,
-            compositionOwners: new Set(["split-layout"]),
             launch: launcher,
           });
-          assert(Exit.isFailure(yield* Effect.exit(manager.install(staged.hash, "layout-grant"))));
-          const [plugin] = yield* manager.list();
-          assert.equal(plugin.enabled, false);
-          assert.equal(plugin.running, false);
-          assert.equal(plugin.lastFailure, "Activation failed");
-        }),
-      ),
-    );
-
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const manager = yield* createPluginManager({
-            profileRoot: root,
-            grants: layoutGrants,
-            launch: launcher,
-          });
-          yield* manager.enable("split-layout");
-          assert.equal((yield* manager.list())[0].enabled, true);
-        }),
-      ),
-    );
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const manager = yield* createPluginManager({
-            profileRoot: root,
-            grants: layoutGrants,
-            compositionOwners: new Set(["split-layout"]),
-            launch: launcher,
-          });
-          yield* manager.restore();
-          const [plugin] = yield* manager.list();
-          assert.equal(plugin.enabled, false);
-          assert.equal(plugin.running, false);
-          assert.match(plugin.lastFailure ?? "", /must declare ui\.compose/);
+          assert(
+            Exit.isFailure(
+              yield* Effect.exit(manager.install(staged.hash, "missing-grant", { staged: true })),
+            ),
+          );
+          assert.deepEqual(yield* manager.list(), []);
         }),
       ),
     );
@@ -423,7 +409,8 @@ test("a post-promotion host crash rolls back only once", async () => {
                   )
                 : ready.pipe(Effect.andThen(Effect.never)),
           });
-          yield* manager.install(stable.hash, "grant-1");
+          yield* manager.install(stable.hash, "grant-1", { staged: true });
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
           yield* manager.install(candidate.hash, "grant-1");
           yield* Effect.sleep(700);
           const [plugin] = yield* manager.list();
@@ -458,7 +445,8 @@ test("cancelling an update stops its candidate and restores the known-good proce
                     stableStarts++;
                   }).pipe(Effect.andThen(ready), Effect.andThen(Effect.never)),
           });
-          yield* manager.install(stable.hash, "grant-1");
+          yield* manager.install(stable.hash, "grant-1", { staged: true });
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
           const update = yield* manager.install(candidate.hash, "grant-1").pipe(Effect.forkScoped);
           yield* Deferred.await(candidateStarted);
           yield* Fiber.interrupt(update);
@@ -511,7 +499,8 @@ test(
                       );
                     }),
             });
-            yield* manager.install(stable.hash, "grant-1");
+            yield* manager.install(stable.hash, "grant-1", { staged: true });
+            yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
             try {
               const update = yield* manager
                 .install(candidate.hash, "grant-1")
@@ -558,7 +547,8 @@ test("a health-window crash is rejected before promotion", async () => {
                   )
                 : ready.pipe(Effect.andThen(Effect.never)),
           });
-          yield* manager.install(stable.hash, "grant-1");
+          yield* manager.install(stable.hash, "grant-1", { staged: true });
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
           yield* manager.install(candidate.hash, "grant-1").pipe(Effect.flip);
           const [plugin] = yield* manager.list();
           assert.equal(plugin.hash, stable.hash);
@@ -569,7 +559,7 @@ test("a health-window crash is rejected before promotion", async () => {
   });
 });
 
-test("a crash after rollback disables instead of oscillating and does not escalate the app", async () => {
+test("a crash after fallback suspends the enabled preference without oscillating", async () => {
   await withProfile(async (root) => {
     let escalations = 0;
     let stableLaunches = 0;
@@ -596,7 +586,9 @@ test("a crash after rollback disables instead of oscillating and does not escala
                         stableLaunches++;
                       }),
                     ),
-                    Effect.andThen(() => (stableLaunches === 1 ? Effect.never : Effect.sleep(350))),
+                    Effect.andThen(() =>
+                      stableLaunches === 1 || stableLaunches > 2 ? Effect.never : Effect.sleep(350),
+                    ),
                     Effect.andThen(Effect.fail("crash")),
                   )
                 : ready.pipe(
@@ -604,13 +596,16 @@ test("a crash after rollback disables instead of oscillating and does not escala
                     Effect.andThen(Effect.fail("crash")),
                   ),
           });
-          yield* manager.install(stable.hash, "grant-1");
+          yield* manager.install(stable.hash, "grant-1", { staged: true });
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
           yield* manager.install(candidate.hash, "grant-1");
           yield* Effect.sleep(1_150);
           const [plugin] = yield* manager.list();
           assert.equal(plugin.hash, stable.hash);
-          assert.equal(plugin.enabled, false);
+          assert.equal(plugin.enabled, true);
           assert.equal(plugin.running, false);
+          yield* manager.enable("manager-plugin");
+          assert.equal((yield* manager.list())[0]?.running, true);
         }),
       ),
     );
@@ -629,22 +624,19 @@ test("manual rollback restores the current revision when its replacement cannot 
             manifest: { ...baseManifest, name: "Manager two", version: "2.0.0" },
             code: "two",
           });
+          let oldFails = false;
           const manager = yield* createPluginManager({
             profileRoot: root,
             grants,
             launch: (artifact, _grant, ready) =>
-              artifact.manifest.version === "1.0.0"
+              artifact.manifest.version === "1.0.0" && oldFails
                 ? Effect.fail("old revision cannot start")
                 : ready.pipe(Effect.andThen(Effect.never)),
           });
-          yield* manager.install(one.hash, "grant-1").pipe(Effect.flip);
-          const initial = yield* createPluginManager({
-            profileRoot: root,
-            grants,
-            launch: (_artifact, _grant, ready) => ready.pipe(Effect.andThen(Effect.never)),
-          });
-          yield* initial.enable("manager-plugin");
+          yield* manager.install(one.hash, "grant-1", { staged: true });
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
           yield* manager.install(two.hash, "grant-1");
+          oldFails = true;
           yield* manager.rollback("manager-plugin").pipe(Effect.flip);
           const [plugin] = yield* manager.list();
           assert.equal(plugin.hash, two.hash);
@@ -755,7 +747,7 @@ test("cross-manager writers preserve both durable registry entries and reject sy
   });
 });
 
-test("failed update disables the previous revision when its grant was revoked during activation", async () => {
+test("failed update with a revoked rollback grant preserves the old enabled preference and poisons recovery", async () => {
   await withProfile(async (root) => {
     let oldRevoked = false;
     const boundGrants = {
@@ -784,12 +776,14 @@ test("failed update disables the previous revision when its grant was revoked du
                   }).pipe(Effect.andThen(Effect.fail("bad activation")))
                 : ready.pipe(Effect.andThen(Effect.never)),
           });
-          yield* manager.install(stable.hash, "old");
+          yield* manager.install(stable.hash, "old", { staged: true });
+          yield* apply(manager, { enabled: ["manager-plugin"], serviceBindings: [] });
           yield* manager.install(candidate.hash, "new").pipe(Effect.flip);
           const [plugin] = yield* manager.list();
           assert.equal(plugin.hash, stable.hash);
-          assert.equal(plugin.enabled, false);
+          assert.equal(plugin.enabled, true);
           assert.equal(plugin.running, false);
+          assert(Exit.isFailure(yield* Effect.exit(manager.disable("manager-plugin"))));
         }),
       ),
     );
@@ -810,7 +804,7 @@ test("safe-mode recovery bypasses malformed, excess-field and oversized registry
           for (const data of [
             "broken-json",
             JSON.stringify({ version: 1, plugins: [], token: "must-not-survive" }),
-            " ".repeat(32769),
+            " ".repeat(256 * 1024 + 1),
           ]) {
             yield* Effect.promise(() =>
               writeFile(join(root, "hitchhiker-plugins", "plugins.json"), data),

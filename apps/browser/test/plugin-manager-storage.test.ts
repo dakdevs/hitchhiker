@@ -119,7 +119,7 @@ test("storage survives update, disable, and restart, then uninstall clears it", 
   });
 });
 
-test("storage cleanup failure leaves a disabled installation that can be removed after restart", async () => {
+test("storage cleanup failure leaves pending removal that startup finishes after repair", async () => {
   await withProfile(async (profileRoot) => {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -174,7 +174,7 @@ test("storage cleanup failure leaves a disabled installation that can be removed
         yield* Effect.scoped(
           Effect.gen(function* () {
             const manager = yield* createPluginManager({ profileRoot, grants, launch });
-            yield* manager.uninstall(manifest.id);
+            yield* manager.restore();
             assert.deepEqual(yield* manager.list(), []);
           }),
         );

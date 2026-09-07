@@ -15,7 +15,7 @@ export const pluginGuide: readonly GuideSection[] = [
     title: "A browser assembled from plugins",
     paragraphs: [
       "Hitchhiker is being built as a Chromium host with a shared Native design framework. The target default browser is a composition of plugins: a tab model, vertical or horizontal presentation, optional pinning, navigation, and developer tools. Those pieces must use the same public APIs as third-party plugins.",
-      "This migration is not complete. Installed plugins can now exchange declared services with dependency-aware activation, while the built-in controller still owns default tab behavior. Default browser migration and live service-recipe editing remain pending. Do not assume that every default-browser feature is a plugin yet.",
+      "This migration is not complete. Installed plugins can now exchange declared services with dependency-aware activation, while the built-in controller still owns default tab behavior. The manager supports live composition and service plans through MCP; native switching verification and the default-browser migration remain unfinished. Do not assume that every default-browser feature is a plugin yet.",
     ],
   },
   {
@@ -109,7 +109,7 @@ export const pluginGuide: readonly GuideSection[] = [
     id: "page-surface",
     title: "Put a Chromium page in a legacy interface",
     paragraphs: [
-      "Save this entry point as src/index.ts. Native measures the content viewport; the binding associates it with the stable ID returned by the page API. Reorganizing that viewport later does not reload the page. An interface can use several viewports without adopting the default tab model. ui.publish is a legacy whole-window operation and is denied in profiles that enable composition.",
+      "Save this entry point as src/index.ts. Native measures the content viewport; the binding associates it with the stable ID returned by the page API. Reorganizing that viewport later does not reload the page. An interface can use several viewports without adopting the default tab model. ui.publish is a legacy whole-window operation. In a composed profile it aliases ui.publishLayout and is accepted only for the configured layout owner. New layout plugins should use ui.publishLayout.",
     ],
     code: `import { definePlugin } from "@hitchhiker/plugin-sdk";
 import { column, text, viewport } from "@hitchhiker/ui";
@@ -131,8 +131,8 @@ definePlugin({
     id: "composition",
     title: "Compose independently installed UI plugins",
     paragraphs: [
-      "At startup, Hitchhiker reads the fixed profile-local path hitchhiker-plugins/composition.json. Its recipe selects one layout plugin and ordered, declared contributions for each slot. The checked-in composition example maps split-layout to the content slot, then split-left/page and split-right/page.",
-      "The recipe arranges artifacts only. Install each plugin and grant its declared capabilities independently through hitchhiker_plugin_install; copying a recipe neither installs code nor grants access. Composition retains the existing maximum of four workers. --safe-mode ignores the recipe, and missing layouts keep legacy plugin management visible during the migration. Native emergency recovery can also restore it. Each activation has a bounded input inbox, so early actions are retained and an overflowing owner cannot stall another plugin.",
+      "The active plugin plan selects one layout plugin and ordered, declared contributions for each slot. Version 2 persists this plan in hitchhiker-plugins/plugins.json; composition.json is only a Version 1 migration input. The checked-in composition example maps split-layout to the content slot, then split-left/page and split-right/page.",
+      "The recipe arranges artifacts only. Stage each new plugin disabled with hitchhiker_plugin_stage, read hitchhiker_plugin_plan, then submit the returned revision and complete candidate to hitchhiker_plugin_apply_plan. Staging delegates only permissions allowed by your MCP grant; the plan itself grants no access. Composition retains the existing maximum of four workers. --safe-mode ignores the recipe, and missing layouts keep legacy plugin management visible during the migration. Native emergency recovery can also restore it. Each activation has a bounded input inbox, so early actions are retained and an overflowing owner cannot stall another plugin.",
       "A layout calls ui.publishLayout. A contributor calls ui.publishContribution with its configured ID and can call ui.withdrawContribution to remove that fragment. The public surface has no identity, slot, or provider field because the host owns those decisions. ui.release is reusable: in a composed profile it releases the caller's UI contributions, and in legacy mode it returns to the trusted default UI.",
     ],
     code: `import { definePlugin } from "@hitchhiker/plugin-sdk";
@@ -148,10 +148,41 @@ definePlugin({
 });`,
   },
   {
+    id: "plugin-plans",
+    title: "Apply a complete plugin plan",
+    paragraphs: [
+      "All three plan tools require plugins.install. Stage the artifacts first, then read hitchhiker_plugin_plan. Pass its revision as expectedRevision when calling hitchhiker_plugin_apply_plan; the example below uses 7 only as an illustration. A stale revision is rejected before workers stop. Plugin IDs must refer to installed artifacts with valid grants.",
+      "A successful switch retains compatible workers, Chromium pages and plugin storage. A failed switch restores the prior plan; if restoration fails, a durable recovery marker blocks further mutations until restart. Uninstall records pending cleanup after plan promotion so startup can finish grant revocation and storage removal after a crash. The older hitchhiker_plugin_install tool still auto-admits individual plugins during migration; use staged admission for composed cohorts.",
+    ],
+    code: JSON.stringify(
+      {
+        expectedRevision: 7,
+        candidate: {
+          enabled: ["split-layout", "split-left", "split-right"],
+          composition: {
+            layout: "split-layout",
+            slots: [
+              {
+                key: "content",
+                contributions: [
+                  { pluginId: "split-left", id: "page" },
+                  { pluginId: "split-right", id: "page" },
+                ],
+              },
+            ],
+          },
+          serviceBindings: [],
+        },
+      },
+      null,
+      2,
+    ),
+  },
+  {
     id: "plugin-services",
     title: "Connect installed plugins with services",
     paragraphs: [
-      "Services work for installed plugins without a UI layout. Declare each provided service and dependency in hitchhiker.plugin.json with the same exact contract { name, version, digest }. A contract digest records the agreement between plugins; each plugin still validates its own state and command data. Copy the profile binding file to hitchhiker-plugins/services.json before startup. It selects a provider service for each consumer dependency alias and never installs code or grants permissions.",
+      "Services work for installed plugins without a UI layout. Declare each provided service and dependency in hitchhiker.plugin.json with the same exact contract { name, version, digest }. A contract digest records the agreement between plugins; each plugin still validates its own state and command data. Set serviceBindings in the complete plugin plan to select a provider service for each consumer dependency alias. This never installs code or grants permissions. The old services.json file is only read during Version 1 migration.",
       "The manager starts providers before required consumers. Disabling, uninstalling, or replacing a required provider stops dependent workers but retains their enabled preference, so they resume when the provider is usable again. Optional consumers stay running and see unavailable state. A consumer's effective grant must contain the provider's authority, including origins; cdp.connect must be granted explicitly even when browser.full-control is present.",
       "Use services.publish(service, value), get(dependency), subscribe(dependency), and call(dependency, method, params). subscribe returns the current snapshot, then service.state announces revisions; use get for the current value. Providers register handlers under definePlugin({ services }). Calls time out after three seconds and the SDK never retries them automatically, because a timed-out provider may still complete a side effect.",
       "Each JSON state, input, and result is limited to 128 KiB, depth 32, 4,096 nodes, and 64 KiB of combined string and key bytes. Published state shares a 1 MiB broker budget. The broker permits 16 pending calls per consumer, 32 per provider, and 128 total; subscriptions retain only the latest revision for each dependency.",
@@ -172,9 +203,9 @@ definePlugin({
   }]
 }
 
-// hitchhiker-plugins/services.json
+// candidate.serviceBindings in hitchhiker_plugin_apply_plan
 {
-  "bindings": [{
+  "serviceBindings": [{
     "consumer": "service-consumer",
     "dependency": "counter",
     "provider": "service-provider",
@@ -213,7 +244,7 @@ definePlugin({
     id: "service-consumer",
     title: "Read a dependency during activation",
     paragraphs: [
-      "This is a complete consumer entry point. Its manifest declares counter in requires with the exact contract shown for the provider, and services.json binds that dependency before startup.",
+      "This is a complete consumer entry point. Its manifest declares counter in requires with the exact contract shown for the provider, and the applied plugin plan binds that dependency before the consumer activates.",
     ],
     code: `import { definePlugin } from "@hitchhiker/plugin-sdk";
 
@@ -300,7 +331,7 @@ definePlugin({
         [
           "ui.publish(surface)",
           "ui.compose",
-          "{ revision }; legacy whole-window interface, denied in composed profiles",
+          "{ revision }; legacy whole-window API, or layout-owner alias in composition",
         ],
         ["ui.publishLayout(surface)", "ui.compose", "{ revision }; configured layout only"],
         [

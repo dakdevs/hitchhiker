@@ -84,7 +84,7 @@ test(
             fatal = true;
           });
           const composition = yield* createBrowserComposition({
-            recipe,
+            recipe: undefined,
             controller,
             onRecoveryFailure,
           });
@@ -121,7 +121,7 @@ test(
                 profileRoot: profile,
                 grants,
                 launch,
-                compositionOwners: composition.owners,
+                composition,
                 onRecoveryFailure,
               });
               for (const pkg of packages) {
@@ -132,18 +132,33 @@ test(
                   capabilities: artifact.manifest.capabilities,
                   origins: [],
                 });
-                yield* manager.install(artifact.hash, grant.grant.id);
+                yield* manager.install(artifact.hash, grant.grant.id, { staged: true });
               }
+              const full = {
+                enabled: ["split-layout", "split-left", "split-right"],
+                composition: recipe,
+                serviceBindings: [],
+              };
+              const apply = (candidate: typeof full) =>
+                manager
+                  .plan()
+                  .pipe(
+                    Effect.flatMap((current) => manager.applyPlan(current.revision, candidate)),
+                  );
+              yield* apply(full);
               yield* waitForPages(ids);
               assert.equal((yield* manager.list()).filter((plugin) => plugin.running).length, 3);
               assert.equal(yield* composition.complete, true);
               const initialLaunches = launches;
-              yield* composition.reconfigure({
-                ...recipe,
-                slots: recipe.slots.map((slot) => ({
-                  ...slot,
-                  contributions: [...slot.contributions].reverse(),
-                })),
+              yield* apply({
+                ...full,
+                composition: {
+                  ...recipe,
+                  slots: recipe.slots.map((slot) => ({
+                    ...slot,
+                    contributions: [...slot.contributions].reverse(),
+                  })),
+                },
               });
               const reordered = yield* waitForPages(ids);
               assert.deepEqual(
@@ -158,21 +173,36 @@ test(
               );
               assert.equal(yield* evaluate(ids[0]!, "globalThis.marker"), "first");
               assert.equal(yield* evaluate(ids[1]!, "globalThis.marker"), "second");
-              yield* composition.reconfigure(recipe);
+              yield* apply(full);
               assert.deepEqual(
                 (yield* waitForPages(ids)).viewports.map((view) => view.pageId),
                 ids,
               );
               assert.equal(launches, initialLaunches);
-              yield* manager.disable("split-left");
+              yield* apply({
+                ...full,
+                enabled: full.enabled.filter((id) => id !== "split-left"),
+                composition: {
+                  ...recipe,
+                  slots: recipe.slots.map((slot) => ({
+                    ...slot,
+                    contributions: slot.contributions.filter(
+                      (entry) => entry.pluginId !== "split-left",
+                    ),
+                  })),
+                },
+              });
               yield* waitForPages([ids[1]!]);
               assert.equal(yield* evaluate(ids[0]!, "globalThis.marker"), "first");
               assert.equal(yield* evaluate(ids[1]!, "globalThis.marker"), "second");
-              yield* manager.enable("split-left");
+              yield* apply(full);
               yield* waitForPages(ids);
-              yield* manager.disable("split-layout");
+              yield* manager.applyPlan((yield* manager.plan()).revision, {
+                enabled: [],
+                serviceBindings: [],
+              });
               yield* waitForPages([]);
-              yield* manager.enable("split-layout");
+              yield* apply(full);
               yield* waitForPages(ids);
             }),
           );
@@ -182,7 +212,7 @@ test(
                 profileRoot: profile,
                 grants,
                 launch,
-                compositionOwners: composition.owners,
+                composition,
                 onRecoveryFailure,
               });
               yield* manager.restore();

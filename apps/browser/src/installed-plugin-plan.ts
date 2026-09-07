@@ -1,8 +1,8 @@
 import { Effect, Schema } from "effect";
 import {
   LivePluginManifest,
-  PluginCompositionRecipeSchema,
-  ServiceBindingSchema,
+  InstalledPluginPlanInputSchema,
+  type InstalledPluginPlanInput,
   makePluginComposition,
   type LivePluginManifest as PluginManifest,
   type PluginCompositionRecipe,
@@ -11,29 +11,12 @@ import {
 import { text } from "@hitchhiker/ui";
 import { planInstalledServices, requiredDependentClosure } from "./installed-service-plan.ts";
 
-const Id = LivePluginManifest.fields.id;
+export { InstalledPluginPlanInputSchema, InstalledPluginPlanSchema } from "@hitchhiker/runtime";
+export type { InstalledPluginPlanInput, InstalledPluginPlan } from "@hitchhiker/runtime";
+
 const Hash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
-const GrantId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128));
-const Revision = Schema.Int.check(
-  Schema.isGreaterThanOrEqualTo(0),
-  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
-);
-
-export const InstalledPluginPlanInputSchema = Schema.Struct({
-  enabled: Schema.Array(Id).check(Schema.isMaxLength(16)),
-  composition: Schema.optional(PluginCompositionRecipeSchema),
-  serviceBindings: Schema.Array(ServiceBindingSchema).check(Schema.isMaxLength(128)),
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
-export type InstalledPluginPlanInput = typeof InstalledPluginPlanInputSchema.Type;
-
-export const InstalledPluginPlanSchema = Schema.Struct({
-  enabled: Schema.Array(Id).check(Schema.isMaxLength(16)),
-  composition: Schema.optional(PluginCompositionRecipeSchema),
-  serviceBindings: Schema.Array(ServiceBindingSchema).check(Schema.isMaxLength(128)),
-  revision: Revision,
-}).annotate({ parseOptions: { onExcessProperty: "error" } });
-export type InstalledPluginPlan = typeof InstalledPluginPlanSchema.Type;
-
+// Keep plan admission compatible with durable manager revision metadata.
+const GrantId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
 export const InstalledPluginPlanArtifactSchema = Schema.Struct({
   manifest: LivePluginManifest,
   hash: Hash,
