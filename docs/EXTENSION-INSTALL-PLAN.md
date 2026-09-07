@@ -265,3 +265,8 @@ Full dependency, type, lint, formatting, test and build checks pass: 462 portabl
 Native-gated skips (`work/extension-install-events-full-check.log`). The two interactive Native
 cases above ran separately without skips. The owner queue coalesces pending notifications, excludes
 other ports and closes with its owner; runtime tests reject undeclared and revoked delivery.
+
+The [generic route prerequisite](PLUGIN-ROUTING-PLAN.md) now has public SDK calls and real Chromium
+verification, including removal of optional screens without losing browser pages. The independent
+extension-management plugin can now be built on that framework. Its V3 default cohort, six-worker
+resource evidence and complete installation UI remain outstanding.

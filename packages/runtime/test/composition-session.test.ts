@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Deferred, Effect, Exit, Fiber } from "effect";
-import { button, column, text, type Surface } from "@hitchhiker/ui";
-import { makePluginComposition } from "../src/composition-session.ts";
+import { Deferred, Effect, Exit, Fiber, Schema } from "effect";
+import { button, column, text, viewport, type Surface } from "@hitchhiker/ui";
+import {
+  makePluginComposition,
+  PluginCompositionRecipeSchema,
+} from "../src/composition-session.ts";
 import { EngineError } from "../src/engine.ts";
 
 const owner = (id: string, generation = 1) => ({ id, generation });
@@ -18,6 +21,10 @@ const fragment = (label = "Fragment"): Surface => ({
   root: button("control", label, "open"),
   bindings: [],
 });
+const fallback = (pageId: string): Surface => ({
+  root: viewport("page", "view"),
+  bindings: [{ viewportId: "view", pageId }],
+});
 const recipe = {
   layout: "layout-plugin",
   slots: [
@@ -26,6 +33,19 @@ const recipe = {
       contributions: [
         { pluginId: "fragment-plugin", id: "main" },
         { pluginId: "pinned-plugin", id: "pin" },
+      ],
+    },
+  ],
+};
+const routeRecipe = {
+  layout: "layout-plugin",
+  slots: [
+    {
+      key: "slot",
+      route: { fallback: { pluginId: "fragment-plugin", id: "main" } },
+      contributions: [
+        { pluginId: "fragment-plugin", id: "main" },
+        { pluginId: "pinned-plugin", id: "pin", optional: true as const },
       ],
     },
   ],
@@ -354,4 +374,312 @@ test("composition retains bounded generation tombstones across live plans", asyn
   );
   await Effect.runPromise(session.reconfigure({ layout: "owner-0", slots: [] }));
   await Effect.runPromise(session.activate(owner("owner-0", 2)));
+});
+
+test("selectable routes commit one published owner, fall back atomically, and tolerate stale hides", async () => {
+  const surfaces: Surface[] = [];
+  let reject = false;
+  const session = await Effect.runPromise(
+    makePluginComposition({
+      recipe: routeRecipe,
+      recovery,
+      commit: (surface) =>
+        reject
+          ? Effect.fail(new EngineError({ code: "native", message: "rejected" }))
+          : Effect.sync(() => {
+              surfaces.push(surface);
+              return surfaces.length;
+            }),
+    }),
+  );
+  for (const publisher of [layoutOwner, fragmentOwner, pinnedOwner])
+    await Effect.runPromise(session.activate(publisher));
+  await Effect.runPromise(session.publishLayout(layoutOwner, layout));
+  await Effect.runPromise(
+    session.publishContribution(fragmentOwner, "main", fallback("first-page")),
+  );
+  assert.equal(await Effect.runPromise(session.complete), true);
+  await assert.rejects(Effect.runPromise(session.showRoute(pinnedOwner, "pin")));
+  await Effect.runPromise(session.publishContribution(pinnedOwner, "pin", fragment("Route")));
+  assert.doesNotMatch(JSON.stringify(surfaces.at(-1)), /Route/);
+  await Effect.runPromise(session.showRoute(pinnedOwner, "pin"));
+  assert.match(JSON.stringify(surfaces.at(-1)), /Route/);
+  assert.equal(surfaces.at(-1)!.bindings.length, 0);
+  await Effect.runPromise(
+    session.publishContribution(fragmentOwner, "main", fallback("updated-page")),
+  );
+  assert.equal(surfaces.at(-1)!.bindings.length, 0);
+  const routeRoot = surfaces.at(-1)!.root;
+  assert("children" in routeRoot);
+  const routeSlot = routeRoot.children[0]!;
+  assert("children" in routeSlot);
+  const selected = routeSlot.children[0]!;
+  assert(selected.kind === "button");
+  const selectedEvent = {
+    surfaceId: "main" as const,
+    revision: 1,
+    nodeId: selected.key,
+    event: "press" as const,
+    payload: { action: selected.action },
+  };
+  assert.deepEqual(session.route(selectedEvent)?.owner, pinnedOwner);
+
+  reject = true;
+  await assert.rejects(Effect.runPromise(session.hideRoute(pinnedOwner, "pin")));
+  assert.match(JSON.stringify(surfaces.at(-1)), /Route/);
+  assert.deepEqual(session.route(selectedEvent)?.owner, pinnedOwner);
+  reject = false;
+  await Effect.runPromise(session.hideRoute(pinnedOwner, "pin"));
+  assert.equal(surfaces.at(-1)!.bindings[0]?.pageId, "updated-page");
+
+  await assert.rejects(Effect.runPromise(session.showRoute(fragmentOwner, "unknown")));
+  await assert.rejects(Effect.runPromise(session.showRoute(owner("fragment-plugin", 2), "main")));
+
+  await Effect.runPromise(session.showRoute(pinnedOwner, "pin"));
+  const current = owner("pinned-plugin", 2);
+  await Effect.runPromise(session.activate(current));
+  await Effect.runPromise(session.publishContribution(current, "pin", fragment("Route 2")));
+  await Effect.runPromise(session.showRoute(current, "pin"));
+  const revision = await Effect.runPromise(session.hideRoute(pinnedOwner, "pin"));
+  assert.equal(revision, surfaces.length);
+  assert.match(JSON.stringify(surfaces.at(-1)), /Route 2/);
+
+  await Effect.runPromise(
+    session.reconfigure({
+      layout: "layout-plugin",
+      slots: [
+        {
+          key: "slot",
+          route: { fallback: { pluginId: "fragment-plugin", id: "main" } },
+          contributions: [
+            { pluginId: "fragment-plugin", id: "main" },
+            { pluginId: "pinned-plugin", id: "pin-2", optional: true as const },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.equal(surfaces.at(-1)!.bindings[0]?.pageId, "updated-page");
+  await Effect.runPromise(session.publishContribution(current, "pin-2", fragment("Route 3")));
+  await Effect.runPromise(session.showRoute(current, "pin-2"));
+  await Effect.runPromise(session.remove(current));
+  assert.equal(surfaces.at(-1)!.bindings[0]?.pageId, "updated-page");
+});
+
+test("route selection requires a live fallback and fallback loss clears selection atomically", async () => {
+  const surfaces: Surface[] = [];
+  let reject = false;
+  const session = await Effect.runPromise(
+    makePluginComposition({
+      recipe: routeRecipe,
+      recovery,
+      commit: (surface) =>
+        reject
+          ? Effect.fail(new EngineError({ code: "native", message: "rejected" }))
+          : Effect.sync(() => {
+              surfaces.push(surface);
+              return surfaces.length;
+            }),
+    }),
+  );
+  for (const publisher of [layoutOwner, fragmentOwner, pinnedOwner])
+    await Effect.runPromise(session.activate(publisher));
+  await Effect.runPromise(session.publishLayout(layoutOwner, layout));
+  await Effect.runPromise(session.publishContribution(pinnedOwner, "pin", fragment("Route")));
+  assert.match(JSON.stringify(surfaces.at(-1)), /Recovery/);
+  await assert.rejects(
+    Effect.runPromise(session.showRoute(pinnedOwner, "pin")),
+    /fallback is not published/,
+  );
+
+  const publishFallback = (current: typeof fragmentOwner, pageId: string) =>
+    Effect.runPromise(session.publishContribution(current, "main", fallback(pageId)));
+  const show = async () => {
+    await Effect.runPromise(session.showRoute(pinnedOwner, "pin"));
+    assert.match(JSON.stringify(surfaces.at(-1)), /Route/);
+    assert.equal(surfaces.at(-1)!.bindings.length, 0);
+  };
+  const assertRestoredFallback = (pageId: string) => {
+    assert.equal(surfaces.at(-1)!.bindings[0]?.pageId, pageId);
+    assert.doesNotMatch(JSON.stringify(surfaces.at(-1)), /Route/);
+  };
+
+  await publishFallback(fragmentOwner, "withdraw-page");
+  await show();
+  const selected = surfaces.at(-1);
+  reject = true;
+  await assert.rejects(Effect.runPromise(session.withdrawContribution(fragmentOwner, "main")));
+  assert.strictEqual(surfaces.at(-1), selected);
+  reject = false;
+  await Effect.runPromise(session.withdrawContribution(fragmentOwner, "main"));
+  assert.match(JSON.stringify(surfaces.at(-1)), /Recovery/);
+  await publishFallback(fragmentOwner, "after-withdraw");
+  assertRestoredFallback("after-withdraw");
+
+  await show();
+  await Effect.runPromise(session.release(fragmentOwner));
+  assert.match(JSON.stringify(surfaces.at(-1)), /Recovery/);
+  await publishFallback(fragmentOwner, "after-release");
+  assertRestoredFallback("after-release");
+
+  await show();
+  const secondFallback = owner("fragment-plugin", 2);
+  await Effect.runPromise(session.activate(secondFallback));
+  assert.match(JSON.stringify(surfaces.at(-1)), /Recovery/);
+  await publishFallback(secondFallback, "after-generation");
+  assertRestoredFallback("after-generation");
+
+  await show();
+  await Effect.runPromise(session.remove(secondFallback));
+  assert.match(JSON.stringify(surfaces.at(-1)), /Recovery/);
+  const thirdFallback = owner("fragment-plugin", 3);
+  await Effect.runPromise(session.activate(thirdFallback));
+  await publishFallback(thirdFallback, "after-remove");
+  assertRestoredFallback("after-remove");
+});
+
+test("route reconfiguration clears changed fallbacks and normalizes a selected fallback", async () => {
+  const surfaces: Surface[] = [];
+  const initial = {
+    layout: "layout-plugin",
+    slots: [
+      {
+        key: "slot",
+        route: { fallback: { pluginId: "fragment-plugin", id: "main" } },
+        contributions: [
+          { pluginId: "fragment-plugin", id: "main" },
+          { pluginId: "fragment-plugin", id: "alternate", optional: true as const },
+          { pluginId: "pinned-plugin", id: "pin", optional: true as const },
+        ],
+      },
+    ],
+  };
+  const session = await Effect.runPromise(
+    makePluginComposition({
+      recipe: initial,
+      recovery,
+      commit: (surface) =>
+        Effect.sync(() => {
+          surfaces.push(surface);
+          return surfaces.length;
+        }),
+    }),
+  );
+  for (const publisher of [layoutOwner, fragmentOwner, pinnedOwner])
+    await Effect.runPromise(session.activate(publisher));
+  await Effect.runPromise(session.publishLayout(layoutOwner, layout));
+  await Effect.runPromise(session.publishContribution(fragmentOwner, "main", fallback("main")));
+  await Effect.runPromise(
+    session.publishContribution(fragmentOwner, "alternate", fallback("alternate")),
+  );
+  await Effect.runPromise(session.publishContribution(pinnedOwner, "pin", fragment("Route")));
+  await Effect.runPromise(session.showRoute(pinnedOwner, "pin"));
+
+  await Effect.runPromise(
+    session.reconfigure({
+      ...initial,
+      slots: [
+        {
+          ...initial.slots[0]!,
+          route: { fallback: { pluginId: "fragment-plugin", id: "alternate" } },
+          contributions: [
+            { pluginId: "fragment-plugin", id: "main", optional: true as const },
+            { pluginId: "fragment-plugin", id: "alternate" },
+            { pluginId: "pinned-plugin", id: "pin", optional: true as const },
+          ],
+        },
+      ],
+    }),
+  );
+  assert.equal(surfaces.at(-1)!.bindings[0]?.pageId, "alternate");
+  assert.doesNotMatch(JSON.stringify(surfaces.at(-1)), /Route/);
+
+  await Effect.runPromise(session.showRoute(pinnedOwner, "pin"));
+  await Effect.runPromise(
+    session.reconfigure({
+      ...initial,
+      slots: [
+        {
+          ...initial.slots[0]!,
+          route: { fallback: { pluginId: "pinned-plugin", id: "pin" } },
+          contributions: [
+            { pluginId: "fragment-plugin", id: "main", optional: true as const },
+            { pluginId: "fragment-plugin", id: "alternate", optional: true as const },
+            { pluginId: "pinned-plugin", id: "pin" },
+          ],
+        },
+      ],
+    }),
+  );
+  const commits = surfaces.length;
+  assert.match(JSON.stringify(surfaces.at(-1)), /Route/);
+  assert.equal(await Effect.runPromise(session.hideRoute(pinnedOwner, "pin")), commits);
+  assert.equal(surfaces.length, commits);
+});
+
+test("route recipes require a declared required fallback and optional entries do not gate completion", async () => {
+  const invalidRoute = {
+    layout: "layout-plugin",
+    slots: [
+      {
+        key: "slot",
+        route: { fallback: { pluginId: "fragment-plugin", id: "main" } },
+        contributions: [{ pluginId: "fragment-plugin", id: "main", optional: true as const }],
+      },
+    ],
+  };
+  await assert.rejects(
+    Effect.runPromise(
+      makePluginComposition({ recipe: invalidRoute, recovery, commit: () => Effect.succeed(1) }),
+    ),
+  );
+  await assert.rejects(
+    Effect.runPromise(
+      makePluginComposition({
+        recipe: {
+          ...invalidRoute,
+          slots: [
+            {
+              ...invalidRoute.slots[0]!,
+              contributions: [{ pluginId: "fragment-plugin", id: "other" }],
+            },
+          ],
+        },
+        recovery,
+        commit: () => Effect.succeed(1),
+      }),
+    ),
+  );
+  const optional = {
+    layout: "layout-plugin",
+    slots: [
+      {
+        key: "slot",
+        route: { fallback: { pluginId: "fragment-plugin", id: "main" } },
+        contributions: [
+          { pluginId: "fragment-plugin", id: "main" },
+          { pluginId: "pinned-plugin", id: "pin", optional: true as const },
+        ],
+      },
+    ],
+  };
+  const session = await Effect.runPromise(
+    makePluginComposition({ recipe: optional, recovery, commit: () => Effect.succeed(1) }),
+  );
+  await Effect.runPromise(session.activate(layoutOwner));
+  await Effect.runPromise(session.activate(fragmentOwner));
+  await Effect.runPromise(session.publishLayout(layoutOwner, layout));
+  await Effect.runPromise(session.publishContribution(fragmentOwner, "main", fragment()));
+  assert.equal(await Effect.runPromise(session.complete), true);
+});
+
+test("legacy recipe decoding retains its exact shape", async () => {
+  const legacy = {
+    layout: "layout-plugin",
+    slots: [{ key: "slot", contributions: [{ pluginId: "fragment-plugin", id: "main" }] }],
+  };
+  assert.deepEqual(
+    await Effect.runPromise(Schema.decodeUnknownEffect(PluginCompositionRecipeSchema)(legacy)),
+    legacy,
+  );
 });

@@ -128,6 +128,10 @@ export const createBrowserComposition = Effect.fn("Browser.createComposition")(f
       session.publishContribution(owner, id, surface).pipe(permit.withPermit),
     withdrawContribution: (owner: CompositionOwner, id: string) =>
       session.withdrawContribution(owner, id).pipe(permit.withPermit),
+    showRoute: (owner: CompositionOwner, id: string) =>
+      session.showRoute(owner, id).pipe(permit.withPermit),
+    hideRoute: (owner: CompositionOwner, id: string) =>
+      session.hideRoute(owner, id).pipe(permit.withPermit),
     events: (owner: CompositionOwner) =>
       Stream.unwrap(
         Effect.sync(() => {

@@ -162,6 +162,8 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
                 publishContribution: (id, surface) =>
                   composition.publishContribution(composedOwner, id, surface),
                 withdrawContribution: (id) => composition.withdrawContribution(composedOwner, id),
+                showRoute: (id) => composition.showRoute(composedOwner, id),
+                hideRoute: (id) => composition.hideRoute(composedOwner, id),
               }
             : undefined,
           onReady: (services

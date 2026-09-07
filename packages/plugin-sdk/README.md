@@ -35,12 +35,25 @@ call resolves to `{ revision }` after the host commits it. `ui.release()` remain
 to the trusted default UI in legacy mode and releases the caller's UI contributions in composition
 mode, so the same activation can publish again later.
 
+A slot can declare `route: { fallback: { pluginId, id } }`. It then renders only the selected
+contribution, or its required fallback. Publish your contribution before calling `ui.showRoute(id)`.
+Call `ui.hideRoute(id)` to restore the fallback if your exact activation still owns the selection.
+Both return `{ revision }` and require `ui.compose`; they accept no plugin ID, generation, profile
+or slot. A stale hide cannot dismiss another route. Withdrawal or activation replacement clears
+selection. Hidden contributions keep their latest publication but contribute no nodes, actions or
+viewport bindings. Slots without `route` retain ordered composition.
+
+Mark an entry `optional: true` when its absence should not block composition readiness. The fallback
+must name a required entry in that same slot. Omitted `optional` remains required. Native commit
+failure preserves the previous surface and input routing. These generic APIs do not implement browser
+navigation history or the planned default extension-management screen.
+
 Composition belongs to the manager's active Version 2 plan in `hitchhiker-plugins/plugins.json`.
 Use `hitchhiker_plugin_stage` to install each new identity disabled, read `hitchhiker_plugin_plan`,
 then pass its revision and the complete enabled/composition/serviceBindings candidate to
 `hitchhiker_plugin_apply_plan`. The plan only arranges installed, granted artifacts; it does not
 install code or issue grants. Legacy `composition.json` is read only during Version 1 migration. The host still runs at
-most four workers, and `--safe-mode` ignores the recipe. During migration, native emergency recovery
+most five workers, and `--safe-mode` ignores the recipe. During migration, native emergency recovery
 can restore the legacy plugin-management interface. A missing or disabled layout also keeps that
 management interface visible until a valid layout is published. Each activation has its own bounded
 input inbox; early actions are retained, and overflowing one inbox stops only that worker.
@@ -84,8 +97,9 @@ restarts required consumers after joining their old workers. Incompatible contra
 the update before stopping the current cohort. A changed grant restarts the worker even when its
 artifact hash is unchanged. Recipes may retain bindings for future or disabled plugins; only the
 runnable cohort is admitted. Apply a complete plan with the current revision to change bindings or
-UI composition live. A configured UI owner must be removed through a complete replacement plan;
-disabling it alone is rejected. Failed switching restores the old plan, and failed rollback retains
+UI composition live. Required UI owners must remain enabled and runnable. An owner whose contributions
+are all optional can be disabled or removed while its declaration remains in the recipe; enabling
+it again rechecks its grants and service dependencies. Failed switching restores the old plan, and failed rollback retains
 a recovery journal requiring restart. Native switching verification is still in progress.
 
 Providers may publish initial state during `activate`. Consumers must use the returned subscription

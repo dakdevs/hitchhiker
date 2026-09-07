@@ -137,6 +137,8 @@ const fakeApi = () => {
         return { revision: publications.length };
       },
       withdrawContribution: unexpected,
+      showRoute: unexpected,
+      hideRoute: unexpected,
       release: unexpected,
     },
   };

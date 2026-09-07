@@ -157,6 +157,12 @@ const fixture = (initial: readonly string[] = ["first", "second"]) => {
       async withdrawContribution() {
         return { revision: 0 };
       },
+      async showRoute() {
+        return { revision: 0 };
+      },
+      async hideRoute() {
+        return { revision: 0 };
+      },
       async release() {},
     },
   };

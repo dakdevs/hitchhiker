@@ -5,10 +5,10 @@ turning those screens into fixed Chromium tabs or putting their feature logic ba
 Chrome-extension management is the first consumer. Settings and plugin management can move through
 the same seam later.
 
-This document records an approved architecture and an implementation plan. The selectable-route
-composition seam, default extension-management plugin, V3 default cohort and six-worker evidence do
-not exist yet. Existing toolbar contributions and the presenter's local Settings/Plugins route state
-do not satisfy this plan.
+This document records the architecture and remaining implementation plan. The selectable-route
+composition seam and public SDK are implemented; the independent extension-management plugin,
+V3 default cohort and six-worker evidence remain outstanding. Existing toolbar contributions and
+the presenter's local Settings/Plugins route state do not satisfy those remaining requirements.
 
 ## Boundary decision
 
@@ -259,12 +259,28 @@ with no remaining host/plugin processes and produce the RAM/latency evidence lis
 
 ## Current status
 
-The repository currently has ordered composition slots, owner/generation event routing, bounded
-plugin UI inboxes, public extension inventory/removal/installation APIs, trusted local selection and
-native review. Those are prerequisites, not an implementation of this route plan.
+The repository has ordered and selectable composition slots, owner/generation event routing,
+bounded plugin UI inboxes, public extension inventory/removal/installation APIs, trusted local
+selection and native review. These provide the framework for the independent management plugin.
 
-Still unimplemented are the route recipe/schema, self-only show/hide calls, optional completion
-semantics, route selection state, default extension-management artifact, V3 bundle and journal,
-six-worker capacity change, complete timer-free default screen, six-worker Native regression and
-resource measurements. Do not describe independent default extension management as shipped until
-those items and the acceptance above pass.
+The route recipe, self-only show/hide calls, optional composition readiness and atomic route state
+now have portable behavioral coverage. A real installed-SDK fixture passes hidden Chromium bindings,
+return to the latest page, retained JavaScript state and clean shutdown
+(`work/plugin-routes-native.log`, one pass without skips). Its disposable profile uses the test-only
+mock Keychain; it does not prove production startup or six-worker performance.
+
+Installed plans now distinguish required owners from optional declarations. Portable tests cover
+optional removal, restart and reinstallation with fresh authorization, required-fallback rejection
+before persistence, activation rollback and presenter replacement. The native fixture also passes
+optional disable, re-enable and uninstall while preserving the recipe and live browser pages.
+Fallback loss now commits recovery and clears the selection; fallback repair never reopens an old
+management route without a fresh show request.
+
+Full dependency, type, lint, formatting, test and build checks pass with 472 portable tests and
+43 Native-gated skips (`work/plugin-routes-full-check.log`). The native route lifecycle fixture
+above ran separately and passed without skips. No fixture host or worker process remains.
+
+Still unimplemented are the
+default extension-management artifact, V3 bundle and journal, six-worker capacity change, complete
+timer-free default screen, six-worker Native regression and resource measurements. Do not describe
+independent default extension management as shipped until those items and the acceptance above pass.

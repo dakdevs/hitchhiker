@@ -1208,7 +1208,9 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     if (!recipe) return true;
     const owners = new Set([
       recipe.layout,
-      ...recipe.slots.flatMap((slot) => slot.contributions.map((entry) => entry.pluginId)),
+      ...recipe.slots.flatMap((slot) =>
+        slot.contributions.filter((entry) => !entry.optional).map((entry) => entry.pluginId),
+      ),
     ]);
     return [...owners].every((id) => prepared.graph.order.includes(id));
   };
@@ -1442,6 +1444,19 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
                     active.composition.layout === callerId ? targetId : active.composition.layout,
                   slots: active.composition.slots.map((slot) => ({
                     ...slot,
+                    ...(slot.route === undefined
+                      ? {}
+                      : {
+                          route: {
+                            fallback: {
+                              ...slot.route.fallback,
+                              pluginId:
+                                slot.route.fallback.pluginId === callerId
+                                  ? targetId
+                                  : slot.route.fallback.pluginId,
+                            },
+                          },
+                        }),
                     contributions: slot.contributions.map((contribution) => ({
                       ...contribution,
                       pluginId:

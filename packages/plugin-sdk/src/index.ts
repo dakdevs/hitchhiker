@@ -278,6 +278,10 @@ export interface PluginApi {
     ): Promise<{ readonly revision: number }>;
     /** Withdraw one host-declared contribution. */
     withdrawContribution(id: string): Promise<{ readonly revision: number }>;
+    /** Select this caller's published contribution in its configured route slot. */
+    showRoute(id: string): Promise<{ readonly revision: number }>;
+    /** Restore the fallback only if this caller's contribution is currently selected. */
+    hideRoute(id: string): Promise<{ readonly revision: number }>;
     /** Return to the trusted default UI, or release this caller's contributions in composition mode. */
     release(): Promise<void>;
   };
@@ -440,6 +444,8 @@ const api = (host: HostBridge): PluginApi =>
         call<{ readonly revision: number }>(host, "ui.publishContribution", { id, surface }),
       withdrawContribution: (id: string) =>
         call<{ readonly revision: number }>(host, "ui.withdrawContribution", { id }),
+      showRoute: (id: string) => call<{ readonly revision: number }>(host, "ui.showRoute", { id }),
+      hideRoute: (id: string) => call<{ readonly revision: number }>(host, "ui.hideRoute", { id }),
       release: () => call<void>(host, "ui.release", {}),
     }),
   });

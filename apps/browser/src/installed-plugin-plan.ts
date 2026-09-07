@@ -64,12 +64,21 @@ const validateComposition = (composition: PluginCompositionRecipe | undefined) =
         commit: () => Effect.succeed(0),
       }).pipe(Effect.asVoid);
 
-const compositionOwners = (composition: PluginCompositionRecipe | undefined) =>
+const declaredCompositionOwners = (composition: PluginCompositionRecipe | undefined) =>
   composition === undefined
     ? new Set<string>()
     : new Set([
         composition.layout,
         ...composition.slots.flatMap((slot) => slot.contributions.map((entry) => entry.pluginId)),
+      ]);
+const requiredCompositionOwners = (composition: PluginCompositionRecipe | undefined) =>
+  composition === undefined
+    ? new Set<string>()
+    : new Set([
+        composition.layout,
+        ...composition.slots.flatMap((slot) =>
+          slot.contributions.filter((entry) => !entry.optional).map((entry) => entry.pluginId),
+        ),
       ]);
 
 const contributionIds = (composition: PluginCompositionRecipe | undefined, owner: string) =>
@@ -150,16 +159,23 @@ export const prepareInstalledPluginPlan = Effect.fn("Browser.prepareInstalledPlu
     if (services.graph.plugins.length > MaxInstalledPluginWorkers)
       return yield* invalid(`Installed plan exceeds ${MaxInstalledPluginWorkers} runnable plugins`);
     const runnable = new Set(services.graph.plugins.map((plugin) => plugin.id));
-    const owners = compositionOwners(plan.composition);
+    const declaredOwners = declaredCompositionOwners(plan.composition);
+    const requiredOwners = requiredCompositionOwners(plan.composition);
     const enabledUi = new Set(plan.enabled.filter((id) => hasUi(byId.get(id)!.manifest)));
     if (plan.composition === undefined && enabledUi.size > 0)
       return yield* invalid("Enabled UI plugins require a composition recipe");
-    for (const owner of owners) {
+    for (const owner of requiredOwners) {
       const entry = byId.get(owner);
       if (!entry || !plan.enabled.includes(owner) || !runnable.has(owner) || !hasUi(entry.manifest))
-        return yield* invalid("Composition owners must be enabled runnable UI plugins");
+        return yield* invalid("Required composition owners must be enabled runnable UI plugins");
     }
-    if (!sameSet(owners, enabledUi))
+    for (const owner of declaredOwners) {
+      if (!plan.enabled.includes(owner)) continue;
+      const entry = byId.get(owner);
+      if (!entry || !hasUi(entry.manifest))
+        return yield* invalid("Enabled composition owners must be UI plugins");
+    }
+    if ([...enabledUi].some((id) => !declaredOwners.has(id)))
       return yield* invalid("Every enabled UI plugin must be represented by the composition");
     const order = combinedOrder(services.graph, plan.composition);
     if (!order) return yield* invalid("Service and composition dependencies contain a cycle");
@@ -218,8 +234,8 @@ export const diffInstalledPluginPlans = (
     if (nextComposition) seeds.add(nextComposition.layout);
   }
   const compositionIds = new Set([
-    ...compositionOwners(oldComposition),
-    ...compositionOwners(nextComposition),
+    ...declaredCompositionOwners(oldComposition),
+    ...declaredCompositionOwners(nextComposition),
   ]);
   for (const id of compositionIds)
     if (!sameSet(contributionIds(oldComposition, id), contributionIds(nextComposition, id)))

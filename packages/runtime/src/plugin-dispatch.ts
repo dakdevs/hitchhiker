@@ -173,6 +173,8 @@ export interface PluginDispatchOptions {
     readonly publishLayout: (surface: unknown) => Effect.Effect<number, unknown>;
     readonly publishContribution: (id: string, surface: unknown) => Effect.Effect<number, unknown>;
     readonly withdrawContribution: (id: string) => Effect.Effect<number, unknown>;
+    readonly showRoute: (id: string) => Effect.Effect<number, unknown>;
+    readonly hideRoute: (id: string) => Effect.Effect<number, unknown>;
   };
 }
 
@@ -607,6 +609,15 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
             .withdrawContribution(id)
             .pipe(Effect.mapError(denied)),
         };
+      }
+      case "ui.showRoute":
+      case "ui.hideRoute": {
+        yield* authorize("ui.compose");
+        if (!options.composition) return yield* denied();
+        const { id } = yield* decode(Schema.Struct({ id: ContributionId }), params);
+        const operation =
+          method === "ui.showRoute" ? options.composition.showRoute : options.composition.hideRoute;
+        return { revision: yield* operation(id).pipe(Effect.mapError(denied)) };
       }
       case "ui.release": {
         yield* authorize("ui.compose");

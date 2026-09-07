@@ -18,14 +18,21 @@ const Owner = Schema.Struct({
   ),
 });
 const ContributionId = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,62}$/));
+const Contribution = Schema.Struct({
+  pluginId: Owner.fields.id,
+  id: ContributionId,
+  optional: Schema.optional(Schema.Literal(true)),
+});
+const Route = Schema.Struct({
+  fallback: Schema.Struct({ pluginId: Owner.fields.id, id: ContributionId }),
+});
 export const PluginCompositionRecipeSchema = Schema.Struct({
   layout: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{1,62}$/)),
   slots: Schema.Array(
     Schema.Struct({
       key: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
-      contributions: Schema.Array(
-        Schema.Struct({ pluginId: Owner.fields.id, id: ContributionId }),
-      ).check(Schema.isMaxLength(32)),
+      contributions: Schema.Array(Contribution).check(Schema.isMaxLength(32)),
+      route: Schema.optional(Route),
     }),
   ).check(Schema.isMaxLength(32)),
 });
@@ -36,18 +43,25 @@ type PublishedContribution = {
   readonly id: string;
   readonly surface: Surface;
 };
+type SelectedRoute = { readonly owner: CompositionOwner; readonly contributionId: string };
 type State = {
   latest: Map<string, number>;
   active: Map<string, CompositionOwner>;
   layout: PublishedLayout | undefined;
   contributions: Map<string, PublishedContribution>;
+  selections: Map<string, SelectedRoute>;
 };
 
 export interface PluginCompositionRecipe {
   readonly layout: string;
   readonly slots: readonly {
     readonly key: string;
-    readonly contributions: readonly { readonly pluginId: string; readonly id: string }[];
+    readonly contributions: readonly {
+      readonly pluginId: string;
+      readonly id: string;
+      readonly optional?: true;
+    }[];
+    readonly route?: { readonly fallback: { readonly pluginId: string; readonly id: string } };
   }[];
 }
 export interface PluginCompositionSession {
@@ -62,6 +76,8 @@ export interface PluginCompositionSession {
     owner: unknown,
     id: unknown,
   ) => Effect.Effect<number, EngineError>;
+  readonly showRoute: (owner: unknown, id: unknown) => Effect.Effect<number, EngineError>;
+  readonly hideRoute: (owner: unknown, id: unknown) => Effect.Effect<number, EngineError>;
   /** Clear this activation’s publications while permitting subsequent publication. */
   readonly release: (owner: unknown) => Effect.Effect<number, EngineError>;
   /**
@@ -95,10 +111,16 @@ const cloneState = (state: State): State => ({
   active: new Map(state.active),
   layout: state.layout,
   contributions: new Map(state.contributions),
+  selections: new Map(state.selections),
 });
 type Plan = {
   readonly recipe: typeof PluginCompositionRecipeSchema.Type | undefined;
   readonly configured: ReadonlySet<string>;
+  readonly required: ReadonlySet<string>;
+  readonly routeSlots: ReadonlyMap<
+    string,
+    { readonly fallback: string; readonly contributions: ReadonlySet<string> }
+  >;
   readonly owners: ReadonlySet<string>;
 };
 
@@ -116,6 +138,8 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
         return {
           recipe: undefined,
           configured: new Set<string>(),
+          required: new Set<string>(),
+          routeSlots: new Map(),
           owners: new Set<string>(),
         } satisfies Plan;
       const recipe = yield* Schema.decodeUnknownEffect(PluginCompositionRecipeSchema, {
@@ -128,22 +152,37 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
         return yield* invalid("Too many configured contributions");
       const slots = new Set<string>();
       const configured = new Set<string>();
+      const required = new Set<string>();
+      const routeSlots = new Map<
+        string,
+        { readonly fallback: string; readonly contributions: ReadonlySet<string> }
+      >();
       const owners = new Set([recipe.layout]);
       for (const slot of recipe.slots) {
         if (!slot.key.isWellFormed() || Buffer.byteLength(slot.key, "utf8") > 128)
           return yield* invalid("Composition slot keys must be well-formed UTF-8 up to 128 bytes");
         if (slots.has(slot.key)) return yield* invalid("Composition slots must be distinct");
         slots.add(slot.key);
+        const entries = new Map<string, typeof Contribution.Type>();
         for (const contribution of slot.contributions) {
           const key = contributionKey(contribution.pluginId, contribution.id);
           if (configured.has(key))
             return yield* invalid("Configured contributions must be distinct");
           configured.add(key);
+          entries.set(key, contribution);
+          if (!contribution.optional) required.add(key);
           owners.add(contribution.pluginId);
+        }
+        if (slot.route !== undefined) {
+          const fallback = contributionKey(slot.route.fallback.pluginId, slot.route.fallback.id);
+          const fallbackEntry = entries.get(fallback);
+          if (fallbackEntry === undefined || fallbackEntry.optional)
+            return yield* invalid("Route fallbacks must name a required slot contribution");
+          routeSlots.set(slot.key, { fallback, contributions: new Set(entries.keys()) });
         }
       }
       if (owners.size > maxOwners) return yield* invalid("Too many configured composition owners");
-      return { recipe, configured, owners } satisfies Plan;
+      return { recipe, configured, required, routeSlots, owners } satisfies Plan;
     });
   let plan: Plan = yield* decodePlan(options.recipe);
   const recovery = yield* decodeNativeSurface(options.recovery).pipe(
@@ -155,9 +194,32 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
     active: new Map(),
     layout: undefined,
     contributions: new Map(),
+    selections: new Map(),
   };
   let routes: ReadonlyMap<string, CompositionRoute> = new Map();
   let lastRevision = 0;
+
+  const currentContribution = (next: State, key: string) => {
+    const published = next.contributions.get(key);
+    return published !== undefined &&
+      sameOwner(next.active.get(published.owner.id), published.owner)
+      ? published
+      : undefined;
+  };
+  const selectedKey = (selection: SelectedRoute) =>
+    contributionKey(selection.owner.id, selection.contributionId);
+  const clearContributionSelection = (next: State, key: string, nextPlan: Plan = plan) => {
+    for (const [slot, route] of nextPlan.routeSlots)
+      if (route.fallback === key) next.selections.delete(slot);
+    for (const [slot, selection] of next.selections)
+      if (selectedKey(selection) === key) next.selections.delete(slot);
+  };
+  const clearOwnerSelections = (next: State, owner: CompositionOwner, nextPlan: Plan = plan) => {
+    for (const [slot, route] of nextPlan.routeSlots)
+      if (route.fallback.startsWith(`${owner.id}\u0000`)) next.selections.delete(slot);
+    for (const [slot, selection] of next.selections)
+      if (selection.owner.id === owner.id) next.selections.delete(slot);
+  };
 
   const candidate = Effect.fn("PluginComposition.candidate")(function* (
     next: State,
@@ -165,15 +227,40 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
   ) {
     if (!nextPlan.recipe || !next.layout)
       return { surface: recovery, routes: new Map<string, CompositionRoute>() };
-    const slots = nextPlan.recipe.slots.map((slot) => ({
-      key: slot.key,
-      contributions: slot.contributions.flatMap((entry) => {
-        const published = next.contributions.get(contributionKey(entry.pluginId, entry.id));
-        return published === undefined
-          ? []
-          : [{ owner: published.owner, id: published.id, surface: published.surface }];
-      }),
-    }));
+    for (const route of nextPlan.routeSlots.values())
+      if (currentContribution(next, route.fallback) === undefined)
+        return { surface: recovery, routes: new Map<string, CompositionRoute>() };
+    const slots = nextPlan.recipe.slots.map((slot) => {
+      const route = nextPlan.routeSlots.get(slot.key);
+      const selected = next.selections.get(slot.key);
+      const selectedKey =
+        route !== undefined &&
+        selected !== undefined &&
+        route.contributions.has(contributionKey(selected.owner.id, selected.contributionId)) &&
+        sameOwner(next.active.get(selected.owner.id), selected.owner) &&
+        sameOwner(
+          currentContribution(next, contributionKey(selected.owner.id, selected.contributionId))
+            ?.owner,
+          selected.owner,
+        )
+          ? contributionKey(selected.owner.id, selected.contributionId)
+          : undefined;
+      const entries = route === undefined ? slot.contributions : [];
+      const keys =
+        route === undefined
+          ? entries.map((entry) => contributionKey(entry.pluginId, entry.id))
+          : [selectedKey ?? route.fallback];
+      return {
+        key: slot.key,
+        contributions: keys.flatMap((key) => {
+          const published = next.contributions.get(key);
+          return published === undefined ||
+            !sameOwner(next.active.get(published.owner.id), published.owner)
+            ? []
+            : [{ owner: published.owner, id: published.id, surface: published.surface }];
+        }),
+      };
+    });
     return yield* composePluginSurface({
       layout: { owner: next.layout.owner, surface: next.layout.surface },
       slots,
@@ -221,6 +308,7 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
         if (next.layout?.owner.id === owner.id) next.layout = undefined;
         for (const [key, contribution] of next.contributions)
           if (contribution.owner.id === owner.id) next.contributions.delete(key);
+        clearOwnerSelections(next, owner);
         return yield* commitCandidate(next);
       }),
     );
@@ -282,6 +370,7 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
         if (next.layout?.owner.id === owner.id) next.layout = undefined;
         for (const [key, contribution] of next.contributions)
           if (contribution.owner.id === owner.id) next.contributions.delete(key);
+        clearOwnerSelections(next, owner);
         return yield* commitCandidate(next);
       }),
     );
@@ -304,6 +393,74 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
         if (!state.contributions.has(key)) return lastRevision;
         const next = cloneState(state);
         next.contributions.delete(key);
+        clearContributionSelection(next, key);
+        return yield* commitCandidate(next);
+      }),
+    );
+  });
+  const showRoute = Effect.fn("PluginComposition.showRoute")(function* (
+    value: unknown,
+    contribution: unknown,
+  ) {
+    const owner = yield* decodeOwner(value);
+    const id = yield* Schema.decodeUnknownEffect(ContributionId)(contribution).pipe(
+      Effect.mapError(() => invalid("Malformed contribution ID")),
+    );
+    return yield* permit.withPermit(
+      Effect.gen(function* () {
+        if (!plan.recipe) return yield* invalid("Composition routes are unavailable");
+        const key = contributionKey(owner.id, id);
+        const routeSlot = [...plan.routeSlots].find(([, route]) => route.contributions.has(key));
+        if (routeSlot === undefined)
+          return yield* invalid("Contribution is not declared in a route slot");
+        if (!sameOwner(state.active.get(owner.id), owner))
+          return yield* invalid("Stale route selection");
+        const published = currentContribution(state, key);
+        if (published === undefined || !sameOwner(published.owner, owner))
+          return yield* invalid("Route contribution is not published");
+        const [slot, route] = routeSlot;
+        if (currentContribution(state, route.fallback) === undefined)
+          return yield* invalid("Route fallback is not published");
+        const current = state.selections.get(slot);
+        if (
+          (key === route.fallback && current === undefined) ||
+          (current !== undefined &&
+            sameOwner(current.owner, owner) &&
+            current.contributionId === id)
+        )
+          return lastRevision;
+        const next = cloneState(state);
+        if (key === route.fallback) next.selections.delete(slot);
+        else next.selections.set(slot, { owner, contributionId: id });
+        return yield* commitCandidate(next);
+      }),
+    );
+  });
+  const hideRoute = Effect.fn("PluginComposition.hideRoute")(function* (
+    value: unknown,
+    contribution: unknown,
+  ) {
+    const owner = yield* decodeOwner(value);
+    const id = yield* Schema.decodeUnknownEffect(ContributionId)(contribution).pipe(
+      Effect.mapError(() => invalid("Malformed contribution ID")),
+    );
+    return yield* permit.withPermit(
+      Effect.gen(function* () {
+        if (!plan.recipe) return yield* invalid("Composition routes are unavailable");
+        const key = contributionKey(owner.id, id);
+        const routeSlot = [...plan.routeSlots].find(([, route]) => route.contributions.has(key));
+        if (routeSlot === undefined)
+          return yield* invalid("Contribution is not declared in a route slot");
+        const [slot] = routeSlot;
+        const selected = state.selections.get(slot);
+        if (
+          selected === undefined ||
+          !sameOwner(selected.owner, owner) ||
+          selected.contributionId !== id
+        )
+          return lastRevision;
+        const next = cloneState(state);
+        next.selections.delete(slot);
         return yield* commitCandidate(next);
       }),
     );
@@ -322,6 +479,21 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
           next.layout = undefined;
         for (const [key] of next.contributions)
           if (!nextPlan.configured.has(key)) next.contributions.delete(key);
+        for (const [slot, selection] of next.selections) {
+          const route = nextPlan.routeSlots.get(slot);
+          const previousRoute = plan.routeSlots.get(slot);
+          const key = selectedKey(selection);
+          if (
+            route === undefined ||
+            route.fallback !== previousRoute?.fallback ||
+            route.fallback === key ||
+            currentContribution(next, route.fallback) === undefined ||
+            !route.contributions.has(key) ||
+            !sameOwner(next.active.get(selection.owner.id), selection.owner) ||
+            !sameOwner(currentContribution(next, key)?.owner, selection.owner)
+          )
+            next.selections.delete(slot);
+        }
         return yield* commitCandidate(next, nextPlan);
       }),
     );
@@ -332,6 +504,8 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
     publishLayout,
     publishContribution,
     withdrawContribution,
+    showRoute,
+    hideRoute,
     release: (owner) => clear(owner, false),
     remove: (owner) => clear(owner, true),
     reconfigure,
@@ -339,7 +513,7 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
       if (!plan.recipe) return true;
       if (!state.layout || !sameOwner(state.active.get(plan.recipe.layout), state.layout.owner))
         return false;
-      return [...plan.configured].every((key) => {
+      return [...plan.required].every((key) => {
         const contribution = state.contributions.get(key);
         return (
           contribution !== undefined &&

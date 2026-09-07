@@ -218,6 +218,8 @@ const fakeApi = () => {
         return { revision: contributions.size };
       },
       withdrawContribution: async () => ({ revision: 1 }),
+      showRoute: async () => ({ revision: 1 }),
+      hideRoute: async () => ({ revision: 1 }),
       release: async () => undefined,
     },
   };

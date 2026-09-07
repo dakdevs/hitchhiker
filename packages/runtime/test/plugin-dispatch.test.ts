@@ -283,6 +283,8 @@ test("composition UI dispatches only host-declared calls with an active ui.compo
           publish: () => Effect.succeed(99),
           release: Effect.void,
           composition: {
+            showRoute: () => Effect.succeed(4),
+            hideRoute: () => Effect.succeed(5),
             publishLayout: (surface: unknown) =>
               Effect.sync(() => {
                 calls.push(["layout", surface]);
@@ -301,6 +303,25 @@ test("composition UI dispatches only host-declared calls with an active ui.compo
           },
         };
         const dispatch = createPluginDispatcher(options);
+        for (const method of ["ui.showRoute", "ui.hideRoute"]) {
+          for (const params of [
+            { id: "bad id" },
+            { id: "main", owner: "foreign" },
+            { id: "main", generation: 2 },
+          ]) {
+            assert(Exit.isFailure(yield* Effect.exit(dispatch(method, params))));
+          }
+          assert.deepEqual(yield* dispatch(method, { id: "main" }), {
+            revision: method === "ui.showRoute" ? 4 : 5,
+          });
+          const undeclared = createPluginDispatcher({
+            ...options,
+            manifest: { ...options.manifest, capabilities: [] },
+          });
+          assert(Exit.isFailure(yield* Effect.exit(undeclared(method, { id: "main" }))));
+          const legacy = createPluginDispatcher({ ...options, composition: undefined });
+          assert(Exit.isFailure(yield* Effect.exit(legacy(method, { id: "main" }))));
+        }
         assert(
           Exit.isFailure(
             yield* Effect.exit(
@@ -400,6 +421,8 @@ test("composition UI dispatches only host-declared calls with an active ui.compo
             publishLayout: (surface) => session.publishLayout(owner, surface),
             publishContribution: (id, surface) => session.publishContribution(owner, id, surface),
             withdrawContribution: (id) => session.withdrawContribution(owner, id),
+            showRoute: (id) => session.showRoute(owner, id),
+            hideRoute: (id) => session.hideRoute(owner, id),
           },
         });
         const wholeWindow = {
@@ -451,6 +474,8 @@ test("composition UI dispatches only host-declared calls with an active ui.compo
               session.publishContribution({ ...owner, generation: 2 }, id, value),
             withdrawContribution: (id) =>
               session.withdrawContribution({ ...owner, generation: 2 }, id),
+            showRoute: (id) => session.showRoute({ ...owner, generation: 2 }, id),
+            hideRoute: (id) => session.hideRoute({ ...owner, generation: 2 }, id),
           },
         });
         const beforeDenied = committed.length;
@@ -467,6 +492,9 @@ test("composition UI dispatches only host-declared calls with an active ui.compo
         assert(
           Exit.isFailure(yield* Effect.exit(contributor("ui.publish", { surface: wholeWindow }))),
         );
+        for (const method of ["ui.showRoute", "ui.hideRoute"]) {
+          assert(Exit.isFailure(yield* Effect.exit(contributor(method, { id: "main" }))));
+        }
         assert.equal(committed.length, beforeRevocation);
         assert(
           Exit.isFailure(yield* Effect.exit(dispatch("ui.withdrawContribution", { id: "main" }))),

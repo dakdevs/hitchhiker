@@ -217,6 +217,7 @@ definePlugin({
       "The active plugin plan selects one layout plugin and ordered, declared contributions for each slot. Version 2 persists this plan in hitchhiker-plugins/plugins.json; composition.json is only a Version 1 migration input. The checked-in composition example maps split-layout to the content slot, then split-left/page and split-right/page.",
       "The recipe arranges artifacts only. Stage each new plugin disabled with hitchhiker_plugin_stage, read hitchhiker_plugin_plan, then submit the returned revision and complete candidate to hitchhiker_plugin_apply_plan. Staging delegates only permissions allowed by your MCP grant; the plan itself grants no access. Installed plans allow at most five workers, including default and third-party plugins. --safe-mode ignores the recipe, and missing layouts keep legacy plugin management visible during the migration. Native emergency recovery can also restore it. Each activation has a bounded input inbox, so early actions are retained and an overflowing owner cannot stall another plugin.",
       "A layout calls ui.publishLayout. A contributor calls ui.publishContribution with its configured ID and can call ui.withdrawContribution to remove that fragment. The public surface has no identity, slot, or provider field because the host owns those decisions. ui.release is reusable: in a composed profile it releases the caller's UI contributions, and in legacy mode it returns to the trusted default UI.",
+      "A slot with route: { fallback: { pluginId, id } } displays one selected contribution or its required fallback. Publish first, then call ui.showRoute(id). ui.hideRoute(id) restores the fallback only when your exact activation owns the selected contribution. Both require ui.compose and return { revision }; callers cannot supply another owner or generation. Hidden publications retain their latest content but have no committed nodes, actions or viewport bindings. An optional: true contribution does not block composition readiness; the fallback must remain required. The independent default extension-management screen is still being built.",
     ],
     code: `import { definePlugin } from "@hitchhiker/plugin-sdk";
 import { column, text } from "@hitchhiker/ui";
@@ -474,6 +475,16 @@ export async function useOtherPresenter(api: PluginApi) {
           "{ revision }; configured contribution only",
         ],
         ["ui.withdrawContribution(id)", "ui.compose", "{ revision }; removes a contribution"],
+        [
+          "ui.showRoute(id)",
+          "ui.compose",
+          "{ revision }; selects your published route contribution",
+        ],
+        [
+          "ui.hideRoute(id)",
+          "ui.compose",
+          "{ revision }; dismisses only your activation's selected route",
+        ],
         [
           "ui.release()",
           "ui.compose",

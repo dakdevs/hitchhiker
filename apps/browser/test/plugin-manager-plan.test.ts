@@ -66,6 +66,8 @@ const grants = (denied: Set<string>) =>
               origins: [],
             },
           }),
+    list: () => Effect.succeed([]),
+    revoke: () => Effect.void,
   }) as unknown as GrantStoreApi;
 const fixture = Effect.fn("test.planFixture")(function* (root: string) {
   const artifacts = yield* createPluginArtifactStore(root);
@@ -250,6 +252,7 @@ test("management replacement is guarded, preserves unrelated references, and use
               {
                 key: "area",
                 contributions: [{ pluginId: "caller-plugin", id: "tabs" }],
+                route: { fallback: { pluginId: "caller-plugin", id: "tabs" } },
               },
             ],
           },
@@ -291,6 +294,7 @@ test("management replacement is guarded, preserves unrelated references, and use
               {
                 key: "area",
                 contributions: [{ pluginId: "target-plugin", id: "tabs" }],
+                route: { fallback: { pluginId: "target-plugin", id: "tabs" } },
               },
             ],
           },
@@ -305,6 +309,163 @@ test("management replacement is guarded, preserves unrelated references, and use
         );
         assert(snapshot.plugins.every((plugin) => !("hash" in plugin)));
         assert(f.snapshotCalls() >= 2);
+      }).pipe(Effect.scoped),
+    ),
+  );
+});
+
+test("restart retains an uninstalled optional declaration and revalidates its reinstallation", async () => {
+  await withProfile(async (root) => {
+    const recipe = {
+      layout: "layout-plugin",
+      slots: [
+        {
+          key: "area",
+          contributions: [{ pluginId: "panel-plugin", id: "tabs", optional: true as const }],
+        },
+      ],
+    };
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture(root);
+          yield* f.stage("layout-plugin", true);
+          yield* f.stage("panel-plugin", true);
+          yield* f.manager.applyPlan((yield* f.manager.plan()).revision, {
+            enabled: ["layout-plugin", "panel-plugin"],
+            composition: recipe,
+            serviceBindings: [],
+          });
+          yield* f.manager.uninstall("panel-plugin");
+        }),
+      ),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const f = yield* fixture(root);
+          yield* f.manager.restore();
+          assert.deepEqual((yield* f.manager.plan()).composition, recipe);
+          assert.deepEqual([...f.active.keys()], ["layout-plugin"]);
+          yield* f.stage("panel-plugin", true);
+          f.denied.add("panel-plugin");
+          const before = yield* Effect.promise(() => readFile(path(root), "utf8"));
+          assert(Exit.isFailure(yield* Effect.exit(f.manager.enable("panel-plugin"))));
+          assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
+          f.denied.delete("panel-plugin");
+          yield* f.manager.enable("panel-plugin");
+          assert.equal(f.active.has("panel-plugin"), true);
+          assert.deepEqual((yield* f.manager.plan()).composition, recipe);
+        }),
+      ),
+    );
+  });
+});
+
+test("optional composition declarations survive disable and uninstall, while a required fallback cannot be disabled", async () => {
+  await withProfile((root) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const f = yield* fixture(root);
+        yield* f.stage("layout-plugin", true);
+        yield* f.stage("panel-plugin", true);
+        const optional = yield* f.manager.applyPlan((yield* f.manager.plan()).revision, {
+          enabled: ["layout-plugin", "panel-plugin"],
+          composition: {
+            layout: "layout-plugin",
+            slots: [
+              {
+                key: "area",
+                contributions: [{ pluginId: "panel-plugin", id: "tabs", optional: true }],
+              },
+            ],
+          },
+          serviceBindings: [],
+        });
+        yield* f.manager.disable("panel-plugin");
+        assert.deepEqual((yield* f.manager.plan()).composition, optional.composition);
+        yield* f.manager.uninstall("panel-plugin");
+        assert.deepEqual((yield* f.manager.plan()).composition, optional.composition);
+        assert.equal(
+          (yield* f.manager.managementSnapshot()).plugins.some((p) => p.id === "panel-plugin"),
+          false,
+        );
+      }).pipe(Effect.scoped),
+    ),
+  );
+
+  await withProfile((root) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const f = yield* fixture(root);
+        yield* f.stage("layout-plugin", true);
+        yield* f.stage("panel-plugin", true);
+        const active = yield* f.manager.applyPlan((yield* f.manager.plan()).revision, {
+          enabled: ["layout-plugin", "panel-plugin"],
+          composition: {
+            layout: "layout-plugin",
+            slots: [
+              {
+                key: "area",
+                contributions: [{ pluginId: "panel-plugin", id: "tabs" }],
+                route: { fallback: { pluginId: "panel-plugin", id: "tabs" } },
+              },
+            ],
+          },
+          serviceBindings: [],
+        });
+        const before = yield* Effect.promise(() => readFile(path(root), "utf8"));
+        assert.match(
+          (yield* f.manager.disable("panel-plugin").pipe(Effect.flip)).message,
+          /Required/,
+        );
+        assert.match(
+          (yield* f.manager.uninstall("panel-plugin").pipe(Effect.flip)).message,
+          /Required/,
+        );
+        assert.deepEqual(yield* f.manager.plan(), active);
+        assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
+      }).pipe(Effect.scoped),
+    ),
+  );
+});
+
+test("a failed explicit optional activation rolls back to its declared placeholder", async () => {
+  await withProfile((root) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const f = yield* fixture(root);
+        yield* f.stage("layout-plugin", true);
+        yield* f.stage("panel-plugin", true);
+        const placeholder = {
+          layout: "layout-plugin",
+          slots: [
+            {
+              key: "area",
+              contributions: [{ pluginId: "panel-plugin", id: "tabs", optional: true as const }],
+            },
+          ],
+        };
+        const old = yield* f.manager.applyPlan((yield* f.manager.plan()).revision, {
+          enabled: ["layout-plugin"],
+          composition: placeholder,
+          serviceBindings: [],
+        });
+        f.failures.add("panel-plugin");
+        assert(
+          Exit.isFailure(
+            yield* Effect.exit(
+              f.manager.applyPlan(old.revision, {
+                enabled: ["layout-plugin", "panel-plugin"],
+                composition: placeholder,
+                serviceBindings: [],
+              }),
+            ),
+          ),
+        );
+        assert.deepEqual(yield* f.manager.plan(), old);
+        assert.equal(f.active.has("panel-plugin"), false);
+        assert.equal((yield* readRegistry(root)).pendingPlan, undefined);
       }).pipe(Effect.scoped),
     ),
   );

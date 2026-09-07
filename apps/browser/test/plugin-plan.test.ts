@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Effect } from "effect";
+import type { InstalledPluginPlanInput } from "@hitchhiker/runtime";
 import {
   diffInstalledPluginPlans,
   InstalledPluginPlanError,
@@ -153,6 +154,59 @@ test("rejects malformed, unknown, over-capacity, invalid UI, and service cyclic 
   assert.deepEqual(contributorProvider.order, ["contributor", "layout"]);
 });
 
+test("admits declared optional UI placeholders while enforcing required composition owners", async () => {
+  const absentOptional = await prepare(
+    {
+      enabled: ["layout"],
+      composition: {
+        layout: "layout",
+        slots: [
+          { key: "slot", contributions: [{ pluginId: "panel", id: "main", optional: true }] },
+        ],
+      },
+      serviceBindings: [],
+    },
+    [artifact("layout", { ui: true })],
+  );
+  assert.deepEqual(absentOptional.plan.composition, {
+    layout: "layout",
+    slots: [{ key: "slot", contributions: [{ pluginId: "panel", id: "main", optional: true }] }],
+  });
+
+  const blockedOptional = await prepare(
+    {
+      enabled: ["layout", "panel"],
+      composition: {
+        layout: "layout",
+        slots: [
+          { key: "slot", contributions: [{ pluginId: "panel", id: "main", optional: true }] },
+        ],
+      },
+      serviceBindings: [],
+    },
+    [
+      artifact("layout", { ui: true }),
+      artifact("panel", { ui: true, requires: [{ id: "unavailable" }] }),
+    ],
+  );
+  assert.deepEqual(blockedOptional.blocked, ["panel"]);
+
+  await assert.rejects(
+    prepare(
+      {
+        enabled: ["layout"],
+        composition: {
+          layout: "layout",
+          slots: [{ key: "slot", contributions: [{ pluginId: "panel", id: "main" }] }],
+        },
+        serviceBindings: [],
+      },
+      [artifact("layout", { ui: true }), artifact("panel", { ui: true })],
+    ),
+    /Required composition owners/,
+  );
+});
+
 test("diff restarts required dependency closures but retains optional and slot-remapped workers", async () => {
   const baseEntries = [
     artifact("provider", { provides: ["source"] }),
@@ -226,9 +280,7 @@ test("diff restarts required dependency closures but retains optional and slot-r
   });
 
   const visibleEntries = [artifact("layout", { ui: true }), artifact("panel", { ui: true })];
-  const visible = (
-    slots: readonly { readonly key: string; readonly contributions: readonly unknown[] }[],
-  ) =>
+  const visible = (slots: NonNullable<InstalledPluginPlanInput["composition"]>["slots"]) =>
     prepare(
       {
         enabled: ["layout", "panel"],
@@ -276,4 +328,13 @@ test("diff restarts required dependency closures but retains optional and slot-r
     stop: ["layout"],
     start: ["layout"],
   });
+  const metadataOnly = await visible([
+    {
+      key: "left",
+      contributions: [{ pluginId: "panel", id: "main", optional: true }],
+      route: undefined,
+    },
+    { key: "right", contributions: [] },
+  ]);
+  assert.deepEqual(diffInstalledPluginPlans(remappedOld, metadataOnly), { stop: [], start: [] });
 });

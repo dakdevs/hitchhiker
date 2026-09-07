@@ -799,3 +799,10 @@ checks pass 462 tests; two separate interactive Native cases pass without skips.
 [installation evidence](EXTENSION-INSTALL-PLAN.md#public-compiled-plugin-installation-evidence)
 records current limits. Full default-plugin management and the remaining Chromium API surface are
 still in progress.
+
+Owner-scoped selectable contributions now let a plugin show or dismiss its own management screen.
+Route slots require a live fallback; optional plugins can be removed without removing that fallback,
+and fallback loss clears selection through the existing recovery path. The
+[routing plan](PLUGIN-ROUTING-PLAN.md) records portable lifecycle coverage and a real installed-SDK
+Chromium fixture that preserves live pages across route switching and optional-plugin removal.
+The independent extension-management artifact and V3 default cohort remain to be implemented.
