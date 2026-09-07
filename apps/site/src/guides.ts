@@ -67,7 +67,7 @@ export const pluginGuide: readonly GuideSection[] = [
         [
           "Chrome extensions",
           "SDK/MCP upload and review requests, inventory, removal and restart replay",
-          "Native approval remains trusted; default management plugin planned",
+          "Default management plugin implemented; Native approval remains trusted",
         ],
         [
           "DevTools interface",

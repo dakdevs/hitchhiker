@@ -1,5 +1,35 @@
 # Public DevTools integration
 
+## Plugin protocol session prerequisite
+
+Public plugin CDP remains unimplemented. The current private `cdp.send` connection owns one
+observer per page generation and shares domain state with trusted browser inspection. It must
+not become a public passthrough: a plugin disabling Runtime or enabling Fetch interception could
+disrupt the host, and a stopped plugin could leave a page paused.
+
+Before committing a public signature, a Native feasibility fixture must prove separate protocol
+sessions on the pinned CEF build. Investigate flattened `Target.attachToTarget` sessions through
+`SendDevToolsMessage`; an observer registration alone does not establish session isolation.
+Verify command results and events route to the owning session, and detaching one session leaves
+another session and the trusted DOM driver usable. If CEF cannot provide this, evaluate a separate
+trusted DevTools client backend. Do not fall back to sharing the internal connection.
+
+The intended public contract needs opaque owner-bound handles, page-generation checks, bounded
+pending calls and events, authorization before commands and event delivery, and cleanup on grant
+revocation, plugin exit, page replacement and shutdown. Fetch interception and debugger pauses need
+explicit recovery tests because their effects can outlive the requesting worker. Browser-wide
+authority and extension installation must remain separately authorized; protocol access must not
+bypass the existing Native extension review. Capability names and the initial method surface remain
+design decisions pending the backend proof, not available SDK methods.
+
+Primary references: [CEF browser API](https://github.com/chromiumembedded/cef/blob/master/include/cef_browser.h),
+[Target sessions](https://chromedevtools.github.io/devtools-protocol/tot/Target/),
+[Fetch request lifecycle](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/), and
+[Debugger lifecycle](https://chromedevtools.github.io/devtools-protocol/v8/Debugger/).
+These evolving references must be checked against the pinned Chromium protocol during implementation.
+
+## Original integration scope
+
 The next feature is a replaceable DevTools plugin using the same public inspection primitives
 available to third-party plugins. This work does not equate a raw CDP relay with a DevTools UI.
 

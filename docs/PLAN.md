@@ -822,7 +822,7 @@ Whole-browser resource acceptance and abrupt-worker recovery remain open.
 
 Independent Settings and plugin management extraction follows the
 [management extraction plan](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md). Configuration invalidations and
-generic replacement are implemented; the V4 cohort transition remains.
+generic replacement and the V4 cohort transition are implemented.
 
 The public `plugins.replace` prerequisite now supports an independent manager replacing another
 plugin through the existing validated transaction. Portable rollback/authority checks and a real Native
@@ -838,3 +838,9 @@ The subsequent [V4 checkpoint](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md#v4-integrat
 integrates both artifacts into fresh defaults, removes presenter management authority, preserves old
 cohorts, and verifies eight-worker Native startup and restart. Worker-only memory and exact exit
 observations are recorded there; broader performance and production release acceptance remain open.
+
+The follow-up V4 interactive extension fixture reached eight-worker startup and the Native folder
+picker, but computer-use timeouts and unsuccessful path entry prevented selection. It failed waiting
+for the review control (`work/v4-native-extensions.log`); this run provides no fresh V4 installation
+acceptance. The previous extension fixture evidence remains separate. Next protocol work must first
+prove the [owned CDP session prerequisite](DEVTOOLS-PLAN.md#plugin-protocol-session-prerequisite).
