@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { NodeServices } from "@effect/platform-node";
-import { Effect, Exit, Fiber, Stream } from "effect";
+import { Deferred, Effect, Exit, Fiber, Stream } from "effect";
 import { create } from "../src/grants.ts";
+import { PluginHostError } from "../src/plugin.ts";
 import { runLivePlugin, type LivePluginOptions } from "../src/plugin-session.ts";
 
 const hostScript = (marker: string) => `#!${process.execPath}
@@ -142,3 +143,70 @@ test("live plugin authenticates before spawn, expires idle credentials, and esca
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+for (const phase of ["ready-hook", "idle"] as const)
+  test(`worker death terminates a live session during ${phase} without a new command`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-handoff-"));
+    const executable = join(directory, "host.cjs");
+    await writeFile(
+      executable,
+      `#!${process.execPath}
+const readline = require('node:readline');
+const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  send({ id: request.id, result: true });
+  if (request.method === 'activate')
+    setTimeout(() => send({ event: 'plugin.resource', params: { reason: 'wall' } }), 100);
+});
+`,
+      { mode: 0o700 },
+    );
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const grants = yield* create({ directory: join(directory, "grants") });
+          const issued = yield* grants.issue({
+            principal: "handoff-plugin",
+            profileId: "default",
+            capabilities: [],
+            origins: [],
+          });
+          const ready = yield* Deferred.make<void>();
+          let releases = 0;
+          const running = yield* runLivePlugin({
+            manifest: { id: "handoff-plugin", version: "1.0.0", name: "Handoff", capabilities: [] },
+            executable,
+            code: "compiled",
+            token: issued.token,
+            grants,
+            profileId: "default",
+            browser: {
+              pages: Effect.succeed([]),
+              open: () => Effect.die("not used"),
+              navigate: () => Effect.die("not used"),
+              close: () => Effect.die("not used"),
+              configuration: Effect.die("not used"),
+              configure: () => Effect.die("not used"),
+              setTabPlacement: () => Effect.die("not used"),
+            },
+            publish: () => Effect.die("not used"),
+            release: Effect.sync(() => {
+              releases++;
+            }),
+            events: Stream.never,
+            onReady: Deferred.succeed(ready, undefined).pipe(
+              Effect.andThen(phase === "ready-hook" ? Effect.never : Effect.void),
+            ),
+          }).pipe(Effect.forkScoped);
+          yield* Deferred.await(ready).pipe(Effect.timeout(3000));
+          const failure = yield* Fiber.join(running).pipe(Effect.flip, Effect.timeout(2000));
+          assert(failure instanceof PluginHostError);
+          assert.equal(failure.code, "resource");
+          assert.equal(releases, 1);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });

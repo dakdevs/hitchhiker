@@ -20,7 +20,7 @@ const matches = (inbox: Inbox | undefined, owner: CompositionOwner) =>
 
 /** Trusted installed-worker adapter. Recipe identities never come from worker call parameters. */
 export const createBrowserComposition = Effect.fn("Browser.createComposition")(function* (options: {
-  readonly recipe: PluginCompositionRecipe;
+  readonly recipe: PluginCompositionRecipe | undefined;
   readonly controller: Pick<
     BrowserController,
     "publishPluginSurface" | "recoverPluginSurface" | "registerPluginEventHandler"
@@ -33,10 +33,8 @@ export const createBrowserComposition = Effect.fn("Browser.createComposition")(f
   yield* Effect.addFinalizer(() =>
     Effect.forEach(inboxes.values(), (inbox) => Queue.shutdown(inbox.queue), { discard: true }),
   );
-  const owners = new Set([
-    options.recipe.layout,
-    ...options.recipe.slots.flatMap((slot) => slot.contributions.map((item) => item.pluginId)),
-  ]);
+  // This identity is stable for manager consumers while its membership tracks the live plan.
+  const owners = new Set<string>();
   const recovery = {
     identity: "host-composition-recovery",
     root: text("recovery", "Plugin layout unavailable"),
@@ -53,6 +51,7 @@ export const createBrowserComposition = Effect.fn("Browser.createComposition")(f
             bindings: surface.bindings,
           }),
   });
+  for (const owner of session.owners()) owners.add(owner);
   yield* options.controller.registerPluginEventHandler(identity, (event) =>
     permit.withPermit(
       Effect.gen(function* () {
@@ -109,6 +108,18 @@ export const createBrowserComposition = Effect.fn("Browser.createComposition")(f
           }),
         ),
       ),
+    reconfigure: (recipe: PluginCompositionRecipe | undefined) =>
+      permit.withPermit(
+        Effect.uninterruptible(
+          Effect.gen(function* () {
+            const revision = yield* session.reconfigure(recipe);
+            owners.clear();
+            for (const owner of session.owners()) owners.add(owner);
+            return revision;
+          }),
+        ),
+      ),
+    complete: session.complete,
     release: (owner: CompositionOwner) =>
       session.release(owner).pipe(permit.withPermit, Effect.asVoid),
     publishLayout: (owner: CompositionOwner, surface: unknown) =>

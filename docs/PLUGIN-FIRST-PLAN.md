@@ -355,3 +355,42 @@ Post-review native rerun: sidebar passes, but top presentation times out during 
 (`work/default-plugins-native-top-final.log`), with machine load averages still above 260. Earlier
 both-mode functional runs passed, but startup reliability under load remains unresolved; the final
 native rerun is not green. These artifacts remain opt-in development packages, not the shipped default.
+
+## Live default-plan migration in progress
+
+The next cutover prerequisite follows [LIVE-PLUGIN-PLAN.md](LIVE-PLUGIN-PLAN.md). A generic live-plan
+transaction must change enabled identities, composition recipe and service bindings together, preserve
+pages/storage, respect grants and the four-worker limit, and restore the prior plan on failure. Startup recovery
+must resolve any durable transaction marker before launching workers. The API must serve replacement
+third-party interfaces as well as bundled sidebar/top presenters.
+
+In parallel, fix worker termination observation at the transport boundary. Resource/crash events
+must fail pending activation immediately and remain observable across the activation/ready handoff,
+even if no event subscriber existed when the worker stopped. Preserve existing CPU, wall, RSS and
+request limits; this improves diagnosis and lifecycle correctness, not startup performance by itself.
+
+Worker termination is now a persistent transport failure observed during activation, ready hooks and
+idle sessions. Resource/crash events terminate pending requests without depending on event-subscriber
+timing; bounded cleanup is uninterruptible. Eight focused portable tests and two real isolated-worker
+tests pass, including explicit resource-error classification and trusted UI release. The repository
+check passes for this transport change (`work/plugin-terminal-check.log`).
+
+Dynamic composition now has candidate reconfiguration, retained-publication remapping, a completeness
+query and a synchronized browser owner view. A real three-worker fixture reverses composed Chromium
+page order without relaunching workers, preserves both document markers, then restores the original
+order. It also retains the previous removal/restart checks (`work/live-composition-native.log`). Final
+review and combined verification remain pending. This is the compositor prerequisite, not the durable
+manager plan transaction or a user-facing sidebar/top switch.
+
+Review corrected mutable recipe checks so publication and withdrawal authorization occurs under the
+same permit as reconfiguration. A gated concurrency regression exercises a changed layout role and
+removed contribution. Historical generation entries are capped at 256 distinct activated identities
+per compositor lifetime; current identities may advance generations at capacity, and a new identity
+requires restart once full. The cap prevents unbounded history without admitting stale activations.
+The final independent review accepted these fixes. Combined repository/native verification follows.
+
+The combined local check passed typechecking, lint and formatting but failed the existing MCP stdio
+fixture readiness deadline while machine load exceeded 550 (`work/live-composition-check.log`). No
+MCP implementation or readiness deadline changed in this checkpoint. The earlier transport-only
+check and focused composition checks passed. Dedicated CI and a focused readiness rerun are needed
+before calling the combined portable validation green.

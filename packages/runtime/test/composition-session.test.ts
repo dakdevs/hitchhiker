@@ -207,3 +207,151 @@ test("withdrawal and release keep an activation reusable while removal rejects l
     Effect.runPromise(session.publishContribution(fragmentOwner, "main", fragment())),
   );
 });
+
+test("live reconfiguration retains remapped publications only after native commit", async () => {
+  const surfaces: Surface[] = [];
+  let rejectCommit = false;
+  const liveLayout: Surface = {
+    root: column("root", [column("left", []), column("right", [])]),
+    bindings: [],
+  };
+  const initial = {
+    layout: "layout-plugin",
+    slots: [
+      { key: "left", contributions: [{ pluginId: "fragment-plugin", id: "main" }] },
+      { key: "right", contributions: [{ pluginId: "pinned-plugin", id: "pin" }] },
+    ],
+  };
+  const swapped = {
+    layout: "layout-plugin",
+    slots: [
+      { key: "left", contributions: [{ pluginId: "pinned-plugin", id: "pin" }] },
+      { key: "right", contributions: [{ pluginId: "fragment-plugin", id: "main" }] },
+    ],
+  };
+  const session = await Effect.runPromise(
+    makePluginComposition({
+      recipe: initial,
+      recovery,
+      commit: (surface) =>
+        rejectCommit
+          ? Effect.fail(new EngineError({ code: "native", message: "rejected" }))
+          : Effect.sync(() => {
+              surfaces.push(surface);
+              return surfaces.length;
+            }),
+    }),
+  );
+  for (const publisher of [layoutOwner, fragmentOwner, pinnedOwner])
+    await Effect.runPromise(session.activate(publisher));
+  await Effect.runPromise(session.publishLayout(layoutOwner, liveLayout));
+  await Effect.runPromise(session.publishContribution(fragmentOwner, "main", fragment("Main")));
+  assert.equal(await Effect.runPromise(session.complete), false);
+  await Effect.runPromise(session.publishContribution(pinnedOwner, "pin", fragment("Pinned")));
+  assert.equal(await Effect.runPromise(session.complete), true);
+
+  await Effect.runPromise(session.reconfigure(swapped));
+  const root = surfaces.at(-1)!.root;
+  assert("children" in root);
+  const left = root.children[0]!;
+  const right = root.children[1]!;
+  assert("children" in left);
+  assert("children" in right);
+  assert.equal((left.children[0] as { label: string }).label, "Pinned");
+  assert.equal((right.children[0] as { label: string }).label, "Main");
+  const remapped = right.children[0]!;
+  assert(remapped.kind === "button");
+  const route = session.route({
+    surfaceId: "main",
+    revision: 1,
+    nodeId: remapped.key,
+    event: "press",
+    payload: { action: remapped.action },
+  });
+  assert.deepEqual(route?.owner, fragmentOwner);
+
+  rejectCommit = true;
+  await assert.rejects(Effect.runPromise(session.reconfigure(initial)));
+  assert.deepEqual(
+    session.route({
+      surfaceId: "main",
+      revision: 1,
+      nodeId: remapped.key,
+      event: "press",
+      payload: { action: remapped.action },
+    })?.owner,
+    fragmentOwner,
+  );
+  await assert.rejects(Effect.runPromise(session.reconfigure(undefined)));
+  rejectCommit = false;
+  for (const publisher of [layoutOwner, fragmentOwner, pinnedOwner])
+    await Effect.runPromise(session.remove(publisher));
+  await Effect.runPromise(session.reconfigure(undefined));
+  assert.equal(await Effect.runPromise(session.complete), true);
+  assert.deepEqual([...session.owners()], []);
+  await assert.rejects(Effect.runPromise(session.activate(owner("fragment-plugin", 2))));
+});
+
+test("queued publications reauthorize against the plan committed ahead of them", async () => {
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<number>();
+        let gate = false;
+        const session = yield* makePluginComposition({
+          recipe: {
+            layout: "layout-plugin",
+            slots: [{ key: "slot", contributions: [{ pluginId: "fragment-plugin", id: "main" }] }],
+          },
+          recovery,
+          commit: () =>
+            gate
+              ? Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release)))
+              : Effect.succeed(1),
+        });
+        yield* session.activate(layoutOwner);
+        yield* session.activate(fragmentOwner);
+        yield* session.publishLayout(layoutOwner, layout);
+        yield* session.publishContribution(fragmentOwner, "main", fragment());
+        gate = true;
+        const reconfiguring = yield* session
+          .reconfigure({
+            layout: "fragment-plugin",
+            slots: [{ key: "slot", contributions: [{ pluginId: "layout-plugin", id: "other" }] }],
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(started);
+        const staleLayout = yield* session
+          .publishLayout(layoutOwner, layout)
+          .pipe(Effect.forkScoped);
+        const staleWithdrawal = yield* session
+          .withdrawContribution(fragmentOwner, "main")
+          .pipe(Effect.forkScoped);
+        yield* Deferred.succeed(release, 2);
+        assert(Exit.isSuccess(yield* Fiber.await(reconfiguring)));
+        assert(Exit.isFailure(yield* Fiber.await(staleLayout)));
+        assert(Exit.isFailure(yield* Fiber.await(staleWithdrawal)));
+      }),
+    ),
+  );
+});
+
+test("composition retains bounded generation tombstones across live plans", async () => {
+  const session = await Effect.runPromise(
+    makePluginComposition({ recipe: undefined, recovery, commit: () => Effect.succeed(1) }),
+  );
+  for (let index = 0; index < 256; index++) {
+    const id = `owner-${index}`;
+    await Effect.runPromise(session.reconfigure({ layout: id, slots: [] }));
+    await Effect.runPromise(session.activate(owner(id)));
+    await Effect.runPromise(session.remove(owner(id)));
+  }
+  await Effect.runPromise(session.reconfigure({ layout: "owner-256", slots: [] }));
+  await assert.rejects(
+    Effect.runPromise(session.activate(owner("owner-256"))),
+    /restart is required/,
+  );
+  await Effect.runPromise(session.reconfigure({ layout: "owner-0", slots: [] }));
+  await Effect.runPromise(session.activate(owner("owner-0", 2)));
+});

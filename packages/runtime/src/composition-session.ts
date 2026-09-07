@@ -69,17 +69,22 @@ export interface PluginCompositionSession {
    * owner supervisor must treat that commit error as fatal and recover it.
    */
   readonly remove: (owner: unknown) => Effect.Effect<number, EngineError>;
+  readonly reconfigure: (recipe: unknown | undefined) => Effect.Effect<number, EngineError>;
+  readonly complete: Effect.Effect<boolean>;
+  readonly owners: () => ReadonlySet<string>;
   readonly route: (
     event: SurfaceEvent,
   ) => { readonly owner: CompositionOwner; readonly event: SurfaceEvent } | undefined;
 }
 export interface MakePluginCompositionOptions {
-  readonly recipe: PluginCompositionRecipe;
+  readonly recipe: PluginCompositionRecipe | undefined;
   readonly commit: (surface: Surface) => Effect.Effect<number, EngineError>;
   readonly recovery: Surface;
 }
 
 const maxOwners = 32;
+/** Tombstones prevent stale generation reuse; restart after 256 distinct owner identities. */
+const maxHistoricalOwners = 256;
 const maxContributions = 32;
 const invalid = (message: string) => new EngineError({ code: "composition", message });
 const contributionKey = (pluginId: string, id: string) => `${pluginId}\u0000${id}`;
@@ -91,37 +96,56 @@ const cloneState = (state: State): State => ({
   layout: state.layout,
   contributions: new Map(state.contributions),
 });
+type Plan = {
+  readonly recipe: typeof PluginCompositionRecipeSchema.Type | undefined;
+  readonly configured: ReadonlySet<string>;
+  readonly owners: ReadonlySet<string>;
+};
 
 /**
- * Trusted host-side coordinator for a fixed plugin layout recipe. Plugin data
+ * Trusted host-side coordinator for a live plugin layout recipe. Plugin data
  * is decoded before storage, and only a successful Native commit adopts a new
  * publication set and its event routes.
  */
 export const makePluginComposition = Effect.fn("makePluginComposition")(function* (
   options: MakePluginCompositionOptions,
 ): Effect.fn.Return<PluginCompositionSession, EngineError> {
-  const recipe = yield* Schema.decodeUnknownEffect(PluginCompositionRecipeSchema, {
-    onExcessProperty: "error",
-  })(options.recipe).pipe(Effect.mapError(() => invalid("Malformed composition recipe")));
-  if (recipe.slots.reduce((total, slot) => total + slot.contributions.length, 0) > maxContributions)
-    return yield* invalid("Too many configured contributions");
-  const slots = new Set<string>();
-  const configured = new Set<string>();
-  const allowedOwners = new Set([recipe.layout]);
-  for (const slot of recipe.slots) {
-    if (!slot.key.isWellFormed() || Buffer.byteLength(slot.key, "utf8") > 128)
-      return yield* invalid("Composition slot keys must be well-formed UTF-8 up to 128 bytes");
-    if (slots.has(slot.key)) return yield* invalid("Composition slots must be distinct");
-    slots.add(slot.key);
-    for (const contribution of slot.contributions) {
-      const key = contributionKey(contribution.pluginId, contribution.id);
-      if (configured.has(key)) return yield* invalid("Configured contributions must be distinct");
-      configured.add(key);
-      allowedOwners.add(contribution.pluginId);
-    }
-  }
-  if (allowedOwners.size > maxOwners)
-    return yield* invalid("Too many configured composition owners");
+  const decodePlan = (value: unknown | undefined) =>
+    Effect.gen(function* () {
+      if (value === undefined)
+        return {
+          recipe: undefined,
+          configured: new Set<string>(),
+          owners: new Set<string>(),
+        } satisfies Plan;
+      const recipe = yield* Schema.decodeUnknownEffect(PluginCompositionRecipeSchema, {
+        onExcessProperty: "error",
+      })(value).pipe(Effect.mapError(() => invalid("Malformed composition recipe")));
+      if (
+        recipe.slots.reduce((total, slot) => total + slot.contributions.length, 0) >
+        maxContributions
+      )
+        return yield* invalid("Too many configured contributions");
+      const slots = new Set<string>();
+      const configured = new Set<string>();
+      const owners = new Set([recipe.layout]);
+      for (const slot of recipe.slots) {
+        if (!slot.key.isWellFormed() || Buffer.byteLength(slot.key, "utf8") > 128)
+          return yield* invalid("Composition slot keys must be well-formed UTF-8 up to 128 bytes");
+        if (slots.has(slot.key)) return yield* invalid("Composition slots must be distinct");
+        slots.add(slot.key);
+        for (const contribution of slot.contributions) {
+          const key = contributionKey(contribution.pluginId, contribution.id);
+          if (configured.has(key))
+            return yield* invalid("Configured contributions must be distinct");
+          configured.add(key);
+          owners.add(contribution.pluginId);
+        }
+      }
+      if (owners.size > maxOwners) return yield* invalid("Too many configured composition owners");
+      return { recipe, configured, owners } satisfies Plan;
+    });
+  let plan: Plan = yield* decodePlan(options.recipe);
   const recovery = yield* decodeNativeSurface(options.recovery).pipe(
     Effect.mapError(() => invalid("Malformed recovery surface")),
   );
@@ -135,9 +159,13 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
   let routes: ReadonlyMap<string, CompositionRoute> = new Map();
   let lastRevision = 0;
 
-  const candidate = Effect.fn("PluginComposition.candidate")(function* (next: State) {
-    if (!next.layout) return { surface: recovery, routes: new Map<string, CompositionRoute>() };
-    const slots = recipe.slots.map((slot) => ({
+  const candidate = Effect.fn("PluginComposition.candidate")(function* (
+    next: State,
+    nextPlan: Plan = plan,
+  ) {
+    if (!nextPlan.recipe || !next.layout)
+      return { surface: recovery, routes: new Map<string, CompositionRoute>() };
+    const slots = nextPlan.recipe.slots.map((slot) => ({
       key: slot.key,
       contributions: slot.contributions.flatMap((entry) => {
         const published = next.contributions.get(contributionKey(entry.pluginId, entry.id));
@@ -151,13 +179,17 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
       slots,
     });
   });
-  const commitCandidate = Effect.fn("PluginComposition.commitCandidate")(function* (next: State) {
-    const composed = yield* candidate(next);
+  const commitCandidate = Effect.fn("PluginComposition.commitCandidate")(function* (
+    next: State,
+    nextPlan: Plan = plan,
+  ) {
+    const composed = yield* candidate(next, nextPlan);
     return yield* Effect.uninterruptible(
       options.commit(composed.surface).pipe(
         Effect.tap((revision) =>
           Effect.sync(() => {
             state = next;
+            plan = nextPlan;
             routes = composed.routes;
             lastRevision = revision;
           }),
@@ -174,11 +206,13 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
     const owner = yield* decodeOwner(value);
     return yield* permit.withPermit(
       Effect.gen(function* () {
-        if (!allowedOwners.has(owner.id))
+        if (!plan.owners.has(owner.id))
           return yield* invalid("Owner is not declared by the composition recipe");
         const current = state.active.get(owner.id);
         const latest = state.latest.get(owner.id);
         if (sameOwner(current, owner)) return lastRevision;
+        if (latest === undefined && state.latest.size >= maxHistoricalOwners)
+          return yield* invalid("Composition owner history is full; restart is required");
         if (latest !== undefined && owner.generation <= latest)
           return yield* invalid("Composition owner generations must increase");
         const next = cloneState(state);
@@ -196,13 +230,13 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
     surface: unknown,
   ) {
     const owner = yield* decodeOwner(value);
-    if (owner.id !== recipe.layout)
-      return yield* invalid("Only the configured layout may publish a layout");
     const decoded = yield* decodeNativeSurface(surface).pipe(
       Effect.mapError(() => invalid("Malformed layout surface")),
     );
     return yield* permit.withPermit(
       Effect.gen(function* () {
+        if (owner.id !== plan.recipe?.layout)
+          return yield* invalid("Only the configured layout may publish a layout");
         if (!sameOwner(state.active.get(owner.id), owner))
           return yield* invalid("Stale layout publication");
         const next = cloneState(state);
@@ -220,13 +254,13 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
     const id = yield* Schema.decodeUnknownEffect(ContributionId)(contribution).pipe(
       Effect.mapError(() => invalid("Malformed contribution ID")),
     );
-    if (!configured.has(contributionKey(owner.id, id)))
-      return yield* invalid("Contribution is not declared by the composition recipe");
     const decoded = yield* decodeNativeSurface(surface).pipe(
       Effect.mapError(() => invalid("Malformed contribution surface")),
     );
     return yield* permit.withPermit(
       Effect.gen(function* () {
+        if (!plan.configured.has(contributionKey(owner.id, id)))
+          return yield* invalid("Contribution is not declared by the composition recipe");
         if (!sameOwner(state.active.get(owner.id), owner))
           return yield* invalid("Stale contribution publication");
         const next = cloneState(state);
@@ -261,16 +295,34 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
       Effect.mapError(() => invalid("Malformed contribution ID")),
     );
     const key = contributionKey(owner.id, id);
-    if (!configured.has(key))
-      return yield* invalid("Contribution is not declared by the composition recipe");
     return yield* permit.withPermit(
       Effect.gen(function* () {
+        if (!plan.configured.has(key))
+          return yield* invalid("Contribution is not declared by the composition recipe");
         if (!sameOwner(state.active.get(owner.id), owner))
           return yield* invalid("Stale contribution withdrawal");
         if (!state.contributions.has(key)) return lastRevision;
         const next = cloneState(state);
         next.contributions.delete(key);
         return yield* commitCandidate(next);
+      }),
+    );
+  });
+  const reconfigure = Effect.fn("PluginComposition.reconfigure")(function* (
+    value: unknown | undefined,
+  ) {
+    const nextPlan = yield* decodePlan(value);
+    return yield* permit.withPermit(
+      Effect.gen(function* () {
+        for (const owner of state.active.values())
+          if (!nextPlan.owners.has(owner.id))
+            return yield* invalid("Active composition owners must be stopped before removal");
+        const next = cloneState(state);
+        if (next.layout && next.layout.owner.id !== nextPlan.recipe?.layout)
+          next.layout = undefined;
+        for (const [key] of next.contributions)
+          if (!nextPlan.configured.has(key)) next.contributions.delete(key);
+        return yield* commitCandidate(next, nextPlan);
       }),
     );
   });
@@ -282,6 +334,20 @@ export const makePluginComposition = Effect.fn("makePluginComposition")(function
     withdrawContribution,
     release: (owner) => clear(owner, false),
     remove: (owner) => clear(owner, true),
+    reconfigure,
+    complete: Effect.sync(() => {
+      if (!plan.recipe) return true;
+      if (!state.layout || !sameOwner(state.active.get(plan.recipe.layout), state.layout.owner))
+        return false;
+      return [...plan.configured].every((key) => {
+        const contribution = state.contributions.get(key);
+        return (
+          contribution !== undefined &&
+          sameOwner(state.active.get(contribution.owner.id), contribution.owner)
+        );
+      });
+    }),
+    owners: () => new Set(plan.owners),
     route: (event) => {
       const routed = routeCompositionEvent(routes, event);
       return routed && sameOwner(state.active.get(routed.owner.id), routed.owner)

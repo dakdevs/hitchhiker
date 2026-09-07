@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Deferred, Effect, Fiber, Stream } from "effect";
+import { Deferred, Effect, Exit, Fiber, Stream } from "effect";
 import type { EngineError, SurfaceEvent } from "@hitchhiker/runtime";
 import { button, column } from "@hitchhiker/ui";
 import { createBrowserComposition } from "../src/composition.ts";
@@ -199,5 +199,46 @@ test("interruption after an activation commit starts adopts its inbox before can
       assert.equal(actions[0]?.payload.payload.source, "New");
       assert.equal((yield* composition.failure(oldLeft).pipe(Effect.flip)).code, "composition");
     }).pipe(Effect.scoped),
+  );
+});
+
+test("live plan changes keep the stable owner view aligned after an interrupted commit", async () => {
+  await Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        let block = false;
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const composition = yield* createBrowserComposition({
+          recipe: { layout: "layout-plugin", slots: [] },
+          controller: {
+            publishPluginSurface: () => Effect.succeed(1),
+            recoverPluginSurface: () =>
+              (block
+                ? Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release)))
+                : Effect.void
+              ).pipe(Effect.as(1)),
+            registerPluginEventHandler: () => Effect.void,
+          },
+          onRecoveryFailure: Effect.die("unexpected recovery failure"),
+        });
+        const owners = composition.owners;
+        block = true;
+        const reconfiguring = yield* composition
+          .reconfigure({
+            layout: "layout-plugin",
+            slots: [{ key: "slot", contributions: [{ pluginId: "left-plugin", id: "page" }] }],
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(started);
+        const interruption = yield* Fiber.interrupt(reconfiguring).pipe(Effect.forkScoped);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.await(interruption);
+        assert(Exit.isSuccess(yield* Fiber.await(reconfiguring)));
+        assert.strictEqual(composition.owners, owners);
+        assert.deepEqual([...owners].toSorted(), ["layout-plugin", "left-plugin"]);
+        assert.equal(yield* composition.complete, false);
+      }),
+    ),
   );
 });

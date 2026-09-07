@@ -10,6 +10,7 @@ import type { BrowserPage } from "@hitchhiker/core";
 import { create } from "../src/grants.ts";
 import type { LivePluginOptions } from "../src/plugin-session.ts";
 import { runLivePlugin } from "../src/plugin-session.ts";
+import { PluginHostError } from "../src/plugin.ts";
 
 const executable = process.env.HITCHHIKER_PLUGIN_HOST;
 
@@ -186,13 +187,14 @@ test(
           });
           const crashSignal = yield* Deferred.make<void>();
           const crashOptions = options("crash-plugin", crashGrant.token, crashSignal);
-          const crash = yield* Effect.exit(
+          const crash = yield* Effect.flip(
             runLivePlugin({
               ...crashOptions,
               code: "globalThis.HitchhikerPlugin={activate(){while(true){}}}",
             }),
           );
-          assert(Exit.isFailure(crash));
+          assert(crash instanceof PluginHostError);
+          assert.equal(crash.code, "resource");
           assert.equal(releases.get("crash-plugin"), 1);
         }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
       );

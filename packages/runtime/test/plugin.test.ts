@@ -115,3 +115,35 @@ test("isolated transport preserves only safe public call errors", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+for (const event of ["plugin.resource", "plugin.crash"] as const)
+  test(`isolated transport remembers ${event} during activation while the broker stays alive`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-terminal-"));
+    const executable = join(dir, "fixture.cjs");
+    await writeFile(
+      executable,
+      `#!${process.execPath}
+const readline = require('node:readline');
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  if (request.method === 'activate')
+    process.stdout.write(JSON.stringify({ event: ${JSON.stringify(event)}, params: {} }) + '\\n');
+});
+`,
+      { mode: 0o700 },
+    );
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const host = yield* spawnPluginHost({ executable, call: () => Effect.die("not used") });
+          const failure = yield* host.activate("compiled").pipe(Effect.flip, Effect.timeout(2000));
+          assert.equal(failure.code, event === "plugin.resource" ? "resource" : "crash");
+          // No event subscription was needed; late lifecycle consumers see the same terminal cause.
+          assert.equal(yield* host.failure.pipe(Effect.flip, Effect.timeout(100)), failure);
+          assert.equal(yield* host.sendEvent("ui.event", {}).pipe(Effect.flip), failure);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });

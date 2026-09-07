@@ -69,6 +69,7 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
   let outgoingBytes = 0;
   let callBytes = 0;
   let stopped: PluginHostError | undefined;
+  const termination = yield* Deferred.make<never, PluginHostError>();
   const child = yield* spawner
     .spawn(
       ChildProcess.make(options.executable, [], {
@@ -93,12 +94,13 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
   const stop = Effect.fn("PluginHost.stop")(function* (error: PluginHostError) {
     if (stopped) return;
     stopped = error;
+    yield* Deferred.fail(termination, error);
     for (const deferred of pending.values()) yield* Deferred.fail(deferred, error);
     pending.clear();
     yield* Queue.shutdown(outgoing);
     yield* Queue.shutdown(calls);
     yield* PubSub.shutdown(events);
-  });
+  }, Effect.uninterruptible);
   yield* Effect.addFinalizer(() => stop(fail("closed", "Plugin host scope closed")));
   const request = Effect.fn("PluginHost.request")(function* (
     method: string,
@@ -180,6 +182,14 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
               yield* Deferred.fail(deferred, fail(message.error.code, message.error.message));
             else yield* Deferred.succeed(deferred, message.result);
           }
+        } else if (message.event === "plugin.resource" || message.event === "plugin.crash") {
+          // The broker may stay alive after its worker dies. Remember the terminal state before
+          // any subscriber attaches, including while activation or onReady is still pending.
+          yield* stop(
+            message.event === "plugin.resource"
+              ? fail("resource", "Plugin worker was stopped by its resource watchdog")
+              : fail("crash", "Plugin worker exited unexpectedly"),
+          );
         } else if (message.event === "plugin.call") {
           const call = yield* decodeCall(message.params).pipe(
             Effect.mapError(() => fail("protocol", "Invalid plugin call")),
@@ -210,6 +220,7 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
   });
   return {
     events: Stream.fromPubSub(events),
+    failure: Deferred.await(termination),
     activate,
     sendEvent: (event: string, payload: Schema.Json) => request("event", { event, payload }),
     stop: request("stop"),

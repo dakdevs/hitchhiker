@@ -41,8 +41,11 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
       Effect.catchCause((cause) => options.onRecoveryFailure ?? Effect.die(cause)),
     ),
   );
-  yield* Effect.raceFirst(host.activate(options.code), options.stopWhen ?? Effect.never);
-  yield* options.onReady ?? Effect.void;
+  const stopped = Effect.raceFirst(host.failure, options.stopWhen ?? Effect.never);
+  yield* Effect.raceFirst(
+    host.activate(options.code).pipe(Effect.andThen(options.onReady ?? Effect.void)),
+    stopped,
+  );
   const forwarding = options.events.pipe(
     Stream.runForEach((event) =>
       Effect.gen(function* () {
@@ -63,13 +66,6 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
       }),
     ),
   );
-  const monitoring = host.events.pipe(
-    Stream.runForEach((event) =>
-      event.event === "plugin.crash" || event.event === "plugin.resource"
-        ? Effect.fail("Plugin was stopped by its resource watchdog")
-        : Effect.void,
-    ),
-  );
   const serviceForwarding = options.serviceEvents
     ? options.serviceEvents.pipe(
         Stream.runForEach((event) => host.sendEvent(event.event, event.payload)),
@@ -84,10 +80,7 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
     yield* Effect.sleep(500);
   }).pipe(Effect.forever);
   yield* Effect.raceFirst(
-    Effect.raceFirst(
-      Effect.raceFirst(Effect.raceFirst(forwarding, serviceForwarding), monitoring),
-      lease,
-    ),
-    options.stopWhen ?? Effect.never,
+    Effect.raceFirst(Effect.raceFirst(forwarding, serviceForwarding), lease),
+    stopped,
   );
 }, Effect.scoped);

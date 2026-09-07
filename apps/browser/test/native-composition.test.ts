@@ -24,7 +24,7 @@ const example = new URL("../../composition-example/", import.meta.url);
 const Value = Schema.Struct({ result: Schema.Struct({ value: Schema.Json }) });
 
 test(
-  "three installed SDK plugins compose Chromium pages, survive removal, and restore from artifacts",
+  "three installed SDK plugins remap Chromium pages without restart, survive removal, and restore",
   { skip: !binary || !pluginHost, timeout: 45000 },
   async () => {
     const profile = await realpath(
@@ -88,13 +88,18 @@ test(
             controller,
             onRecoveryFailure,
           });
-          const launch = yield* createInstalledPluginLauncher({
+          const launchWorker = yield* createInstalledPluginLauncher({
             executable: pluginHost!,
             grants,
             controller,
             composition,
             onRecoveryFailure,
           });
+          let launches = 0;
+          const launch = (...args: Parameters<typeof launchWorker>) =>
+            Effect.sync(() => {
+              launches++;
+            }).pipe(Effect.andThen(launchWorker(...args)));
           const waitForPages = (expected: readonly string[]) =>
             controller.snapshot.pipe(
               Effect.filterOrFail(
@@ -131,6 +136,34 @@ test(
               }
               yield* waitForPages(ids);
               assert.equal((yield* manager.list()).filter((plugin) => plugin.running).length, 3);
+              assert.equal(yield* composition.complete, true);
+              const initialLaunches = launches;
+              yield* composition.reconfigure({
+                ...recipe,
+                slots: recipe.slots.map((slot) => ({
+                  ...slot,
+                  contributions: [...slot.contributions].reverse(),
+                })),
+              });
+              const reordered = yield* waitForPages(ids);
+              assert.deepEqual(
+                reordered.viewports.map((view) => view.pageId),
+                [...ids].reverse(),
+              );
+              assert.equal(yield* composition.complete, true);
+              assert.equal(
+                launches,
+                initialLaunches,
+                "Remapping retained contributions must not restart workers",
+              );
+              assert.equal(yield* evaluate(ids[0]!, "globalThis.marker"), "first");
+              assert.equal(yield* evaluate(ids[1]!, "globalThis.marker"), "second");
+              yield* composition.reconfigure(recipe);
+              assert.deepEqual(
+                (yield* waitForPages(ids)).viewports.map((view) => view.pageId),
+                ids,
+              );
+              assert.equal(launches, initialLaunches);
               yield* manager.disable("split-left");
               yield* waitForPages([ids[1]!]);
               assert.equal(yield* evaluate(ids[0]!, "globalThis.marker"), "first");
