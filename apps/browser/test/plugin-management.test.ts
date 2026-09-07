@@ -158,3 +158,26 @@ test("activation may inspect state but cannot queue mutations before readiness o
       assert.equal(calls, 1);
     }),
   ));
+
+test("startup admission allows reads but holds management mutations until bootstrap finishes", () =>
+  run(
+    Effect.gen(function* () {
+      const port = yield* createPluginManagement({ startPaused: true });
+      let calls = 0;
+      yield* port.bind(
+        backend({
+          enable: () =>
+            Effect.sync(() => {
+              calls += 1;
+            }),
+        }),
+      );
+      const api = port.forPlugin("presenter", () => true);
+      assert.equal((yield* api.snapshot()).revision, 2);
+      assert.equal((yield* Effect.exit(api.enable("target")))._tag, "Failure");
+      assert.equal(calls, 0);
+      yield* port.enableMutations();
+      yield* api.enable("target");
+      assert.equal(calls, 1);
+    }),
+  ));

@@ -54,9 +54,11 @@ import {
   type ExtensionControlsState,
 } from "./extension-controls.ts";
 import {
+  legacyBootstrapSeedOf,
   loadBrowserPersistence,
   saveBrowserPersistence,
   type BrowserPersistence,
+  type LegacyBootstrapSeed,
 } from "./persistence.ts";
 
 const ProfileId = "default";
@@ -127,6 +129,7 @@ const UnknownProtections = Object.freeze({
 
 interface ControllerState {
   browser: BrowserState;
+  interfaceMode: "legacy" | "plugins";
   interfaceState: DefaultInterfaceState;
   interfaceConfiguration: DefaultInterfaceConfiguration;
   tabsVisible?: boolean;
@@ -150,11 +153,21 @@ export interface BrowserPluginSummary {
   readonly lastFailure?: string;
 }
 export type PluginManagementAction = "enable" | "disable" | "rollback" | "uninstall";
+/** A complete, presentation-neutral inventory for default-plugin state migration. */
+export interface RestoredPageInventory {
+  readonly pageIds: readonly string[];
+  readonly pageOrder: readonly string[];
+}
 
 export interface BrowserController {
+  readonly interfaceMode: "legacy" | "plugins";
   readonly start: Effect.Effect<void, EngineError>;
   /** Initial page creation events, persistence, and rendering have settled. */
   readonly restored: Effect.Effect<void, EngineError>;
+  /** Waits for restoration, then returns only fully live pages in controller order. */
+  readonly restoredPageInventory: Effect.Effect<RestoredPageInventory, EngineError>;
+  /** Removes the frozen V1 UI seed after bootstrap is durably completed or abandoned. */
+  readonly retireLegacyBootstrapSeed: () => Effect.Effect<void, EngineError>;
   readonly dispatch: (action: string) => Effect.Effect<void, EngineError>;
   readonly snapshot: Effect.Effect<BrowserState>;
   readonly observePages: (
@@ -196,6 +209,10 @@ export interface BrowserController {
 }
 export interface BrowserControllerOptions {
   readonly freezeEnabled?: boolean;
+  /** Plugin mode retains browser state but exposes only a trusted recovery surface until composed UI arrives. */
+  readonly interfaceMode?: "legacy" | "plugins";
+  /** A single predecoded load owned by startup orchestration; skips controller disk I/O. */
+  readonly initialPersistence?: { readonly value: BrowserPersistence | undefined };
   readonly extensions?: BrowserExtensionControls;
   readonly profileLease?: ProfileWriteLease;
 }
@@ -203,7 +220,11 @@ export interface BrowserControllerOptions {
 const now = () => Date.now();
 const pageId = () => `p${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`;
 
-const asPersistence = (state: ControllerState): BrowserPersistence => {
+const asPersistence = (
+  state: ControllerState,
+  format?: 2,
+  legacyBootstrapSeed?: LegacyBootstrapSeed,
+): BrowserPersistence => {
   const pages = state.browser.pages
     .filter((page) => page.lifecycle !== "closed")
     .map((page) => ({ id: page.id, url: page.url, title: page.title }));
@@ -218,6 +239,8 @@ const asPersistence = (state: ControllerState): BrowserPersistence => {
         .filter((page) => !livePageIds.has(page.id))
         .map((page) => ({ id: page.id, url: page.url, title: page.title })),
     ],
+    ...(format === undefined ? {} : { format }),
+    ...(legacyBootstrapSeed === undefined ? {} : { legacyBootstrapSeed }),
   };
 };
 
@@ -376,6 +399,18 @@ const render = (
       { flex: 1 },
     ),
   });
+  if (state.interfaceMode === "plugins")
+    return header({
+      root: column(
+        "plugin-recovery",
+        [
+          text("plugin-recovery-title", "Hitchhiker", { fontSize: 18 }),
+          text("plugin-recovery-status", "No plugin interface is active."),
+        ],
+        { padding: 20, gap: 12, flex: 1 },
+      ),
+      bindings: Object.freeze([]),
+    });
   if (state.screen === "extensions" && extensions)
     return header(renderExtensionControls(extensions));
   if (state.screen === "settings") return header(renderSettings(state));
@@ -410,6 +445,7 @@ export const makeBrowserController = (
     const mutex = yield* Semaphore.make(1);
     let state: ControllerState = {
       browser: InitialBrowser,
+      interfaceMode: options.interfaceMode ?? "legacy",
       interfaceState: createDefaultInterface(ProfileId),
       interfaceConfiguration: { tabPlacement: "sidebar" },
       configuration: defaultConfiguration,
@@ -420,6 +456,9 @@ export const makeBrowserController = (
       screen: "browser",
       opening: new Map(),
     };
+    let persistenceFormat: 2 | undefined = options.interfaceMode === "plugins" ? 2 : undefined;
+    let legacyBootstrapSeed: LegacyBootstrapSeed | undefined;
+    const persistedState = () => asPersistence(state, persistenceFormat, legacyBootstrapSeed);
     let inputCommitScheduled = false;
     let lastError: string | undefined;
     let pluginSummaries: readonly BrowserPluginSummary[] = [];
@@ -508,7 +547,7 @@ export const makeBrowserController = (
     yield* Effect.addFinalizer(() => PubSub.shutdown(pluginEvents));
 
     const persist = Effect.fn("BrowserController.persist")(function* () {
-      const write = saveBrowserPersistence(profileRoot, closingPersistence ?? asPersistence(state));
+      const write = saveBrowserPersistence(profileRoot, closingPersistence ?? persistedState());
       return yield* (options.profileLease ? options.profileLease.withWrite(write) : write).pipe(
         Effect.mapError(
           (error) => new EngineError({ code: "persistence", message: error.message }),
@@ -801,6 +840,7 @@ export const makeBrowserController = (
       );
 
     const dispatch = Effect.fn("BrowserController.dispatch")(function* (action: string) {
+      if (state.interfaceMode === "plugins") return;
       if (action === "interface.extensions" && options.extensions) {
         yield* options.extensions.list().pipe(
           Effect.match({
@@ -1126,9 +1166,14 @@ export const makeBrowserController = (
             const next = {
               ...state,
               configuration: parsed.configuration,
-              interfaceConfiguration: parsed.interface,
+              ...(state.interfaceMode === "legacy"
+                ? { interfaceConfiguration: parsed.interface }
+                : {}),
             };
-            const write = saveBrowserPersistence(profileRoot, asPersistence(next));
+            const write = saveBrowserPersistence(
+              profileRoot,
+              asPersistence(next, persistenceFormat, legacyBootstrapSeed),
+            );
             yield* (options.profileLease ? options.profileLease.withWrite(write) : write).pipe(
               Effect.mapError(
                 (error) => new EngineError({ code: "persistence", message: error.message }),
@@ -1187,7 +1232,7 @@ export const makeBrowserController = (
           return lock.withPermit(
             Effect.gen(function* () {
               // Shutdown drains real pages, but the next session must retain them.
-              closingPersistence ??= asPersistence(state);
+              closingPersistence ??= persistedState();
               yield* persist();
             }),
           );
@@ -1310,20 +1355,27 @@ export const makeBrowserController = (
                     const opening = new Map(state.opening);
                     opening.delete(id);
                     if (restoring && opening.size === 0) restoring = false;
-                    const selectedPageId = state.interfaceState.selectedPageId ?? id;
+                    const selectedPageId =
+                      state.interfaceMode === "legacy"
+                        ? (state.interfaceState.selectedPageId ?? id)
+                        : undefined;
                     state = {
                       ...state,
                       browser: replacePage(opened.value, id, { protections: UnknownProtections }),
                       opening,
-                      interfaceState: {
-                        ...state.interfaceState,
-                        selectedPageId,
-                        pageOrder: Object.freeze(
-                          state.interfaceState.pageOrder.includes(id)
-                            ? state.interfaceState.pageOrder
-                            : [...state.interfaceState.pageOrder, id],
-                        ),
-                      },
+                      ...(state.interfaceMode === "legacy"
+                        ? {
+                            interfaceState: {
+                              ...state.interfaceState,
+                              selectedPageId,
+                              pageOrder: Object.freeze(
+                                state.interfaceState.pageOrder.includes(id)
+                                  ? state.interfaceState.pageOrder
+                                  : [...state.interfaceState.pageOrder, id],
+                              ),
+                            },
+                          }
+                        : {}),
                       ...(selectedPageId === id
                         ? { input: { ...InitialInput, text: metadata.url }, inputDirty: false }
                         : {}),
@@ -1372,17 +1424,27 @@ export const makeBrowserController = (
                     if (!page) return;
                     if (closingPersistence && lifecycle.params.reason === "page-close") {
                       const pages = closingPersistence.pages.filter((page) => page.id !== id);
-                      const previous = closingPersistence.interfaceState;
                       closingPersistence = {
                         ...closingPersistence,
                         pages,
-                        interfaceState: {
-                          ...previous,
-                          pageOrder: previous.pageOrder.filter((pageId) => pageId !== id),
-                          pinnedPageIds: previous.pinnedPageIds.filter((pageId) => pageId !== id),
-                          selectedPageId:
-                            previous.selectedPageId === id ? pages[0]?.id : previous.selectedPageId,
-                        },
+                        ...(state.interfaceMode === "legacy"
+                          ? {
+                              interfaceState: {
+                                ...closingPersistence.interfaceState,
+                                pageOrder: closingPersistence.interfaceState.pageOrder.filter(
+                                  (pageId) => pageId !== id,
+                                ),
+                                pinnedPageIds:
+                                  closingPersistence.interfaceState.pinnedPageIds.filter(
+                                    (pageId) => pageId !== id,
+                                  ),
+                                selectedPageId:
+                                  closingPersistence.interfaceState.selectedPageId === id
+                                    ? pages[0]?.id
+                                    : closingPersistence.interfaceState.selectedPageId,
+                              },
+                            }
+                          : {}),
                       };
                     }
                     pendingDomWrites.delete(id);
@@ -1405,23 +1467,27 @@ export const makeBrowserController = (
                         (page) => page.lifecycle !== "closed" || retainedClosed.has(page.id),
                       ),
                     };
-                    const interfaceState = reconcileInterface(browser, {
-                      ...state.interfaceState,
-                      ...(state.interfaceState.selectedPageId === id
-                        ? { selectedPageId: undefined }
-                        : {}),
-                      pageOrder: Object.freeze(
-                        state.interfaceState.pageOrder.filter((entry) => entry !== id),
-                      ),
-                      pinnedPageIds: Object.freeze(
-                        state.interfaceState.pinnedPageIds.filter((entry) => entry !== id),
-                      ),
-                    });
+                    const interfaceState =
+                      state.interfaceMode === "legacy"
+                        ? reconcileInterface(browser, {
+                            ...state.interfaceState,
+                            ...(state.interfaceState.selectedPageId === id
+                              ? { selectedPageId: undefined }
+                              : {}),
+                            pageOrder: Object.freeze(
+                              state.interfaceState.pageOrder.filter((entry) => entry !== id),
+                            ),
+                            pinnedPageIds: Object.freeze(
+                              state.interfaceState.pinnedPageIds.filter((entry) => entry !== id),
+                            ),
+                          })
+                        : state.interfaceState;
                     state = {
                       ...state,
                       browser,
-                      interfaceState,
-                      ...(state.interfaceState.selectedPageId === id
+                      ...(state.interfaceMode === "legacy" ? { interfaceState } : {}),
+                      ...(state.interfaceMode === "legacy" &&
+                      state.interfaceState.selectedPageId === id
                         ? {
                             input: {
                               ...InitialInput,
@@ -1464,7 +1530,9 @@ export const makeBrowserController = (
                       state = {
                         ...state,
                         browser: replacePage(state.browser, id, { url: lifecycle.params.url }),
-                        ...(state.interfaceState.selectedPageId === id && !state.inputDirty
+                        ...(state.interfaceMode === "legacy" &&
+                        state.interfaceState.selectedPageId === id &&
+                        !state.inputDirty
                           ? { input: { ...InitialInput, text: lifecycle.params.url } }
                           : {}),
                       };
@@ -1549,11 +1617,21 @@ export const makeBrowserController = (
           message: "The native host does not support page browser generations",
         });
       resourceSignalsAvailable = ready.params.pageResourceSignals === true;
-      const persisted = yield* loadBrowserPersistence(profileRoot, ProfileId).pipe(
-        Effect.mapError(
-          (error) => new EngineError({ code: "persistence", message: error.message }),
-        ),
-      );
+      const persisted =
+        options.initialPersistence === undefined
+          ? yield* loadBrowserPersistence(profileRoot, ProfileId).pipe(
+              Effect.mapError(
+                (error) => new EngineError({ code: "persistence", message: error.message }),
+              ),
+            )
+          : options.initialPersistence.value;
+      if (state.interfaceMode === "plugins") {
+        persistenceFormat = 2;
+        legacyBootstrapSeed = legacyBootstrapSeedOf(persisted);
+      } else if (persisted?.format === 2) {
+        persistenceFormat = 2;
+        legacyBootstrapSeed = persisted.legacyBootstrapSeed;
+      }
       const restorePages = persisted?.pages ?? [];
       yield* lock.withPermit(
         Effect.sync(() => {
@@ -1562,8 +1640,12 @@ export const makeBrowserController = (
             state = {
               ...state,
               configuration: persisted.configuration,
-              interfaceConfiguration: persisted.interfaceConfiguration,
-              interfaceState: persisted.interfaceState,
+              ...(state.interfaceMode === "legacy"
+                ? {
+                    interfaceConfiguration: persisted.interfaceConfiguration,
+                    interfaceState: persisted.interfaceState,
+                  }
+                : {}),
               opening: new Map(restorePages.map((page) => [page.id, page])),
               newPage: false,
               screen: "browser",
@@ -1660,6 +1742,60 @@ export const makeBrowserController = (
           ),
         ),
       ),
+      interfaceMode: options.interfaceMode ?? "legacy",
+      restoredPageInventory: Effect.raceFirst(
+        Deferred.await(restoration),
+        engine.exit.pipe(
+          Effect.flatMap(() =>
+            Effect.fail(
+              new EngineError({ code: "restore-exit", message: "Host exited during restoration" }),
+            ),
+          ),
+        ),
+      ).pipe(
+        Effect.andThen(
+          lock.withPermit(
+            Effect.sync(() => {
+              const pageIds = Object.freeze(
+                state.browser.pages
+                  .filter((page) => page.lifecycle !== "closed" && !state.opening.has(page.id))
+                  .map((page) => page.id),
+              );
+              return Object.freeze({ pageIds, pageOrder: Object.freeze([...pageIds]) });
+            }),
+          ),
+        ),
+      ),
+      retireLegacyBootstrapSeed: () =>
+        lock.withPermit(
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              if (closingPersistence !== undefined)
+                return yield* new EngineError({
+                  code: "closing",
+                  message: "The browser window is closing",
+                });
+              if (legacyBootstrapSeed === undefined) return;
+              const previous = legacyBootstrapSeed;
+              legacyBootstrapSeed = undefined;
+              const write = saveBrowserPersistence(profileRoot, persistedState());
+              const result = yield* (
+                options.profileLease ? options.profileLease.withWrite(write) : write
+              ).pipe(
+                Effect.mapError(
+                  (error) => new EngineError({ code: "persistence", message: error.message }),
+                ),
+                Effect.exit,
+              );
+              if (result._tag === "Failure") {
+                // A failed directory sync may follow rename. Keeping redundant input is safe:
+                // startup has already made the terminal bootstrap journal durable.
+                legacyBootstrapSeed = previous;
+                return yield* Effect.failCause(result.cause);
+              }
+            }),
+          ),
+        ),
       dispatch,
       snapshot: Effect.sync(() => state.browser),
       observePages: (owner) =>
@@ -1694,6 +1830,7 @@ export const makeBrowserController = (
       updatePluginControls: (plugins, action) =>
         lock.withPermit(
           Effect.gen(function* () {
+            if (state.interfaceMode === "plugins") return;
             const changed = JSON.stringify(plugins) !== JSON.stringify(pluginSummaries);
             pluginSummaries = plugins;
             pluginAction = action;

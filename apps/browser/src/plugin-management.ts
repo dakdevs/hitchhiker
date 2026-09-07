@@ -13,11 +13,14 @@ type ManagementBackend = Pick<
 >;
 
 /** Installed callers receive an identity-bound port, never the manager or its staging authority. */
-export const createPluginManagement = Effect.fn("PluginManagement.create")(function* () {
+export const createPluginManagement = Effect.fn("PluginManagement.create")(function* (
+  options: { readonly startPaused?: boolean } = {},
+) {
   const scope = yield* Effect.scope;
   let backend: ManagementBackend | undefined;
   let closed = false;
   let pending = 0;
+  let mutationsEnabled = options.startPaused !== true;
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
       closed = true;
@@ -41,6 +44,8 @@ export const createPluginManagement = Effect.fn("PluginManagement.create")(funct
     Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
         const manager = yield* requireBackend;
+        if (!mutationsEnabled)
+          return yield* new PluginManagementError({ message: "Plugin startup is not complete" });
         if (!isActive())
           return yield* new PluginManagementError({ message: "Plugin activation is not ready" });
         // Detached work must remain bounded even when a caller repeatedly times out or exits.
@@ -71,7 +76,11 @@ export const createPluginManagement = Effect.fn("PluginManagement.create")(funct
     replaceSelf: (targetId, expectedRevision) =>
       mutate(isActive, (manager) => manager.replaceSelf(callerId, targetId, expectedRevision)),
   });
-  return { bind, forPlugin };
+  const enableMutations = Effect.fn("PluginManagement.enableMutations")(function* () {
+    yield* requireBackend;
+    mutationsEnabled = true;
+  });
+  return { bind, forPlugin, enableMutations };
 });
 
 export type PluginManagement = Effect.Success<ReturnType<typeof createPluginManagement>>;

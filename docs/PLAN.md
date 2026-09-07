@@ -460,8 +460,8 @@ The next engine packet follows `GUARDED-DISCARD-PLAN.md`: a narrow CEF hook that
 protections at mutation time while retaining Chromium's normal eligibility checks, with an explicit
 exception for the host's one-tab-per-window topology. Pinning remains an interface choice, not a
 native protection bit. A full Chromium checkout/build has not begun. In parallel, the next
-portable customization packet will export only validated engine settings, default tab placement and
-plugin identity/hash/capability metadata. It must exclude page/session data, executable bytes, grants
+portable customization packet will export only validated engine settings, legacy default tab placement,
+and plugin identity/hash/capability metadata. It must exclude page/session data, executable bytes, grants
 and runtime storage; importing a recipe must not authorize or start a plugin.
 
 The docs-only follow-up `a560870` exposed an existing plugin cancellation failure in GitHub Check
@@ -560,19 +560,19 @@ initial model activation, before any switch assertion. Default bootstrap and the
 cutover remain unfinished. See [LIVE-PLUGIN-PLAN.md](LIVE-PLUGIN-PLAN.md) for contracts and evidence.
 
 Default bootstrap prerequisites now include owner-bound revision-zero tab/pin migration, idempotent
-trusted managed grants, and exact disabled staged-install retry. The combined portable check passes
-328 tests and all builds, with 29 native-gated skips. The normal application startup is not yet cut
-over. [DEFAULT-BOOTSTRAP-PLAN.md](DEFAULT-BOOTSTRAP-PLAN.md) defines permanent completion/abandonment
-markers, crash-gap recovery, page-restoration readiness, packaging and management-route prerequisites.
-Native startup/clean-shutdown acceptance remains unresolved.
+trusted managed grants, and exact disabled staged-install retry. That earlier portable check passed
+328 tests and all builds, with 29 native-gated skips. Startup is now cut over; see
+[DEFAULT-BOOTSTRAP-PLAN.md](DEFAULT-BOOTSTRAP-PLAN.md) for permanent completion/abandonment markers,
+crash-gap recovery, page-restoration readiness, packaging and management-route prerequisites. Native
+startup/clean-shutdown acceptance remains unresolved.
 
 The next startup prerequisites add `controller.restored`, which waits for the complete initial page
 cohort and fails on startup/host/scope termination, plus trusted installation identity inspection for
 recovery without exposing grant credentials. Controller and manager tests pass together (32 tests).
 Default artifact builds now emit a deterministic hash-bound index of five packages and both placement
 recipes; packaging verifies and copies it to `Contents/Resources/default-plugins`. The default package
-suite passes (18 tests); no native app was built for this change. Coordinator fault recovery remains
-under review and normal startup still uses the legacy default interface.
+suite passes (18 tests); no native app was built for that change. Coordinator fault recovery is now
+reviewed and normal installed-plugin startup uses the composed default interface.
 
 The Chromium documentation contract now explicitly requires API ownership, executable command/result
 examples, replacement hooks, security defaults, denial and revocation behavior, persistence and restart
@@ -590,8 +590,9 @@ The runtime default bundle reader now resolves the packaged resource directory e
 its complete fixed inventory, hashes, manifests and recipes before returning code to the coordinator.
 Nine new portable tests include a relocated real build and tampering/path/size/encoding rejection.
 The combined check passes 355 tests with 29 native-gated skips and all builds
-(`work/default-bundle-reader-check.log`). The reader remains unwired pending startup migration.
-The management API implementation and its remaining native gate are described below. Native startup and clean shutdown remain open gates.
+(`work/default-bundle-reader-check.log`). The reader is now used by normal startup. The management
+API implementation and its remaining native gate are described below. Native startup and clean
+shutdown remain open gates.
 
 ## Public plugin management and presenter routes
 
@@ -610,15 +611,33 @@ Layout manifests have read-only configuration authority; presenters have eight e
 Pending bootstrap journals from the previous cohort recover their original artifacts and grants
 without adopting new management permissions.
 
-The combined `pnpm check` passes 370 portable tests with 29 native-gated skips, plus dependency
-validation, typecheck, lint, formatting and all builds (`work/public-plugin-management-check.log`).
-A real portable manager fixture invokes self-replacement from the worker being stopped and retains
-other worker generations. Separate tests cover shutdown, bounded admission, strict dispatch,
-authority denial, management route behavior and previous-cohort recovery. Read-only integration and
-bootstrap compatibility reviews found no blocker. An existing CDP EOF fixture now awaits its command
-acknowledgment with a frozen request clock, preserving its real EOF assertion and production deadlines.
+In installed-plugin mode, the MCP `hitchhiker_tabs_set` operation rejects requests because tab
+presentation belongs to the plugin composition plan. The V1 customization export/import operations
+are omitted because their recipes encode controller-owned placement. Generic configuration and public
+plugin-plan operations remain available; legacy safe/developer mode retains its V1 operations.
 
-Next: wire restored-page bootstrap into normal startup, retire legacy default tab/UI authority,
-and verify the public presenter action in the Native host with retained document markers/storage,
-at most four workers and clean shutdown. Current Native timeout/shutdown evidence still fails that
-gate. Complete feature extraction, DevTools, broad Chromium APIs and release requirements remain open.
+Normal installed-plugin startup now reads persistence under the profile lease before controller
+startup, uses V2 generic configuration/pages persistence, and permits legacy-seed import only until
+the default bootstrap journal is terminal. It restores pages before seeding default plugins, then
+removes that seed only after the durable terminal journal; a failed retirement retains it without
+permitting reimport. Safe mode and developer `--plugin` bypass bootstrap while preserving the V2 seed.
+Normal mode requires an absolute plugin-host path, so it
+cannot silently fall back to legacy UI. The controller exposes no legacy tab policy in installed mode;
+the composed default presenter owns the normal UI. Plugin management snapshot reads are available
+during activation, while management mutations stay paused through restore and bootstrap and open only
+after bootstrap returns. Development may set `HITCHHIKER_DEFAULT_PLUGINS` to an absolute trusted
+bundle directory; production resolves the packaged resource directory.
+
+The final full check passes 378 portable tests with 30 native-gated skips, including dependency
+validation, typecheck, lint, formatting, tests, and builds
+(`work/plugin-startup-cutover-final-check.log`). Native public-action switching with retained document
+markers/storage and four-worker limits remains open. DevTools, broad Chromium APIs, extension UI and
+release requirements also remain open.
+
+The native bootstrap seam fixture has since passed a migrated V1 two-page profile through the actual
+host, including five installed plugins, four running workers, selected viewport restoration, V2 seed
+retirement, a completed journal, explicit window close, and engine exit zero
+(`work/native-default-startup.log`, 1 pass, 0 skips). It does not establish full main-entrypoint or
+release acceptance, live public presenter switching, or a complete shutdown fix: prior intermittent
+activation/shutdown failures remain regression concerns, and this fixture logged an IPC
+request-queue-full message during shutdown.

@@ -1,6 +1,6 @@
 import type { PluginStorageAdapter } from "@hitchhiker/runtime";
 import { Effect, Schema } from "effect";
-import type { BrowserPersistence } from "./persistence.ts";
+import { legacyBootstrapSeedOf, type BrowserPersistence } from "./persistence.ts";
 
 export const DefaultTabModelPluginId = "default-tab-model";
 export const DefaultTabPinsPluginId = "default-tab-pins";
@@ -74,12 +74,13 @@ export const mapDefaultPluginState = (
 ): DefaultPluginStateMigration => {
   const current = validateSnapshot(snapshot);
   const live = new Set(current.pageIds);
-  const legacyOrder = legacy ? uniqueLive(legacy.interfaceState.pageOrder, live) : [];
+  const seed = legacyBootstrapSeedOf(legacy);
+  const legacyOrder = seed ? uniqueLive(seed.pageOrder, live) : [];
   const pageOrder = Object.freeze([
     ...legacyOrder,
     ...current.pageOrder.filter((pageId) => !legacyOrder.includes(pageId)),
   ]);
-  const selected = legacy?.interfaceState.selectedPageId;
+  const selected = seed?.selectedPageId;
   const selection =
     selected !== undefined && live.has(selected)
       ? { kind: "page" as const, pageId: selected }
@@ -91,7 +92,7 @@ export const mapDefaultPluginState = (
     pins: Object.freeze({
       version: 1,
       pagesRevision: 0,
-      pinnedPageIds: legacy ? uniqueLive(legacy.interfaceState.pinnedPageIds, live) : [],
+      pinnedPageIds: seed ? uniqueLive(seed.pinnedPageIds, live) : [],
     }),
   });
 };

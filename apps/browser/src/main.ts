@@ -6,6 +6,7 @@ import {
   EngineError,
   NativeSurface,
   createGrantStore,
+  createPluginStorage,
   runMcpStdio,
   openCdpRelay,
   type McpPluginApi,
@@ -18,6 +19,13 @@ import { readCompositionRecipe } from "./composition-recipe.ts";
 import { readServiceRecipe } from "./service-recipe.ts";
 import { createPluginManager } from "./plugin-manager.ts";
 import { createPluginManagement } from "./plugin-management.ts";
+import { loadBrowserPersistence } from "./persistence.ts";
+import {
+  loadDefaultPluginBundle,
+  packagedDefaultPluginBundleDirectory,
+} from "./default-plugin-bundle.ts";
+import { runDefaultPluginBootstrap } from "./default-plugin-bootstrap.ts";
+import { startDefaultPluginInterface } from "./default-plugin-startup.ts";
 import { browserMcpApi } from "./mcp.ts";
 import { makeBrowserController } from "./controller.ts";
 import { makeBrowserDomDriver } from "./dom.ts";
@@ -34,6 +42,8 @@ const argument = (name: string) => {
     ?.slice(prefix.length);
 };
 const executable = process.env.HITCHHIKER_NATIVE_BINARY;
+const pluginDirectory = argument("--plugin");
+const pluginExecutable = process.env.HITCHHIKER_PLUGIN_HOST;
 const profileRoot =
   argument("--profile-root") ??
   join(homedir(), "Library", "Application Support", "Hitchhiker", "profiles", "default");
@@ -43,6 +53,12 @@ const program = Effect.gen(function* () {
     return yield* Effect.die("HITCHHIKER_NATIVE_BINARY and --profile-root must be absolute paths");
   const profileLease = yield* acquireProfileWriteLease(profileRoot, executable);
   const safeMode = process.argv.includes("--safe-mode");
+  if (
+    !safeMode &&
+    pluginDirectory === undefined &&
+    (!pluginExecutable || !isAbsolute(pluginExecutable))
+  )
+    return yield* Effect.die("Normal startup requires an absolute HITCHHIKER_PLUGIN_HOST");
   const runtime = EngineConnection.layer({
     executable,
     profileRoot: profileLease.profileRoot,
@@ -101,15 +117,23 @@ const program = Effect.gen(function* () {
         ),
       );
     }
+    const installedPluginMode =
+      pluginExecutable !== undefined && !safeMode && pluginDirectory === undefined;
+    const initialPersistence = yield* profileLease.withWrite(
+      loadBrowserPersistence(profileLease.profileRoot, "default"),
+    );
     const controller = yield* makeBrowserController(profileLease.profileRoot, {
+      interfaceMode: installedPluginMode ? "plugins" : "legacy",
+      initialPersistence: { value: initialPersistence },
       freezeEnabled: !rawCdp,
       extensions,
       profileLease,
     });
     yield* controller.start;
-    const pluginDirectory = argument("--plugin");
     const mcp = process.argv.includes("--mcp");
-    const grants = yield* createGrantStore({ directory: join(profileRoot, "hitchhiker-grants") });
+    const grants = yield* createGrantStore({
+      directory: join(profileLease.profileRoot, "hitchhiker-grants"),
+    });
     const recoveryFailure = Deferred.fail(
       fatalRecovery,
       new EngineError({
@@ -125,7 +149,7 @@ const program = Effect.gen(function* () {
     if (pluginDirectory && !safeMode) {
       const legacy = yield* readLegacyPlan;
       const inspector = yield* createPluginManager({
-        profileRoot,
+        profileRoot: profileLease.profileRoot,
         grants,
         safeMode: true,
         launch: () => Effect.never,
@@ -141,7 +165,6 @@ const program = Effect.gen(function* () {
           "A profile composition uses installed plugins; --plugin cannot replace it. Use a separate developer profile.",
         );
     }
-    const pluginExecutable = process.env.HITCHHIKER_PLUGIN_HOST;
     const composition =
       pluginExecutable !== undefined && !safeMode && pluginDirectory === undefined
         ? yield* createBrowserComposition({
@@ -160,7 +183,7 @@ const program = Effect.gen(function* () {
     ) {
       if (!isAbsolute(pluginExecutable))
         return yield* Effect.die("HITCHHIKER_PLUGIN_HOST must be absolute");
-      const management = yield* createPluginManagement();
+      const management = yield* createPluginManagement({ startPaused: true });
       const launch = yield* createInstalledPluginLauncher({
         executable: pluginExecutable,
         grants,
@@ -170,7 +193,7 @@ const program = Effect.gen(function* () {
         management,
       });
       const manager = yield* createPluginManager({
-        profileRoot,
+        profileRoot: profileLease.profileRoot,
         grants,
         launch,
         composition,
@@ -178,7 +201,7 @@ const program = Effect.gen(function* () {
         safeMode: process.argv.includes("--safe-mode") || pluginDirectory !== undefined,
         onRecoveryFailure: recoveryFailure,
       });
-      const artifacts = yield* createPluginArtifactStore(profileRoot);
+      const artifacts = yield* createPluginArtifactStore(profileLease.profileRoot);
       yield* management.bind(manager);
       stopInstalledPlugins = manager.plan().pipe(
         Effect.flatMap((current) =>
@@ -217,34 +240,32 @@ const program = Effect.gen(function* () {
             ),
           ),
       };
-      yield* manager
-        .restore()
-        .pipe(
-          Effect.catchCause(() =>
-            Effect.logError(
-              "Installed plugins could not be restored. The default browser remains available; --safe-mode skips plugin startup.",
-            ),
-          ),
+      const storage = yield* createPluginStorage({ profileRoot: profileLease.profileRoot });
+      const bundleDirectory =
+        process.env.HITCHHIKER_DEFAULT_PLUGINS ??
+        packagedDefaultPluginBundleDirectory(new URL(import.meta.url));
+      if (!isAbsolute(bundleDirectory))
+        return yield* Effect.die(
+          "HITCHHIKER_DEFAULT_PLUGINS must be an absolute trusted bundle directory",
         );
-      let reportedPluginMetadataError = false;
-      yield* Effect.gen(function* () {
-        const entries = yield* manager.list();
-        yield* controller.updatePluginControls(entries, (operation, id) => manager[operation](id));
-        reportedPluginMetadataError = false;
-      }).pipe(
-        Effect.catchCause(() =>
-          Effect.gen(function* () {
-            if (!reportedPluginMetadataError)
-              yield* Effect.logError(
-                "Installed plugin metadata is unavailable. Browser controls remain available.",
-              );
-            reportedPluginMetadataError = true;
+      yield* startDefaultPluginInterface({
+        mode: "installed",
+        persistence: initialPersistence,
+        controller,
+        bootstrap: (seed, placement) =>
+          runDefaultPluginBootstrap({
+            profileRoot: profileLease.profileRoot,
+            lease: profileLease,
+            manager,
+            artifacts,
+            grants,
+            storage,
+            seed,
+            placement,
+            loadBundle: loadDefaultPluginBundle(bundleDirectory),
           }),
-        ),
-        Effect.andThen(Effect.sleep(1000)),
-        Effect.forever,
-        Effect.forkScoped,
-      );
+      });
+      yield* management.enableMutations();
     }
     if (rawCdp) {
       const token = process.env.HITCHHIKER_CDP_TOKEN;
@@ -299,7 +320,7 @@ const program = Effect.gen(function* () {
           // cannot invoke recovery or select a grant/registry identity.
           yield* stopInstalledPlugins;
           if (composition) yield* composition.recover;
-          yield* controller.dispatch("interface.plugins");
+          if (!installedPluginMode) yield* controller.dispatch("interface.plugins");
         }).pipe(Effect.catchCause(() => recoveryFailure)),
       ),
       Effect.forkScoped,

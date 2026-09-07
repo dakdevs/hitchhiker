@@ -74,6 +74,37 @@ test("maps legacy state onto the current complete controller order", () => {
   );
 });
 
+test("maps a frozen V2 bootstrap seed without treating its legacy fields as live interface state", () => {
+  const v2: BrowserPersistence = {
+    configuration: defaultConfiguration,
+    interfaceConfiguration: { tabPlacement: "sidebar" },
+    interfaceState: createDefaultInterface("default"),
+    pages: [],
+    format: 2,
+    legacyBootstrapSeed: {
+      tabPlacement: "top",
+      selectedPageId: "second",
+      pageOrder: ["second", "first"],
+      pinnedPageIds: ["first"],
+    },
+  };
+  assert.deepEqual(
+    mapDefaultPluginState(v2, {
+      pageIds: ["first", "second", "third"],
+      pageOrder: ["third", "first", "second"],
+    }),
+    {
+      model: {
+        version: 1,
+        pagesRevision: 0,
+        selection: { kind: "page", pageId: "second" },
+        pageOrder: ["second", "first", "third"],
+      },
+      pins: { version: 1, pagesRevision: 0, pinnedPageIds: ["first"] },
+    },
+  );
+});
+
 test("seeds empty runtime storage and preserves user-owned values", async () => {
   const profileRoot = await mkdtemp(join(tmpdir(), "hitchhiker-default-plugin-state-"));
   await mkdir(join(profileRoot, "profile"));

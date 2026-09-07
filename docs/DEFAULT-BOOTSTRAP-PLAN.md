@@ -3,8 +3,9 @@
 This is the remaining distribution startup migration, not a tab policy in the generic host. The
 live manager plan is implemented. The state-seeding, managed-grant and exact staged-install retry
 prerequisites, packaged bundle index and controller restoration barrier are published. The coordinator
-now passes its focused recovery tests, review and combined repository check. The runtime bundle
-reader is implemented with portable tests. Public management routes now have portable coverage; main startup cutover remains.
+now passes its focused recovery tests and review. The runtime bundle reader and public management
+routes have portable coverage. Normal installed-plugin startup is now wired; Native acceptance of that
+cutover remains open.
 
 ## Eligibility and ownership
 
@@ -14,8 +15,9 @@ Capture decoded legacy browser persistence under the profile lease before contro
 save newer state. Restore the same Chromium pages through the controller, then run manager recovery
 before bootstrap. Use the complete restored page inventory to prepare plugin state. The current
 `controller.start` finishes issuing restore requests but does not itself await every staged page
-lifecycle event. Await `controller.restored` before capturing that inventory or starting default
-workers; it settles after all initial requests and staged page events, persistence and rendering.
+lifecycle event. `startDefaultPluginInterface` awaits `controller.restoredPageInventory` before
+capturing that inventory or starting default workers; it settles after all initial requests and staged
+page events, persistence and rendering.
 Startup errors, host exit and controller closure fail pending waiters. Do not seed from a transient
 partial `controller.snapshot`.
 
@@ -91,20 +93,36 @@ bounded regular UTF-8 files through nofollow descriptors, checking fixed parent 
 file identity; it never evaluates code or stages profile artifacts while reading. Development callers may
 provide their explicit build directory. Tests use an isolated real build and relocated resource tree
 plus tampered, redirected, malformed and oversized payloads. The reader returns the coordinator's
-existing lazy bundle shape; main startup remains gated on the public management routes.
+existing lazy bundle shape, which normal startup now uses after management routes became available.
 The bundle and controller share the application distribution trust boundary. The index digest checks
 consistency, not publisher authenticity: this reader must not accept arbitrary downloaded bundles.
 Authenticating the whole application and its sealed resources remains part of the unfinished signing
 and notarization release gate. Development paths are explicitly trusted by their caller.
 
-The coordinator and its current fault-injection coverage are described below. Only wire it from
-`main.ts` once Settings/Plugins are functional through public composed plugin routes. Then remove
-legacy default-interface ownership from normal startup; retain only the minimal trusted recovery
-surface. Legacy tab fields may remain inert during migration but cannot stay authoritative.
+The coordinator is wired from `main.ts` after public presenter routes are available. Normal startup
+loads persistence under the profile write lease before creating the controller, starts the controller
+in installed-plugin mode, restores pages, and then invokes the coordinator. The generic controller
+persists browser configuration and pages in V2 while carrying a frozen legacy tab seed only for
+migration. That seed is removed only after a durable terminal `completed` or `abandoned` journal.
+Safe mode and developer `--plugin` bypass bootstrap and retain the V2 seed for a later normal launch.
+Normal startup requires an absolute `HITCHHIKER_PLUGIN_HOST`; it cannot silently select legacy UI.
+Legacy tab fields are not authoritative in installed-plugin mode; the host displays only its minimal
+trusted loading/recovery surface until composition publishes the presenter UI. Browser persistence
+flushes its file and parent directory before reporting success. If seed retirement fails after a
+terminal journal, the seed remains conservatively stored, and that terminal journal prevents it from
+being imported again.
 
-Native acceptance still must prove startup/cutover and sidebar/top switching with retained page IDs,
-JavaScript document markers, storage values, at most four workers, and clean process shutdown. The
-current native timeout/shutdown evidence does not satisfy that gate.
+In a development launch, `HITCHHIKER_DEFAULT_PLUGINS` may select the trusted default-plugin build
+directory. It must be an absolute path. Production uses the packaged resource directory instead;
+there is no current-directory fallback.
+
+The native bootstrap seam fixture passes a migrated V1 two-page profile through the actual host:
+five plugins install, four workers run, the selected viewport is restored, V2 seed retirement and a
+completed journal are durable, and explicit window close reaches engine exit zero. Evidence:
+`work/native-default-startup.log` (1 pass, 0 skips; fixture 6.24 s, run 6.88 s). This is not full
+main-entrypoint or release acceptance, and does not prove a live public presenter switch. Earlier
+intermittent activation/shutdown failures remain regression concerns; the fixture recorded a host IPC
+request-queue-full message during shutdown despite exit zero.
 
 ## Prerequisite verification
 
@@ -136,8 +154,8 @@ and manager services with controlled failures and mock workers; they are not nat
 
 Read-only review accepted the material recovery decisions. Concurrent double-bootstrap calls and
 an actual filesystem sync failure remain useful additional coverage; promotion-gap tests simulate
-the durable state through the manager. Normal startup is deliberately not wired yet: it still needs
-functional public Settings/Plugins routes before the default cutover.
+the durable state through the manager. The portable coordinator tests do not prove the wired startup
+path in the Native host.
 
 The combined `pnpm check` passes 346 portable tests with 29 native-gated skips, including dependency
 validation, typecheck, lint, formatting and all builds. Evidence:
@@ -170,7 +188,9 @@ Accepted management mutations must run in an application-owned scope. Stopping t
 must not cancel the transaction that replaces it. A late-bound port is created before the installed
 launcher, bound once before restore, and fails closed while unbound. The dispatcher authorizes and
 decodes each request before admission. Developer plugins receive no port by default. Snapshot reads bypass the transaction mutex so activation can inspect state without deadlocking.
-Mutations are denied until activation completes and after stopping. Admitted work is bounded to 16
+Management mutations are paused through controller restoration, manager recovery and bootstrap, and
+are enabled only after bootstrap returns. They remain denied until activation completes and after
+stopping. Admitted work is bounded to 16
 commands and owned by the application scope; independent Deferred replies let caller cancellation
 leave work running while application shutdown interrupts it. Five port tests cover binding, caller
 cancellation, application shutdown, readiness and bounded admission. A native public-action switch
@@ -191,13 +211,7 @@ native acceptance.
 
 ## Public management verification
 
-The combined check now passes 370 portable tests, 29 native-gated skips and all builds, with
-dependency/type/lint/format validation (`work/public-plugin-management-check.log`). The new tests
-cover dispatcher authority and exact payloads, app-scope lifetime/admission, real manager-driven
-caller replacement, presenter routes and an older frozen grant cohort. Read-only integration and
-recovery reviews accepted the changes. A CDP EOF fixture request now uses a frozen test clock for
-its acknowledgment handshake; production engine deadlines and the actual EOF assertion are unchanged.
-
-Normal startup still does not invoke the coordinator. Public management routes no longer block that
-implementation, but actual Native public-action switching, startup/cutover and clean shutdown remain
-required. The built-in controller still supplies legacy default UI until that migration is verified.
+The initial full check after startup wiring passes 378 portable tests with 29 native-gated skips,
+including dependency validation, typecheck, lint, formatting, tests, and builds
+(`work/plugin-startup-cutover-check.log`). This is not Native acceptance. Native public-action
+switching, startup/cutover and clean shutdown remain required.

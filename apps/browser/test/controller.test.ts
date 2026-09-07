@@ -12,10 +12,11 @@ import {
 } from "@hitchhiker/runtime";
 import { defaultConfiguration } from "@hitchhiker/core";
 import { createDefaultInterface } from "@hitchhiker/default-interface";
-import { Deferred, Effect, Layer, PubSub, Schedule, Schema, Stream } from "effect";
+import { Deferred, Effect, Fiber, Layer, PubSub, Schedule, Schema, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { makeBrowserController, normalizeAddressDraft } from "../src/controller.ts";
 import { saveBrowserPersistence } from "../src/persistence.ts";
+import { browserMcpApi } from "../src/mcp.ts";
 
 const waitUntil = (label: string, condition: Effect.Effect<boolean, unknown>) =>
   condition.pipe(
@@ -76,6 +77,10 @@ test("restoration settles for an empty profile and propagates startup or host fa
               yield* controller.restored;
               assert.equal(commits, 1);
               assert.deepEqual((yield* controller.snapshot).pages, []);
+              assert.deepEqual(yield* controller.restoredPageInventory, {
+                pageIds: [],
+                pageOrder: [],
+              });
             } else {
               if (scenario === "startup-failure") yield* Effect.exit(controller.start);
               if (scenario === "host-exit") yield* Deferred.succeed(exited, 0);
@@ -90,11 +95,123 @@ test("restoration settles for an empty profile and propagates startup or host fa
                     ? "restore-exit"
                     : "restore-closed",
               );
+              const inventoryError = yield* controller.restoredPageInventory.pipe(
+                Effect.match({ onSuccess: () => undefined, onFailure: (error) => error }),
+              );
+              assert.equal(inventoryError?.code, error?.code);
             }
           }),
         ).pipe(Effect.timeout(3000)),
       );
     }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("plugin interface mode keeps page lifecycle while withholding legacy UI and retiring its V1 seed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-controller-"));
+  try {
+    await Effect.runPromise(
+      saveBrowserPersistence(directory, {
+        configuration: defaultConfiguration,
+        interfaceConfiguration: { tabPlacement: "top" },
+        interfaceState: {
+          ...createDefaultInterface("default"),
+          selectedPageId: "restored",
+          pageOrder: ["restored"],
+          pinnedPageIds: ["restored"],
+        },
+        pages: [{ id: "restored", url: "https://restored.test/", title: "Restored" }],
+      }),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const events = yield* PubSub.unbounded<EngineEvent>();
+          const commits: unknown[] = [];
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({ event: "host.ready", params: { pageBrowserGeneration: true } }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(events),
+            request: (method, params = {}) =>
+              Effect.gen(function* () {
+                if (method !== "pages.open" || typeof params.id !== "string") return {};
+                yield* PubSub.publish(events, {
+                  event: "pages.created",
+                  params: { pageId: params.id, generation: 1 },
+                });
+                yield* PubSub.publish(events, {
+                  event: "pages.documentCommitted",
+                  params: { pageId: params.id, generation: 1 },
+                });
+                yield* PubSub.publish(events, {
+                  event: "pages.navigationChanged",
+                  params: {
+                    pageId: params.id,
+                    generation: 1,
+                    url: params.url,
+                    loading: false,
+                    canGoBack: false,
+                    canGoForward: false,
+                  },
+                });
+                return {};
+              }),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const controller = yield* makeBrowserController(directory, {
+            interfaceMode: "plugins",
+          }).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(
+                  NativeSurface,
+                  NativeSurface.of({
+                    commit: (surface) =>
+                      Effect.sync(() => commits.push(surface)).pipe(Effect.as(commits.length)),
+                    events: Stream.empty,
+                  }),
+                ),
+              ),
+            ),
+          );
+          yield* controller.start;
+          const mcp = browserMcpApi(controller);
+          assert.equal(mcp.customization, undefined);
+          assert.equal((yield* Effect.exit(mcp.setTabPlacement("top")))._tag, "Failure");
+
+          yield* controller.restored;
+          const recovery = JSON.stringify(commits.at(-1));
+          assert.match(recovery, /plugin-recovery-status/);
+          assert.doesNotMatch(recovery, /interface\.settings|browser\.new-page|plugin-management/);
+          const beforeDispatch = commits.length;
+          yield* controller.dispatch("interface.settings");
+          assert.equal(commits.length, beforeDispatch);
+
+          yield* controller.openPage("https://opened.test/");
+          yield* waitUntil(
+            "generic page opening in plugin mode",
+            controller.snapshot.pipe(Effect.map((snapshot) => snapshot.pages.length === 2)),
+          );
+          assert.deepEqual(
+            (yield* controller.snapshot).pages.map((page) => page.id),
+            ["restored", (yield* controller.snapshot).pages[1]!.id],
+          );
+
+          yield* controller.retireLegacyBootstrapSeed();
+          const persisted = JSON.parse(
+            yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+          );
+          assert.equal(persisted.version, 2);
+          assert.equal("legacyBootstrapSeed" in persisted, false);
+        }),
+      ),
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -186,6 +303,7 @@ test("restores a complete session before its first persistence and render", asyn
             Effect.andThen(Deferred.succeed(restorationObserved, undefined)),
             Effect.forkScoped,
           );
+          const inventory = yield* controller.restoredPageInventory.pipe(Effect.forkScoped);
           yield* waitUntil(
             "restored page opens",
             Effect.sync(() => opened.length === 3),
@@ -202,6 +320,7 @@ test("restores a complete session before its first persistence and render", asyn
           assert.deepEqual(opened, ["first", "second", "third"]);
           assert.equal(commits.length, 0, "partial restored pages must not render");
           assert.equal(yield* Deferred.isDone(restorationObserved), false);
+          assert.equal(inventory.pollUnsafe(), undefined, "partial pages must not seed plugins");
           assert.deepEqual(
             yield* Effect.promise(() => readFile(join(directory, "browser-state.json"))),
             initialPersistence,
@@ -226,6 +345,10 @@ test("restores a complete session before its first persistence and render", asyn
             (yield* controller.snapshot).pages.map((page) => page.id),
             ["first", "second", "third"],
           );
+          assert.deepEqual(yield* Fiber.join(inventory), {
+            pageIds: ["first", "second", "third"],
+            pageOrder: ["first", "second", "third"],
+          });
           yield* waitUntil(
             "completed restore persistence",
             Effect.promise(

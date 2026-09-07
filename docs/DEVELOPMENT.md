@@ -2,17 +2,41 @@
 
 Hitchhiker is public source under active development, not a signed release. Run commands from the
 repository root with Node 24.19.0 and pnpm 11.24.0. Start with `pnpm install --frozen-lockfile`,
-`pnpm build`, and the [native host build](../apps/host-probe/README.md).
+`pnpm build`, the [native host build](../apps/host-probe/README.md), and the
+[PluginHost build](../apps/plugin-host/README.md).
 
 ```sh
 export HITCHHIKER_NATIVE_BINARY="$PWD/work/host-probe/build/Release/hitchhiker-probe.app/Contents/MacOS/hitchhiker-probe"
+export HITCHHIKER_PLUGIN_HOST="$PWD/work/plugin-host/build/PluginHost.app/Contents/MacOS/plugin-host"
+export HITCHHIKER_DEFAULT_PLUGINS="$PWD/apps/default-plugins/dist"
 pnpm --filter @hitchhiker/browser dev
 ```
 
 The default profile lives at `~/Library/Application Support/Hitchhiker/profiles/default`. Use an
 absolute `--profile-root=/path/to/test-profile` for experiments. Chromium owns its cookies, storage,
-and extensions; Hitchhiker stores browser configuration, page order, pins, and selection separately.
-The current launcher operates one profile per process. Profile-picker UI remains unfinished.
+and extensions; Hitchhiker persists browser configuration and pages. The current launcher operates
+one profile per process. Profile-picker UI remains unfinished.
+
+## Installed default-plugin startup
+
+Normal startup requires `HITCHHIKER_PLUGIN_HOST` to name an absolute PluginHost executable; it does
+not silently fall back to the legacy interface. Only `--safe-mode` and developer `--plugin` launches
+use that legacy path. Normal startup loads persistence under the profile lease, restores pages, then
+boots the default plugin plan. It uses V2 persistence for generic configuration and pages. A frozen
+legacy tab seed is eligible for import only until the default bootstrap journal reaches a durable
+terminal state; a failed retirement keeps it stored conservatively but cannot reimport it. Safe mode
+and developer `--plugin` launches preserve an eligible seed for a later normal launch.
+
+During this startup the host shows a minimal trusted loading/recovery surface. The composed default
+presenter owns the normal browser UI and tab policy. Plugin management snapshots are available during
+activation, but enable, disable, rollback, removal, and presenter replacement stay unavailable until
+bootstrap finishes.
+
+For local development, `HITCHHIKER_DEFAULT_PLUGINS` can override the bundled default artifacts with
+an absolute trusted build directory. Production resolves its bundle from the app resources. This
+cutover has passed a narrow actual-host bootstrap seam fixture, but not full main-entrypoint or release
+acceptance. Live public presenter switching, DevTools, broad APIs, extension UI, and shutdown
+regressions remain open; see [the bootstrap plan](DEFAULT-BOOTSTRAP-PLAN.md) for the evidence.
 
 ## Local grants
 
@@ -38,11 +62,20 @@ Set `HITCHHIKER_MCP_TOKEN` to the issued credential, then launch the browser wit
 MCP client that supports local stdio servers. Point it at Node and `apps/browser/src/main.ts`; include
 `--experimental-strip-types`, `--mcp`, and any profile-root argument. Build workspace packages first.
 Standard output is exclusively JSON-RPC. This launcher starts the browser process; it does not attach
-to another running instance using the same profile.
+to another running instance using the same profile. A normal MCP launch uses the same absolute
+`HITCHHIKER_NATIVE_BINARY`, `HITCHHIKER_PLUGIN_HOST`, and
+`HITCHHIKER_DEFAULT_PLUGINS="$PWD/apps/default-plugins/dist"` environment as the quickstart.
 
-The current tools list/open/navigate/close pages, get/set configuration, and select sidebar/top tabs.
-With `HITCHHIKER_PLUGIN_HOST` configured, five additional tools list, install/update, enable, disable,
-and roll back plugins. They check durable grants on every call.
+The current tools list/open/navigate/close pages and get/set generic configuration. With
+`HITCHHIKER_PLUGIN_HOST` configured, five additional tools list, install/update, enable, disable, and
+roll back plugins. They check durable grants on every call.
+
+In normal installed-plugin mode, `hitchhiker_tabs_set` is rejected: tab presentation is owned by the
+plugin composition plan. Use the public plugin-plan and presenter replacement controls instead. The
+legacy `hitchhiker_customization_export` and `hitchhiker_customization_import` tools are omitted in
+this mode because their V1 recipes encode controller-owned tab placement. They remain available only
+on legacy safe/developer launches; generic configuration and public plugin-plan operations remain
+available in normal mode.
 
 Three scoped DOM tools operate on the top document of an HTTP(S) page:
 
