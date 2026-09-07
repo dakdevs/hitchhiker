@@ -8,6 +8,6 @@ Build it from the repository root:
 pnpm exec turbo run build --filter=@hitchhiker/devtools-plugin
 ```
 
-Start the browser with the normal plugin-host environment from `docs/DEVELOPMENT.md`, then install `dist/plugin.js` with `hitchhiker.plugin.json`. Its grant must name principal `default-devtools` and include `pages.list`, `devtools.manage`, and `ui.compose` for the target profile.
+Start the browser with the normal plugin-host environment from `docs/DEVELOPMENT.md`, then install `dist/plugin.js` with `hitchhiker.plugin.json`. Its grant must name principal `devtools-workbench` and include `pages.list`, `devtools.manage`, and `ui.compose` for the target profile.
 
-The plugin is intended as a default feature, but it is **not yet included** in the frozen default-plugin distribution. Its default-bundle integration and the fifth isolated worker remain pending.
+This standalone workbench remains independently installable. The compact default DevTools toolbar is distributed separately with the default-plugin bundle.

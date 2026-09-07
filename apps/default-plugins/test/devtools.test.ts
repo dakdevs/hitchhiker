@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { DevToolsStatus, Json, PluginApi, ServiceSnapshot } from "@hitchhiker/plugin-sdk";
-import type { NativeNode, Surface } from "@hitchhiker/ui";
+import { design, type NativeNode, type Surface } from "@hitchhiker/ui";
 
 import { createDevToolsPlugin } from "../src/devtools.ts";
 
@@ -43,6 +43,7 @@ const fakeApi = () => {
   let modelValue: Json = model({ kind: "page", pageId: "page-a" });
   let failShow = false;
   let failModelRead = false;
+  let colorScheme: "light" | "dark" = "light";
   const calls: string[] = [];
   const statuses = new Map<string, DevToolsStatus>([
     ["page-a", state("page-a", "closed")],
@@ -78,7 +79,13 @@ const fakeApi = () => {
       reload: unexpected,
       stop: unexpected,
     },
-    configuration: { get: unexpected, set: unexpected },
+    configuration: {
+      get: async () => {
+        calls.push("configuration.get");
+        return { colorScheme, sleepAfterMs: 300_000, alwaysAwakeOrigins: [] };
+      },
+      set: unexpected,
+    },
     devtools: {
       status: async (pageId: string) => {
         calls.push(`status:${pageId}`);
@@ -130,6 +137,9 @@ const fakeApi = () => {
     setFailModelRead(value: boolean) {
       failModelRead = value;
     },
+    setColorScheme(value: "light" | "dark") {
+      colorScheme = value;
+    },
   };
 };
 
@@ -138,7 +148,13 @@ test("DevTools toolbar uses only the model service and public inspector calls", 
   const plugin = createDevToolsPlugin();
   await plugin.activate(fake.api);
 
-  assert.deepEqual(fake.calls, ["subscribe:model", "get:model", "status:page-a"]);
+  assert.deepEqual(fake.calls, [
+    "subscribe:model",
+    "subscribe:layout",
+    "configuration.get",
+    "get:model",
+    "status:page-a",
+  ]);
   const toolbar = fake.publications.at(-1)!;
   const rendered = nodes(toolbar.root);
   assert.ok(rendered.some((node) => node.key === "default-devtools-inspect"));
@@ -197,6 +213,23 @@ test("stale DevTools events refresh the current selection rather than their old 
     nodes(fake.publications.at(-1)!.root).some((node) => node.key === "default-devtools-close"),
     true,
   );
+});
+
+test("a layout notification refreshes compact controls with the current color scheme", async () => {
+  const fake = fakeApi();
+  const plugin = createDevToolsPlugin();
+  await plugin.activate(fake.api);
+  fake.setColorScheme("dark");
+  await plugin.onEvent?.("service.state", {
+    dependency: "layout",
+    providerGeneration: 1,
+    revision: 2,
+    available: true,
+  });
+  const inspect = nodes(fake.publications.at(-1)!.root).find(
+    (node) => node.key === "default-devtools-inspect",
+  );
+  assert.equal(inspect?.fg, design.dark.foreground);
 });
 
 test("an action reads the latest model and never mutates a cached page after model read failure", async () => {

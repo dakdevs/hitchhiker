@@ -102,14 +102,16 @@ test("rejects malformed, unknown, over-capacity, invalid UI, and service cyclic 
   await assert.rejects(
     prepare(
       {
-        enabled: ["plugin-a", "plugin-b", "plugin-c", "plugin-d", "plugin-e"],
+        enabled: ["plugin-a", "plugin-b", "plugin-c", "plugin-d", "plugin-e", "plugin-f"],
         serviceBindings: [],
       },
-      ["plugin-a", "plugin-b", "plugin-c", "plugin-d", "plugin-e"].map((id) => artifact(id)),
+      ["plugin-a", "plugin-b", "plugin-c", "plugin-d", "plugin-e", "plugin-f"].map((id) =>
+        artifact(id),
+      ),
     ),
     (error: unknown) => {
       assert(error instanceof InstalledPluginPlanError);
-      assert.match(error.message, /exceeds four runnable plugins/);
+      assert.match(error.message, /exceeds 5 runnable plugins/);
       return true;
     },
   );

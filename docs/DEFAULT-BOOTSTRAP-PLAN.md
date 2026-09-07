@@ -7,6 +7,14 @@ now passes its focused recovery tests and review. The runtime bundle reader and 
 routes have portable coverage. Normal installed-plugin startup is now wired; Native acceptance of that
 cutover remains open.
 
+## Current cohort
+
+Fresh eligible profiles now use V2: six artifacts, five enabled workers, and a separate DevTools
+toolbar contribution. The manager limit is five for all plugins. V1 pending journals finish their
+frozen five-artifact/four-worker plan; V1 terminal journals remain terminal. The V1 journal details
+and checkpoint evidence below are retained for recovery compatibility. See
+[DevTools V2 integration](DEVTOOLS-PLAN.md#default-cohort-v2-implementation) for the current recipe.
+
 ## Eligibility and ownership
 
 Run only in normal installed-plugin mode, before exposing MCP or interactive management actions.
@@ -28,7 +36,7 @@ An existing customized profile gets a terminal `abandoned` journal, with no plug
 Never use missing default IDs as a reason to reinstall them.
 
 The coordinator uses public artifact, managed-grant, storage and manager APIs. It never writes
-`plugins.json`, calls private plugin operations, or reopens Chromium pages. The normal cohort is
+`plugins.json`, calls private plugin operations, or reopens Chromium pages. The V1 cohort is
 model, pins, layout and one presenter: five artifacts installed, four workers enabled. Default grants
 match the frozen bundled manifests exactly, have empty origin restrictions, and exclude raw CDP and
 full-control authority. The ordinary public capability checks still apply on every plugin call.

@@ -21,18 +21,20 @@ import type { PluginArtifactStore } from "./plugin-artifacts.ts";
 import type { PluginManager } from "./plugin-manager.ts";
 import type { ProfileWriteLease } from "./profile-write-lease.ts";
 
-const JournalId = "default-browser-v1";
-const JournalVersion = 1;
+const JournalId = "default-browser-v2";
+const JournalVersion = 2;
 const JournalLimit = 64 * 1024;
 const coordinatorLocks = new Map<string, Semaphore.Semaphore>();
 const poisonedProfiles = new Set<string>();
-const ids = [
+const previousIds = [
   "default-tab-model",
   "default-tab-pins",
   "default-browser-layout",
   "default-sidebar-tabs",
   "default-top-tabs",
 ] as const;
+const ids = [...previousIds, "default-devtools"] as const;
+const cohortIds = (version: 1 | 2) => (version === 1 ? previousIds : ids);
 type DefaultPluginId = (typeof ids)[number];
 type AbandonReason = "profile-customized" | "bootstrap-state-diverged";
 
@@ -60,6 +62,14 @@ const capabilities = {
     "plugins.read",
     "plugins.manage",
   ],
+  "default-devtools": [
+    "ui.compose",
+    "devtools.manage",
+    "pages.list",
+    "pages.manage",
+    "storage.local",
+    "configuration.read",
+  ],
 } satisfies Readonly<Record<DefaultPluginId, readonly Capability[]>>;
 
 // Previously published pending journals must finish with their frozen authority, never upgrade it.
@@ -81,7 +91,7 @@ const legacyCapabilities = {
     "storage.local",
     "configuration.write",
   ],
-} satisfies Readonly<Record<DefaultPluginId, readonly Capability[]>>;
+} satisfies Readonly<Record<(typeof previousIds)[number], readonly Capability[]>>;
 
 export class DefaultPluginBootstrapError extends Schema.TaggedError<DefaultPluginBootstrapError>()(
   "DefaultPluginBootstrapError",
@@ -112,15 +122,29 @@ export interface DefaultPluginBootstrapOptions {
   readonly developerPlugin?: boolean;
 }
 
-const planFor = (placement: "sidebar" | "top"): InstalledPluginPlanInput => {
+const planFor = (
+  placement: "sidebar" | "top",
+  version: 1 | 2 = JournalVersion,
+): InstalledPluginPlanInput => {
   const presenter = `default-${placement}-tabs`;
   return {
-    enabled: [DefaultTabModelPluginId, DefaultTabPinsPluginId, "default-browser-layout", presenter],
+    enabled: [
+      DefaultTabModelPluginId,
+      DefaultTabPinsPluginId,
+      "default-browser-layout",
+      presenter,
+      ...(version === 2 ? ["default-devtools"] : []),
+    ],
     composition: {
       layout: "default-browser-layout",
       slots: ["tabs", "toolbar", "content"].map((key) => ({
         key,
-        contributions: [{ pluginId: presenter, id: key }],
+        contributions: [
+          { pluginId: presenter, id: key },
+          ...(version === 2 && key === "toolbar"
+            ? [{ pluginId: "default-devtools", id: "toolbar" }]
+            : []),
+        ],
       })),
     },
     serviceBindings: [
@@ -142,6 +166,22 @@ const planFor = (placement: "sidebar" | "top"): InstalledPluginPlanInput => {
         provider: "default-browser-layout",
         service: "layout",
       },
+      ...(version === 2
+        ? [
+            {
+              consumer: "default-devtools",
+              dependency: "model",
+              provider: DefaultTabModelPluginId,
+              service: "model",
+            },
+            {
+              consumer: "default-devtools",
+              dependency: "layout",
+              provider: "default-browser-layout",
+              service: "layout",
+            },
+          ]
+        : []),
     ],
   } satisfies InstalledPluginPlanInput;
 };
@@ -165,6 +205,7 @@ const SeedSchema = Schema.Struct({
   }).annotate({ parseOptions: { onExcessProperty: "error" } }),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const CapabilitySchema = Schema.Literals([
+  "devtools.manage",
   "pages.list",
   "pages.manage",
   "ui.compose",
@@ -186,8 +227,8 @@ const DescriptorSchema = Schema.Struct({
   grantKey: Schema.String,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const PendingSchema = Schema.Struct({
-  version: Schema.Literal(JournalVersion),
-  id: Schema.Literal(JournalId),
+  version: Schema.Literals([1, 2]),
+  id: Schema.Literals(["default-browser-v1", "default-browser-v2"]),
   state: Schema.Literal("pending"),
   placement: Schema.Literals(["sidebar", "top"]),
   artifacts: Schema.Array(DescriptorSchema).check(Schema.isMaxLength(ids.length)),
@@ -201,14 +242,14 @@ const PendingSchema = Schema.Struct({
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const JournalSchema = Schema.Union([
   Schema.Struct({
-    version: Schema.Literal(JournalVersion),
-    id: Schema.Literal(JournalId),
+    version: Schema.Literals([1, 2]),
+    id: Schema.Literals(["default-browser-v1", "default-browser-v2"]),
     state: Schema.Literal("completed"),
     revision: RevisionSchema,
   }).annotate({ parseOptions: { onExcessProperty: "error" } }),
   Schema.Struct({
-    version: Schema.Literal(JournalVersion),
-    id: Schema.Literal(JournalId),
+    version: Schema.Literals([1, 2]),
+    id: Schema.Literals(["default-browser-v1", "default-browser-v2"]),
     state: Schema.Literal("abandoned"),
     reason: Schema.Literals(["profile-customized", "bootstrap-state-diverged"]),
   }).annotate({ parseOptions: { onExcessProperty: "error" } }),
@@ -239,24 +280,34 @@ const decodeJournal = (value: unknown): Journal | undefined => {
   const decoded = decodeJournalSchema(value);
   if (Option.isNone(decoded)) return undefined;
   const journal = decoded.value;
+  if (journal.id !== `default-browser-v${journal.version}`) return undefined;
+  const expectedIds: readonly DefaultPluginId[] = cohortIds(journal.version);
   if (journal.state === "completed")
-    return journal.revision === ids.length + 1 ? journal : undefined;
+    return journal.revision === expectedIds.length + 1 ? journal : undefined;
   if (journal.state === "abandoned") return journal;
+  const currentAuthority = journal.artifacts.every((descriptor) =>
+    same(descriptor.capabilities, capabilities[descriptor.id]),
+  );
+  const legacyAuthority =
+    journal.version === 1 &&
+    journal.artifacts.every(
+      (descriptor) =>
+        descriptor.id !== "default-devtools" &&
+        same(descriptor.capabilities, legacyCapabilities[descriptor.id]),
+    );
   if (
-    journal.artifacts.length !== ids.length ||
+    journal.artifacts.length !== expectedIds.length ||
     !journal.artifacts.every(
       (descriptor, index) =>
-        descriptor.id === ids[index] &&
-        descriptor.grantKey === `default-bootstrap/1/${descriptor.id}`,
+        descriptor.id === expectedIds[index] &&
+        descriptor.grantKey === `default-bootstrap/${journal.version}/${descriptor.id}`,
     ) ||
-    ![capabilities, legacyCapabilities].some((cohort) =>
-      journal.artifacts.every((descriptor) => same(descriptor.capabilities, cohort[descriptor.id])),
-    ) ||
-    !same(journal.plan, planFor(journal.placement)) ||
+    !(currentAuthority || legacyAuthority) ||
+    !same(journal.plan, planFor(journal.placement, journal.version)) ||
     journal.expectedRevision !== journal.installedPrefix.length ||
-    !journal.installedPrefix.every((id, index) => id === ids[index]) ||
+    !journal.installedPrefix.every((id, index) => id === expectedIds[index]) ||
     ((journal.storagePresent.model || journal.storagePresent.pins) &&
-      journal.installedPrefix.length !== ids.length) ||
+      journal.installedPrefix.length !== expectedIds.length) ||
     (journal.storagePresent.pins && !journal.storagePresent.model)
   )
     return undefined;
@@ -466,10 +517,14 @@ const writeJournal = (root: string, lease: ProfileWriteLease, journal: Journal) 
     );
 };
 
-const abandon = (options: DefaultPluginBootstrapOptions, reason: AbandonReason) =>
+const abandon = (
+  options: DefaultPluginBootstrapOptions,
+  reason: AbandonReason,
+  journal?: Journal,
+) =>
   writeJournal(options.profileRoot, options.lease, {
-    version: JournalVersion,
-    id: JournalId,
+    version: journal?.version ?? JournalVersion,
+    id: journal?.id ?? JournalId,
     state: "abandoned",
     reason,
   });
@@ -545,7 +600,7 @@ const installationsMatch = Effect.fn("DefaultPluginBootstrap.inspectInstallation
     listed.length !== count ||
     listed.some(
       (plugin, index) =>
-        plugin.id !== ids[index] ||
+        plugin.id !== pending.artifacts[index]?.id ||
         plugin.hash !== pending.artifacts[index]?.hash ||
         plugin.enabled !== enabled.has(plugin.id) ||
         plugin.removing === true,
@@ -619,7 +674,7 @@ const seedOwner = Effect.fn("DefaultPluginBootstrap.seedOwner")(function* (
   if (after.revision === 0) return yield* fail("Default plugin storage CAS conflict");
 });
 
-/** Serial, profile-lease-bound migration from the legacy browser surface to five managed plugins. */
+/** Serial, profile-lease-bound migration into a versioned set of managed default plugins. */
 export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions) => {
   const lock = coordinatorLocks.get(options.profileRoot) ?? Semaphore.makeUnsafe(1);
   coordinatorLocks.set(options.profileRoot, lock);
@@ -664,7 +719,7 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
                   id,
                   hash: artifact.hash,
                   capabilities: capabilities[id],
-                  grantKey: `default-bootstrap/1/${id}`,
+                  grantKey: `default-bootstrap/${JournalVersion}/${id}`,
                 },
               ]
             : [];
@@ -691,6 +746,7 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
 
       if (journal.state !== "pending")
         return yield* fail("Bootstrap journal state changed unexpectedly");
+      const activeIds = cohortIds(journal.version);
       yield* verifyFrozenArtifacts(options.artifacts, journal.artifacts);
       const grants = yield* ensureManagedGrants(options.grants, journal.artifacts);
       const disabled = new Set<string>();
@@ -703,7 +759,7 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
           Effect.mapError(() => fail("Could not inspect default plugin storage")),
         );
         if (
-          journal.installedPrefix.length !== ids.length ||
+          journal.installedPrefix.length !== activeIds.length ||
           !journal.storagePresent.model ||
           !journal.storagePresent.pins ||
           !presence.model ||
@@ -712,16 +768,16 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
             options.manager,
             journal,
             grants,
-            ids.length,
+            activeIds.length,
             new Set(journal.plan.enabled),
           ))
         ) {
-          yield* abandon(options, "bootstrap-state-diverged");
+          yield* abandon(options, "bootstrap-state-diverged", journal);
           return;
         }
         yield* writeJournal(options.profileRoot, options.lease, {
-          version: JournalVersion,
-          id: JournalId,
+          version: journal.version,
+          id: journal.id,
           state: "completed",
           revision: current.revision,
         }).pipe(Effect.mapError((error) => fail(error.message)));
@@ -729,24 +785,24 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
       }
 
       if (
-        journal.installedPrefix.length < ids.length &&
+        journal.installedPrefix.length < activeIds.length &&
         isEmptyPlan(current, journal.expectedRevision + 1)
       ) {
         const nextLength = journal.installedPrefix.length + 1;
         if (!(yield* installationsMatch(options.manager, journal, grants, nextLength, disabled))) {
-          yield* abandon(options, "bootstrap-state-diverged");
+          yield* abandon(options, "bootstrap-state-diverged", journal);
           return;
         }
         journal = {
           ...journal,
           expectedRevision: current.revision,
-          installedPrefix: ids.slice(0, nextLength),
+          installedPrefix: activeIds.slice(0, nextLength),
         };
         yield* writeJournal(options.profileRoot, options.lease, journal).pipe(
           Effect.mapError((error) => fail(error.message)),
         );
       } else if (!isEmptyPlan(current, journal.expectedRevision)) {
-        yield* abandon(options, "bootstrap-state-diverged");
+        yield* abandon(options, "bootstrap-state-diverged", journal);
         return;
       }
 
@@ -759,7 +815,7 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
           disabled,
         ))
       ) {
-        yield* abandon(options, "bootstrap-state-diverged");
+        yield* abandon(options, "bootstrap-state-diverged", journal);
         return;
       }
 
@@ -771,7 +827,7 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
           .plan()
           .pipe(Effect.mapError((error) => fail(error.message)));
         if (!isEmptyPlan(beforeInstall, journal.expectedRevision)) {
-          yield* abandon(options, "bootstrap-state-diverged");
+          yield* abandon(options, "bootstrap-state-diverged", journal);
           return;
         }
         yield* options.manager
@@ -784,13 +840,13 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
           !isEmptyPlan(afterInstall, journal.expectedRevision + 1) ||
           !(yield* installationsMatch(options.manager, journal, grants, index + 1, disabled))
         ) {
-          yield* abandon(options, "bootstrap-state-diverged");
+          yield* abandon(options, "bootstrap-state-diverged", journal);
           return;
         }
         journal = {
           ...journal,
           expectedRevision: afterInstall.revision,
-          installedPrefix: ids.slice(0, index + 1),
+          installedPrefix: activeIds.slice(0, index + 1),
         };
         yield* writeJournal(options.profileRoot, options.lease, journal).pipe(
           Effect.mapError((error) => fail(error.message)),
@@ -804,7 +860,7 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
         (journal.storagePresent.model && !beforeStorage.model) ||
         (journal.storagePresent.pins && !beforeStorage.pins)
       ) {
-        yield* abandon(options, "bootstrap-state-diverged");
+        yield* abandon(options, "bootstrap-state-diverged", journal);
         return;
       }
       if (!journal.storagePresent.model) {
@@ -834,9 +890,9 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
         !isEmptyPlan(current, journal.expectedRevision) ||
         !afterStorage.model ||
         !afterStorage.pins ||
-        !(yield* installationsMatch(options.manager, journal, grants, ids.length, disabled))
+        !(yield* installationsMatch(options.manager, journal, grants, activeIds.length, disabled))
       ) {
-        yield* abandon(options, "bootstrap-state-diverged");
+        yield* abandon(options, "bootstrap-state-diverged", journal);
         return;
       }
 
@@ -849,16 +905,16 @@ export const runDefaultPluginBootstrap = (options: DefaultPluginBootstrapOptions
           options.manager,
           journal,
           grants,
-          ids.length,
+          activeIds.length,
           new Set(journal.plan.enabled),
         ))
       ) {
-        yield* abandon(options, "bootstrap-state-diverged");
+        yield* abandon(options, "bootstrap-state-diverged", journal);
         return;
       }
       yield* writeJournal(options.profileRoot, options.lease, {
-        version: JournalVersion,
-        id: JournalId,
+        version: journal.version,
+        id: journal.id,
         state: "completed",
         revision: promoted.revision,
       }).pipe(Effect.mapError((error) => fail(error.message)));

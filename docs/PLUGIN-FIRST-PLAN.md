@@ -319,7 +319,9 @@ and production builds.
 
 Build actual isolated SDK artifacts for tab model, pins, layout, sidebar and top presentation.
 Canonical service contract files determine manifest digests; feature schemas stay in the plugin
-package. The normal cohort uses four workers: layout/model/pins/one presenter. Both presenters ship.
+package. The original V1 cohort uses four workers: layout/model/pins/one presenter. Both presenters ship.
+V2 adds a separate DevTools plugin and raises the public worker limit to five; see
+[the current integration evidence](DEVTOOLS-PLAN.md#v2-integration-evidence).
 Use bounded snapshot restart and storage conflict reconciliation. Keep profile migration, live plan
 switching and functional Settings/Plugins routing as explicit cutover gates; do not remove the old
 interface or silently replace user profiles before those gates are implemented. This artifact stage

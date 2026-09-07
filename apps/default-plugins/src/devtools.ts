@@ -31,12 +31,13 @@ export const createDevToolsPlugin = (): Plugin => {
   let model: TabStateValue | undefined;
   let status: DevToolsStatus | undefined;
   let error: string | undefined;
+  let dark = false;
   let tail: Promise<void> = Promise.resolve();
 
   const publish = async (): Promise<void> => {
     if (!api) throw new Error("DevTools plugin has not activated");
     const pageId = selectedPageId(model);
-    const colors = design.light;
+    const colors = dark ? design.dark : design.light;
     const controls =
       pageId === undefined
         ? []
@@ -56,13 +57,15 @@ export const createDevToolsPlugin = (): Plugin => {
                 ]
               : []),
           ];
+    const activeStatus =
+      pageId !== undefined && status !== undefined && status.state !== "closed"
+        ? [text("default-devtools-status", statusLabel(status, pageId), { fg: colors.muted })]
+        : [];
     const surface: Omit<Surface, "identity"> = {
       root: row(
         "default-devtools-toolbar",
         [
-          text("default-devtools-status", statusLabel(status, pageId), {
-            fg: error === undefined ? colors.muted : colors.foreground,
-          }),
+          ...activeStatus,
           ...controls,
           ...(error === undefined
             ? []
@@ -86,6 +89,7 @@ export const createDevToolsPlugin = (): Plugin => {
   const refresh = async (): Promise<void> => {
     if (!api) throw new Error("DevTools plugin has not activated");
     try {
+      dark = (await api.configuration.get()).colorScheme === "dark";
       const pageId = await readModel();
       status = pageId === undefined ? undefined : await api.devtools.status(pageId);
       error = undefined;
@@ -138,13 +142,15 @@ export const createDevToolsPlugin = (): Plugin => {
     async activate(host) {
       api = host;
       await api.services.subscribe("model");
+      await api.services.subscribe("layout");
       await enqueue(refresh);
     },
     onEvent(event, payload) {
       if (event === "service.state") {
         try {
           const changed = decode(ServiceStateEvent, payload);
-          if (changed.dependency === "model") return enqueue(refresh);
+          if (changed.dependency === "model" || changed.dependency === "layout")
+            return enqueue(refresh);
         } catch {
           // A malformed notification is not a reason to tear down this independent toolbar.
         }

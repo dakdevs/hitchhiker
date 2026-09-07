@@ -19,6 +19,7 @@ const ids = [
   "default-browser-layout",
   "default-sidebar-tabs",
   "default-top-tabs",
+  "default-devtools",
 ] as const;
 const placements = ["sidebar", "top"] as const;
 type Placement = (typeof placements)[number];
@@ -37,7 +38,7 @@ const PlanIndex = Schema.Struct({
   servicesSha256: Digest,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const BundleIndex = Schema.Struct({
-  format: Schema.Literal(1),
+  format: Schema.Literal(2),
   artifacts: Schema.Array(ArtifactIndex).check(Schema.isMaxLength(ids.length)),
   plans: Schema.Struct({ sidebar: PlanIndex, top: PlanIndex }).annotate({
     parseOptions: { onExcessProperty: "error" },
@@ -45,7 +46,7 @@ const BundleIndex = Schema.Struct({
   digest: Digest,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const Services = Schema.Struct({
-  bindings: Schema.Array(ServiceBindingSchema).check(Schema.isMaxLength(3)),
+  bindings: Schema.Array(ServiceBindingSchema).check(Schema.isMaxLength(5)),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 
 export class DefaultPluginBundleError extends Schema.TaggedError<DefaultPluginBundleError>()(
@@ -62,18 +63,26 @@ export const packagedDefaultPluginBundleDirectory = (controllerModule: URL): str
 const expectedPlan = (placement: Placement): InstalledPluginPlanInput => {
   const presenter = `default-${placement}-tabs`;
   return {
-    enabled: [ids[0], ids[1], ids[2], presenter],
+    enabled: [ids[0], ids[1], ids[2], presenter, ids[5]],
     composition: {
       layout: ids[2],
       slots: ["tabs", "toolbar", "content"].map((key) => ({
         key,
-        contributions: [{ pluginId: presenter, id: key }],
+        contributions:
+          key === "toolbar"
+            ? [
+                { pluginId: presenter, id: key },
+                { pluginId: ids[5], id: key },
+              ]
+            : [{ pluginId: presenter, id: key }],
       })),
     },
     serviceBindings: [
       { consumer: presenter, dependency: "model", provider: ids[0], service: "model" },
       { consumer: presenter, dependency: "pins", provider: ids[1], service: "pins" },
       { consumer: presenter, dependency: "layout", provider: ids[2], service: "layout" },
+      { consumer: ids[5], dependency: "model", provider: ids[0], service: "model" },
+      { consumer: ids[5], dependency: "layout", provider: ids[2], service: "layout" },
     ],
   };
 };

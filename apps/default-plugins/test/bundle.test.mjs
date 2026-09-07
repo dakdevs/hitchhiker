@@ -17,6 +17,7 @@ const artifactIds = [
   "default-browser-layout",
   "default-sidebar-tabs",
   "default-top-tabs",
+  "default-devtools",
 ];
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -32,7 +33,7 @@ test("build emits the fixed, digest-bound default plugin bundle", async () => {
     "repeated builds must preserve the index",
   );
   assert.deepEqual(Object.keys(index).sort(), ["artifacts", "digest", "format", "plans"]);
-  assert.equal(index.format, 1);
+  assert.equal(index.format, 2);
   assert.equal(
     index.digest,
     sha256(
@@ -83,20 +84,39 @@ test("build emits the fixed, digest-bound default plugin bundle", async () => {
     assert.equal(recipe.layout, "default-browser-layout");
     assert.deepEqual(
       recipe.slots.map((slot) => [slot.key, slot.contributions]),
-      ["tabs", "toolbar", "content"].map((key) => [key, [{ pluginId: presenter, id: key }]]),
-    );
-    assert.deepEqual(
-      serviceRecipe.bindings,
       [
-        ["model", "default-tab-model", "model"],
-        ["pins", "default-tab-pins", "pins"],
-        ["layout", "default-browser-layout", "layout"],
-      ].map(([dependency, provider, service]) => ({
-        consumer: presenter,
-        dependency,
-        provider,
-        service,
-      })),
+        ["tabs", [{ pluginId: presenter, id: "tabs" }]],
+        [
+          "toolbar",
+          [
+            { pluginId: presenter, id: "toolbar" },
+            { pluginId: "default-devtools", id: "toolbar" },
+          ],
+        ],
+        ["content", [{ pluginId: presenter, id: "content" }]],
+      ],
     );
+    assert.deepEqual(serviceRecipe.bindings, [
+      { consumer: presenter, dependency: "model", provider: "default-tab-model", service: "model" },
+      { consumer: presenter, dependency: "pins", provider: "default-tab-pins", service: "pins" },
+      {
+        consumer: presenter,
+        dependency: "layout",
+        provider: "default-browser-layout",
+        service: "layout",
+      },
+      {
+        consumer: "default-devtools",
+        dependency: "model",
+        provider: "default-tab-model",
+        service: "model",
+      },
+      {
+        consumer: "default-devtools",
+        dependency: "layout",
+        provider: "default-browser-layout",
+        service: "layout",
+      },
+    ]);
   }
 });

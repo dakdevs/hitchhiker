@@ -15,6 +15,7 @@ const artifactIds = [
   "default-browser-layout",
   "default-sidebar-tabs",
   "default-top-tabs",
+  "default-devtools",
 ];
 const placements = ["sidebar", "top"];
 
@@ -79,6 +80,23 @@ const artifacts = [
       { id: "pins", contract: contracts.pins, optional: true },
     ],
   })),
+  {
+    id: "default-devtools",
+    entry: "devtools-entry",
+    name: "Developer tools",
+    capabilities: [
+      "ui.compose",
+      "devtools.manage",
+      "pages.list",
+      "pages.manage",
+      "storage.local",
+      "configuration.read",
+    ],
+    requires: [
+      { id: "model", contract: contracts.model },
+      { id: "layout", contract: contracts.layout },
+    ],
+  },
 ];
 for (const { entry, ...manifest } of artifacts) {
   const destination = new URL(`${manifest.id}/`, out);
@@ -126,7 +144,13 @@ for (const placement of ["sidebar", "top"]) {
     layout: "default-browser-layout",
     slots: ["tabs", "toolbar", "content"].map((key) => ({
       key,
-      contributions: [{ pluginId: presenter, id: key }],
+      contributions:
+        key === "toolbar"
+          ? [
+              { pluginId: presenter, id: key },
+              { pluginId: "default-devtools", id: key },
+            ]
+          : [{ pluginId: presenter, id: key }],
     })),
   };
   const services = {
@@ -135,6 +159,18 @@ for (const placement of ["sidebar", "top"]) {
       { consumer: presenter, dependency: "pins", provider: "default-tab-pins", service: "pins" },
       {
         consumer: presenter,
+        dependency: "layout",
+        provider: "default-browser-layout",
+        service: "layout",
+      },
+      {
+        consumer: "default-devtools",
+        dependency: "model",
+        provider: "default-tab-model",
+        service: "model",
+      },
+      {
+        consumer: "default-devtools",
         dependency: "layout",
         provider: "default-browser-layout",
         service: "layout",
@@ -178,9 +214,11 @@ for (const placement of placements) {
   const recipe = JSON.parse(compositionBytes);
   const bindings = JSON.parse(servicesBytes);
   const expectedBindings = [
-    ["model", "default-tab-model", "model"],
-    ["pins", "default-tab-pins", "pins"],
-    ["layout", "default-browser-layout", "layout"],
+    [presenter, "model", "default-tab-model", "model"],
+    [presenter, "pins", "default-tab-pins", "pins"],
+    [presenter, "layout", "default-browser-layout", "layout"],
+    ["default-devtools", "model", "default-tab-model", "model"],
+    ["default-devtools", "layout", "default-browser-layout", "layout"],
   ];
   if (
     recipe.layout !== "default-browser-layout" ||
@@ -189,18 +227,25 @@ for (const placement of placements) {
     !recipe.slots.every(
       (slot, index) =>
         slot.key === ["tabs", "toolbar", "content"][index] &&
-        slot.contributions?.length === 1 &&
-        slot.contributions[0]?.pluginId === presenter &&
-        slot.contributions[0]?.id === slot.key,
+        ((slot.key === "toolbar" &&
+          slot.contributions?.length === 2 &&
+          slot.contributions[0]?.pluginId === presenter &&
+          slot.contributions[0]?.id === slot.key &&
+          slot.contributions[1]?.pluginId === "default-devtools" &&
+          slot.contributions[1]?.id === slot.key) ||
+          (slot.key !== "toolbar" &&
+            slot.contributions?.length === 1 &&
+            slot.contributions[0]?.pluginId === presenter &&
+            slot.contributions[0]?.id === slot.key)),
     ) ||
     !Array.isArray(bindings.bindings) ||
     bindings.bindings.length !== expectedBindings.length ||
     !bindings.bindings.every(
       (binding, index) =>
-        binding.consumer === presenter &&
-        binding.dependency === expectedBindings[index][0] &&
-        binding.provider === expectedBindings[index][1] &&
-        binding.service === expectedBindings[index][2],
+        binding.consumer === expectedBindings[index][0] &&
+        binding.dependency === expectedBindings[index][1] &&
+        binding.provider === expectedBindings[index][2] &&
+        binding.service === expectedBindings[index][3],
     )
   ) {
     throw new Error(`Unexpected ${placement} default plan`);
@@ -212,7 +257,7 @@ for (const placement of placements) {
     servicesSha256: sha256(servicesBytes),
   };
 }
-const index = { format: 1, artifacts: bundleArtifacts, plans };
+const index = { format: 2, artifacts: bundleArtifacts, plans };
 await writeFile(
   new URL("bundle.json", out),
   JSON.stringify({ ...index, digest: indexDigest(index) }, null, 2) + "\n",

@@ -77,7 +77,7 @@ test(
               directory: join(profile, "hitchhiker-grants"),
             });
             const credential = yield* grants.issue({
-              principal: "default-devtools",
+              principal: "devtools-workbench",
               profileId: "default",
               capabilities: ["pages.list", "devtools.manage", "ui.compose"],
               origins: [],

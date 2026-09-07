@@ -378,7 +378,7 @@ test("a sidebar replacement admitted through its management port survives the ca
   );
 });
 
-test("stale, over-capacity and revoked plans have no durable or worker side effects", async () => {
+test("five-worker plans are admitted, while a sixth and failed replacement preserve the live plan", async () => {
   await withProfile((root) =>
     Effect.runPromise(
       Effect.gen(function* () {
@@ -389,15 +389,24 @@ test("stale, over-capacity and revoked plans have no durable or worker side effe
           "third-plugin",
           "fourth-plugin",
           "fifth-plugin",
+          "bad-plugin",
         ])
           yield* f.stage(id);
         const initial = yield* f.manager.plan();
         const current = yield* f.manager.applyPlan(initial.revision, {
-          enabled: ["first-plugin"],
+          enabled: [
+            "first-plugin",
+            "second-plugin",
+            "third-plugin",
+            "fourth-plugin",
+            "fifth-plugin",
+          ],
           serviceBindings: [],
         });
+        assert.equal(f.active.size, 5);
+        assert.equal(f.peak(), 5);
         const before = yield* Effect.promise(() => readFile(path(root), "utf8"));
-        const generation = f.active.get("first-plugin");
+        const retained = new Map(f.active);
         const attempt = {
           enabled: [
             "first-plugin",
@@ -405,6 +414,7 @@ test("stale, over-capacity and revoked plans have no durable or worker side effe
             "third-plugin",
             "fourth-plugin",
             "fifth-plugin",
+            "bad-plugin",
           ],
           serviceBindings: [],
         };
@@ -414,22 +424,37 @@ test("stale, over-capacity and revoked plans have no durable or worker side effe
         );
         assert.match(
           (yield* f.manager.applyPlan(current.revision, attempt).pipe(Effect.flip)).message,
-          /four/,
+          /5/,
         );
-        f.denied.add("second-plugin");
+        assert.deepEqual(yield* f.manager.plan(), current);
+        assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
+        assert.deepEqual(f.active, retained);
+        f.failures.add("bad-plugin");
         assert(
           Exit.isFailure(
             yield* Effect.exit(
               f.manager.applyPlan(current.revision, {
-                enabled: ["first-plugin", "second-plugin"],
+                enabled: [
+                  "first-plugin",
+                  "second-plugin",
+                  "third-plugin",
+                  "fourth-plugin",
+                  "bad-plugin",
+                ],
                 serviceBindings: [],
               }),
             ),
           ),
         );
         assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
-        assert.equal(f.active.get("first-plugin"), generation);
-        assert.equal(f.active.size, 1);
+        assert.deepEqual(yield* f.manager.plan(), current);
+        assert.equal(f.active.size, 5);
+        assert.equal(f.active.has("bad-plugin"), false);
+        for (const id of ["first-plugin", "second-plugin", "third-plugin", "fourth-plugin"])
+          assert.equal(f.active.get(id), retained.get(id));
+        assert.equal(f.active.has("fifth-plugin"), true);
+        assert.equal((yield* readRegistry(root)).pendingPlan, undefined);
+        assert.equal(f.peak(), 5);
       }).pipe(Effect.scoped),
     ),
   );

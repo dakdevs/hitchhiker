@@ -15,6 +15,8 @@ export { InstalledPluginPlanInputSchema, InstalledPluginPlanSchema } from "@hitc
 export type { InstalledPluginPlanInput, InstalledPluginPlan } from "@hitchhiker/runtime";
 
 const Hash = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
+/** A single installed-plugin plan may run this many workers, regardless of origin. */
+export const MaxInstalledPluginWorkers = 5;
 // Keep plan admission compatible with durable manager revision metadata.
 const GrantId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
 export const InstalledPluginPlanArtifactSchema = Schema.Struct({
@@ -145,8 +147,8 @@ export const prepareInstalledPluginPlan = Effect.fn("Browser.prepareInstalledPlu
       })),
       plan.serviceBindings,
     ).pipe(Effect.mapError((error) => invalid(error.message)));
-    if (services.graph.plugins.length > 4)
-      return yield* invalid("Installed plan exceeds four runnable plugins");
+    if (services.graph.plugins.length > MaxInstalledPluginWorkers)
+      return yield* invalid(`Installed plan exceeds ${MaxInstalledPluginWorkers} runnable plugins`);
     const runnable = new Set(services.graph.plugins.map((plugin) => plugin.id));
     const owners = compositionOwners(plan.composition);
     const enabledUi = new Set(plan.enabled.filter((id) => hasUi(byId.get(id)!.manifest)));

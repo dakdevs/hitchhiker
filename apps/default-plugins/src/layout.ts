@@ -13,7 +13,7 @@ const renderLayout = (presentation: LayoutState["presentation"], dark: boolean) 
             "browser-layout",
             [
               column("tabs", [], { width: 280, bg: colors.sidebar }),
-              column("browser-main", [column("toolbar", []), column("content", [], { flex: 1 })], {
+              column("browser-main", [row("toolbar", []), column("content", [], { flex: 1 })], {
                 flex: 1,
                 bg: colors.canvas,
               }),
@@ -22,7 +22,7 @@ const renderLayout = (presentation: LayoutState["presentation"], dark: boolean) 
           )
         : column(
             "browser-layout",
-            [column("toolbar", []), column("tabs", []), column("content", [], { flex: 1 })],
+            [row("toolbar", []), column("tabs", []), column("content", [], { flex: 1 })],
             { flex: 1, bg: colors.canvas },
           ),
     bindings: [],

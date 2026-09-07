@@ -113,3 +113,46 @@ and this toolbar feature must use distinct installed identities before they can 
 
 The implementation checkpoint is published at `11bb9ca1410efd0cea5baff7985b4e9782a94491`;
 [exact-commit CI](https://github.com/dakdevs/hitchhiker/actions/runs/34110688643) passed.
+
+## Default cohort V2 implementation
+
+Fresh profiles will receive bundle format 2: six installed artifacts and five active workers,
+including `default-devtools` as a second compact toolbar contribution. Its six capabilities are
+`ui.compose`, `devtools.manage`, `pages.list`, `pages.manage`, `storage.local` and
+`configuration.read`. Model/layout bindings preserve provider authority containment and supply
+selection plus appearance invalidations. The standalone example becomes `devtools-workbench` so it
+can coexist with the default toolbar.
+
+The same durable journal path will decode explicitly correlated V1 and V2 identities. V1 pending
+journals retain five artifacts, their original capabilities, grant keys, plan and completion
+revision; V1 terminal journals remain terminal. New eligible profiles write V2 with six artifacts
+and a seventh-revision promotion. No existing customized, removed or terminal profile is upgraded
+automatically. Recovery uses frozen artifacts and does not read a new distribution payload.
+
+The installed-manager limit becomes five for all plugins, with sixth-worker denial and rollback
+coverage. This is an explicit bounded capacity change; the existing execution and memory limits
+remain enforced. Native fresh startup, inspector use through the composed plugin, retained pages,
+revocation and resource measurements are required before claiming default integration verified.
+
+## V2 integration evidence
+
+The real Native bootstrap fixture now passes with six installed artifacts and five running workers.
+Synthetic events use the committed, namespaced toolbar buttons to open and close the real Chromium
+inspector, reopen it and revoke its plugin grant. Revocation closes the inspector, both original
+pages remain, the V2 journal completes at revision 7, and the engine exits zero. This is the
+installed-startup seam, not a physical click or full application entrypoint test.
+
+`work/default-devtools-v2-native.log` records one pass with no skips using the disposable
+mock-Keychain wrapper. `work/default-devtools-v2-resources.json` samples worker processes every
+200 ms during that approximately five-second run: five workers were observed, with peak combined
+worker RSS of 32,288 KiB. This excludes Chromium and the controller; it does not establish a
+long-running idle, total-browser RAM or loading-performance benchmark. Native raster telemetry
+reports 135 ticks, 13 updates and 122 idle ticks. A request-queue-full diagnostic still appears
+during shutdown despite exit zero and remains an explicit regression concern. Production Keychain,
+physical UI, full application startup and broader performance acceptance remain open.
+
+The final V2 repository check passes 398 portable tests with 32 native-gated skips, plus dependency,
+type, lint, formatting and build checks (`work/default-devtools-v2-check.log`). The renamed standalone
+`devtools-workbench` also passes its real compiled-plugin fixture with one pass and no skips
+(`work/default-devtools-v2-workbench.log`). Both Native runs leave no host or plugin worker process.
+A separate read-only integration review found no concrete bootstrap, bundle or capacity blocker.

@@ -677,3 +677,11 @@ existing model requires `pages.list`, `pages.manage` and `storage.local` in addi
 direct `ui.compose`/`devtools.manage` authority. The factory uses no pages API, but a two-capability
 manifest cannot bind this provider under the current broker. Preserve that boundary during
 integration; old profiles must not silently adopt the expanded default grant.
+
+The V2 default cohort now bundles DevTools as its sixth artifact and fifth active plugin. The
+versioned bootstrap preserves frozen V1 recovery and terminal profiles without new grants. A real
+Native startup fixture passes composed inspector open/close, revocation cleanup, page retention
+and exit zero using a disposable mock-Keychain profile. Five workers were observed at 32,288 KiB
+peak combined RSS during the short fixture; this is not a full-browser performance claim.
+[The DevTools plan](DEVTOOLS-PLAN.md#v2-integration-evidence) records the scope and remaining
+Keychain, physical UI, full-entrypoint, shutdown-diagnostic and performance gaps.

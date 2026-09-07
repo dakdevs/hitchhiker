@@ -2,9 +2,11 @@
 
 This API passes portable contract tests and real Chromium lifecycle tests with a disposable
 mock-Keychain profile. A compiled plugin also passes against the actual plugin host and Native
-surface with synthetic toolbar events. Normal macOS Keychain startup is still unresolved, and
-DevTools is not yet part of the default distribution. See
-[the integration plan](DEVTOOLS-PLAN.md) for outstanding acceptance work.
+surface with synthetic toolbar events. The V2 default bundle passes a real Native startup fixture
+with five active plugins, inspector open/close and grant-revocation cleanup. These fixtures use a
+disposable mock-Keychain profile; full application-entrypoint and physical UI acceptance remain
+outstanding. Normal macOS Keychain startup is still unresolved. See [the integration plan](DEVTOOLS-PLAN.md) for outstanding
+acceptance work.
 
 ## Authority
 
@@ -46,11 +48,32 @@ inspector. Owner shutdown and grant revocation trigger cleanup; the host checks 
 leases and page/inspector identities before acting. Those private fields are not SDK arguments.
 Explicit `close` is intentionally profile-wide and can close an inspector opened by another caller.
 
+## Default bundle
+
+Fresh eligible profiles use bundle format 2. It installs six artifacts: the tab model, pins,
+layout, both alternate presenters, and `default-devtools`. A selected presentation activates the
+model, pins, layout, one presenter, and the DevTools toolbar: five isolated workers. The toolbar is
+a second contribution in the presenter's toolbar slot, after the presenter contribution. It reads
+the selected page from the model service, refreshes inspector status after model or layout changes,
+and uses `configuration.read` only to match the interface color scheme. It does not own page state
+or call page APIs.
+
+The model service provider has `pages.list`, `pages.manage`, and `storage.local`. The current
+service-authority containment rule requires a consumer's authority to contain its provider's
+authority, so `default-devtools` declares and receives those three capabilities in addition to
+`ui.compose`, profile-wide `devtools.manage`, and `configuration.read`. The extra page and storage
+capabilities permit the service binding; they do not expand the toolbar's module API use.
+
+Published V1 bootstrap journals retain their frozen artifact cohort and grants. They never acquire
+`default-devtools` or `devtools.manage` automatically. Completed, abandoned, removed, and custom
+plans likewise remain unchanged unless an explicit future migration authorizes a change.
+
 ## Build a replacement
 
-The [standalone example](../apps/devtools-plugin/src/index.ts) uses only the public SDK and shared UI
-components. Its manifest declares `pages.list`, `devtools.manage` and `ui.compose`: page discovery,
-inspection and Native presentation are separate capabilities. Build it from the repository root:
+The [standalone workbench](../apps/devtools-plugin/src/index.ts) (`devtools-workbench`) uses only the
+public SDK and shared UI components. Its manifest declares `pages.list`, `devtools.manage` and
+`ui.compose`: page discovery, inspection and Native presentation are separate capabilities. Build
+it from the repository root:
 
 ```sh
 pnpm install

@@ -9,12 +9,14 @@ import { NodeServices } from "@effect/platform-node";
 import { defaultConfiguration } from "@hitchhiker/core";
 import { createDefaultInterface } from "@hitchhiker/default-interface";
 import {
+  DevToolsStatusSchema,
   EngineConnection,
   NativeSurface,
   createGrantStore,
   createPluginStorage,
+  type SurfaceEvent,
 } from "@hitchhiker/runtime";
-import { Effect, Layer, Schedule, Schema } from "effect";
+import { Effect, Layer, PubSub, Schedule, Schema, Stream } from "effect";
 import { runDefaultPluginBootstrap } from "../src/default-plugin-bootstrap.ts";
 import { loadDefaultPluginBundle } from "../src/default-plugin-bundle.ts";
 import { startDefaultPluginInterface } from "../src/default-plugin-startup.ts";
@@ -30,6 +32,14 @@ import { acquireProfileWriteLease } from "../src/profile-write-lease.ts";
 const binary = process.env.HITCHHIKER_NATIVE_BINARY;
 const pluginHost = process.env.HITCHHIKER_PLUGIN_HOST;
 const artifactsRoot = fileURLToPath(new URL("../../default-plugins/dist/", import.meta.url));
+const ObservedSurface = Schema.Struct({ root: Schema.Unknown });
+const ObservedNode = Schema.Struct({
+  key: Schema.String,
+  kind: Schema.String,
+  label: Schema.optional(Schema.String),
+  action: Schema.optional(Schema.String),
+  children: Schema.optional(Schema.Array(Schema.Unknown)),
+});
 const ModelState = Schema.Struct({
   selection: Schema.Union([
     Schema.Struct({ kind: Schema.Literal("new-page") }),
@@ -48,7 +58,7 @@ const waitUntil = (label: string, condition: Effect.Effect<boolean, unknown>) =>
 test(
   "installed startup migrates V1 browser state into the default plugin interface",
   { skip: !binary || !pluginHost, timeout: 60_000 },
-  async () => {
+  async (context) => {
     const profile = await realpath(
       await mkdtemp(join(tmpdir(), "hitchhiker-native-default-startup-")),
     );
@@ -85,14 +95,29 @@ test(
           );
           yield* Effect.gen(function* () {
             const engine = yield* EngineConnection;
+            yield* engine.ready;
             const nativeSurface = yield* NativeSurface;
+            const input = yield* PubSub.unbounded<SurfaceEvent>();
+            let revision = 0;
+            const buttons = new Map<string, { key: string; action: string }>();
+            const collect = (value: unknown): void => {
+              const node = Schema.decodeUnknownSync(ObservedNode)(value);
+              if (node.kind === "button" && node.label !== undefined && node.action !== undefined)
+                buttons.set(node.label, { key: node.key, action: node.action });
+              node.children?.forEach(collect);
+            };
             let committed = "";
             const observedSurface = NativeSurface.of({
               ...nativeSurface,
+              events: Stream.merge(nativeSurface.events, Stream.fromPubSub(input)),
               commit: (surface) =>
                 nativeSurface.commit(surface).pipe(
-                  Effect.tap(() =>
+                  Effect.tap((next) =>
                     Effect.sync(() => {
+                      const decoded = Schema.decodeUnknownSync(ObservedSurface)(surface);
+                      revision = next;
+                      buttons.clear();
+                      collect(decoded.root);
                       committed = JSON.stringify(surface);
                     }),
                   ),
@@ -162,8 +187,8 @@ test(
             yield* management.enableMutations();
 
             const installed = yield* manager.list();
-            assert.equal(installed.length, 5);
-            assert.equal(installed.filter((entry) => entry.running).length, 4);
+            assert.equal(installed.length, 6);
+            assert.equal(installed.filter((entry) => entry.running).length, 5);
             const model = Schema.decodeUnknownSync(ModelState)(
               (yield* (yield* storage.forOwner("default-tab-model")).read()).value,
             );
@@ -185,6 +210,54 @@ test(
                 ),
               ),
             );
+            yield* waitUntil(
+              "default DevTools toolbar is composed",
+              Effect.sync(() => buttons.has("Inspect selected page")),
+            );
+            const press = (label: string) =>
+              Effect.gen(function* () {
+                const button = buttons.get(label);
+                assert.ok(button, `Missing composed button: ${label}`);
+                yield* PubSub.publish(input, {
+                  surfaceId: "main",
+                  revision,
+                  nodeId: button.key,
+                  event: "press",
+                  payload: { action: button.action },
+                });
+              });
+            const inspector = engine
+              .request("devtools.status", { pageId: "second" })
+              .pipe(Effect.flatMap(Schema.decodeUnknownEffect(DevToolsStatusSchema)));
+            yield* press("Inspect selected page");
+            yield* waitUntil(
+              "default DevTools opens real inspector",
+              inspector.pipe(Effect.map((value) => value.state === "open")),
+            );
+            yield* waitUntil(
+              "default DevTools close control appears",
+              Effect.sync(() => buttons.has("Close inspector")),
+            );
+            yield* press("Close inspector");
+            yield* waitUntil(
+              "default DevTools closes real inspector",
+              inspector.pipe(Effect.map((value) => value.state === "closed")),
+            );
+            yield* press("Inspect selected page");
+            yield* waitUntil(
+              "default DevTools reopens before revocation",
+              inspector.pipe(Effect.map((value) => value.state === "open")),
+            );
+            const devtoolsGrant = (yield* grants.list()).find(
+              (grant) => grant.principal === "default-devtools",
+            );
+            assert.ok(devtoolsGrant);
+            yield* grants.revoke(devtoolsGrant.id);
+            yield* waitUntil(
+              "revoking default plugin closes its inspector",
+              inspector.pipe(Effect.map((value) => value.state === "closed")),
+            );
+            assert.equal((yield* controller.snapshot).pages.length, 2);
             assert.equal(failedRecovery.value, false);
 
             const journal = JSON.parse(
@@ -196,6 +269,8 @@ test(
               ),
             );
             assert.equal(journal.state, "completed");
+            assert.equal(journal.version, 2);
+            assert.equal(journal.revision, 7);
             const persisted = JSON.parse(
               yield* Effect.promise(() =>
                 readFile(join(lease.profileRoot, "browser-state.json"), "utf8"),
@@ -220,6 +295,7 @@ test(
             ),
           );
         }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+        { signal: context.signal },
       );
     } finally {
       server.closeAllConnections();

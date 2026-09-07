@@ -22,6 +22,7 @@ const ids = [
   "default-browser-layout",
   "default-sidebar-tabs",
   "default-top-tabs",
+  "default-devtools",
 ];
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 let fixtureRoot: string;
@@ -98,7 +99,7 @@ test("reads a real isolated build after resource relocation and stages its compl
       );
       assert.deepEqual(
         plan.serviceBindings.map((binding) => binding.provider),
-        ids.slice(0, 3),
+        [ids[0], ids[1], ids[2], ids[0], ids[2]],
       );
     }
   }));

@@ -19,6 +19,7 @@ import { Clock, Deferred, Effect, Fiber, Option, Schema, Semaphore, Scope } from
 import { createPluginArtifactStore, type PluginArtifact } from "./plugin-artifacts.ts";
 import { planInstalledServices, requiredDependentClosure } from "./installed-service-plan.ts";
 import {
+  MaxInstalledPluginWorkers,
   InstalledPluginPlanSchema,
   InstalledPluginPlanInputSchema,
   prepareInstalledPluginPlan,
@@ -31,7 +32,6 @@ import {
 const RegistryName = "plugins.json";
 const MutationLockName = ".plugin-write-lock";
 const MaxPlugins = 16;
-const MaxRunning = 4;
 const RegistryLimit = 256 * 1024;
 const MutationLockTimeoutMs = 1_000;
 const MutationLockRetryMs = 25;
@@ -554,7 +554,8 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     plugin: StoredPlugin,
   ): Effect.fn.Return<void, PluginManagerError> {
     if (options.safeMode) return;
-    if (running.size >= MaxRunning) return yield* failure("At most four plugins may run");
+    if (running.size >= MaxInstalledPluginWorkers)
+      return yield* failure(`At most ${MaxInstalledPluginWorkers} plugins may run`);
     const artifact = yield* artifactFor(plugin, plugin.revision);
     if (
       (options.composition?.owners ?? options.compositionOwners) &&
@@ -665,7 +666,8 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     ).pipe(Effect.mapError((error) => failure(error.message)));
     if (requiredTarget && !plan.graph.order.includes(requiredTarget))
       return yield* failure("Required service provider is unavailable");
-    if (plan.graph.order.length > MaxRunning) return yield* failure("At most four plugins may run");
+    if (plan.graph.order.length > MaxInstalledPluginWorkers)
+      return yield* failure(`At most ${MaxInstalledPluginWorkers} plugins may run`);
     for (const id of plan.graph.order) {
       const entry = selected.get(id)!;
       yield* authorize(entry.artifact, entry.plugin.revision.grantId);

@@ -1,6 +1,6 @@
 {
-  "id": "default-devtools",
-  "name": "Developer tools",
+  "id": "devtools-workbench",
+  "name": "Developer tools workbench",
   "version": "1.0.0",
   "capabilities": ["pages.list", "devtools.manage", "ui.compose"]
 }
