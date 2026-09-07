@@ -41,6 +41,7 @@
 #include "include/wrapper/cef_closure_task.h"
 #include "include/wrapper/cef_helpers.h"
 #include "src/page_manager.h"
+#include "src/extension_review.h"
 
 namespace {
 
@@ -150,6 +151,32 @@ bool IsUuid(const std::string& value) {
   return true;
 }
 
+bool IsLowerHex(const std::string& value, size_t length) {
+  if (value.size() != length) return false;
+  for (char c : value) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  return true;
+}
+
+bool ReviewText(CefRefPtr<CefDictionaryValue> params, const char* key,
+                size_t maximum, std::string* result) {
+  return GetString(params, key, result) && !result->empty() && result->size() <= maximum &&
+         result->find('\0') == std::string::npos;
+}
+
+bool ReviewPermissions(CefRefPtr<CefDictionaryValue> params, const char* key,
+                       std::vector<std::string>* result) {
+  if (params->GetType(key) != VTYPE_LIST) return false;
+  auto list = params->GetList(key);
+  if (list->GetSize() > 256) return false;
+  for (size_t i = 0; i < list->GetSize(); ++i) {
+    if (list->GetType(i) != VTYPE_STRING) return false;
+    auto text = list->GetString(i).ToString();
+    if (text.size() > 8192 || text.find('\0') != std::string::npos) return false;
+    result->push_back(std::move(text));
+  }
+  return true;
+}
+
 void SetGeneration(CefRefPtr<CefDictionaryValue> value, uint32_t generation) {
   // CEF's integer value is signed. A double represents every uint32 exactly.
   value->SetDouble("generation", static_cast<double>(generation));
@@ -184,6 +211,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     ready->SetBool("pageResourceSignals", true);
     ready->SetBool("pageBrowserGeneration", true);
     ready->SetBool("devTools", true);
+    ready->SetBool("extensionReview", true);
     if (root_) {
       const CefRect bounds = root_->GetClientAreaBoundsInScreen();
       CefRefPtr<CefDictionaryValue> client = CefDictionaryValue::Create();
@@ -210,6 +238,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     if (reader_.joinable()) reader_.join();
     if (writer_.joinable()) writer_.join();
     if (CefCurrentlyOn(TID_UI)) {
+      extension_review_.reset();
       registrations_.clear();
       observers_.clear();
       observer_generations_.clear();
@@ -273,6 +302,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
         SendEvent("pages.closeCancelled", params);
         break;
       case PageEvent::kWindowClosing:
+        if (extension_review_) extension_review_->Cancel();
         SendEvent("window.closing", params);
         break;
       case PageEvent::kWindowCloseCancelled:
@@ -707,6 +737,16 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
       ReplyResult(request_id, NewValue(CefDictionaryValue::Create())); return;
     }
     if (method == "viewports.set") { HandleViewports(request_id, params); return; }
+    if (method == "extensions.review.show") { HandleExtensionReview(request_id, params); return; }
+    if (method == "extensions.review.cancel") {
+      std::string nonce;
+      if (!HasOnlyKeys(params, {"nonce"}) || !GetString(params, "nonce", &nonce) ||
+          !IsUuid(nonce) || nonce != extension_review_nonce_) {
+        ReplyError(request_id, -32602, "unknown extension review"); return;
+      }
+      if (extension_review_) extension_review_->Cancel();
+      ReplyResult(request_id, NewValue(CefDictionaryValue::Create())); return;
+    }
     if (method == "window.close") {
       // Begin the root-owned transaction first. This queues window.closing
       // ahead of the acknowledgement on the same FIFO, giving the controller
@@ -887,6 +927,73 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     }
   }
 
+  void HandleExtensionReview(int request_id, CefRefPtr<CefDictionaryValue> params) {
+    if (!root_ || root_->IsClosed() || (manager_ && manager_->closing_all()) ||
+        (extension_review_ && extension_review_->active())) {
+      ReplyError(request_id, -32003, "extension review is unavailable or busy"); return;
+    }
+    std::string nonce;
+    ExtensionReviewMetadata metadata;
+    if (!HasOnlyKeys(params, {"nonce", "requester", "profileId", "name", "version",
+                              "installationId", "digest", "expectedChromiumId", "permissions",
+                              "hostPermissions", "optionalPermissions", "optionalHostPermissions"}) ||
+        CefWriteJSON(NewValue(params), JSON_WRITER_DEFAULT).ToString().size() > 192 * 1024 ||
+        !GetString(params, "nonce", &nonce) || !IsUuid(nonce) ||
+        !ReviewText(params, "requester", 256, &metadata.requester) ||
+        !ReviewText(params, "profileId", 256, &metadata.profile_id) ||
+        !ReviewText(params, "name", 4096, &metadata.name) ||
+        !ReviewText(params, "version", 256, &metadata.version) ||
+        !GetString(params, "installationId", &metadata.installation_id) ||
+        !IsLowerHex(metadata.installation_id, 32) ||
+        !GetString(params, "digest", &metadata.digest) || !IsLowerHex(metadata.digest, 64) ||
+        !GetString(params, "expectedChromiumId", &metadata.chromium_id) ||
+        metadata.chromium_id.size() != 32 ||
+        metadata.chromium_id.find_first_not_of("abcdefghijklmnop") != std::string::npos ||
+        !ReviewPermissions(params, "permissions", &metadata.permissions) ||
+        !ReviewPermissions(params, "hostPermissions", &metadata.host_permissions) ||
+        !ReviewPermissions(params, "optionalPermissions", &metadata.optional_permissions) ||
+        !ReviewPermissions(params, "optionalHostPermissions", &metadata.optional_host_permissions)) {
+      ReplyError(request_id, -32602, "invalid extension review"); return;
+    }
+    extension_review_.reset();
+    extension_review_deadline_ = std::chrono::steady_clock::now() + std::chrono::minutes(5);
+    if (!ScheduleReviewExpiry()) {
+      ReplyError(request_id, -32003, "extension review timer is unavailable"); return;
+    }
+    auto weak = weak_from_this();
+    auto prompt = NativeExtensionReview::Show(root_->GetWindowHandle(), metadata,
+        [weak, nonce, id = metadata.installation_id, digest = metadata.digest](bool approved) {
+          if (auto self = weak.lock()) {
+            auto result = CefDictionaryValue::Create();
+            result->SetString("nonce", nonce);
+            result->SetString("installationId", id);
+            result->SetString("digest", digest);
+            result->SetBool("approved", approved);
+            self->SendEvent("extensions.reviewDecision", result);
+          }
+        });
+    if (!prompt) { ReplyError(request_id, -32003, "native extension review is unavailable"); return; }
+    extension_review_nonce_ = nonce;
+    extension_review_ = std::move(prompt);
+    ReplyResult(request_id, NewValue(CefDictionaryValue::Create()));
+  }
+
+  bool ScheduleReviewExpiry() {
+    if (extension_review_timer_pending_) return true;
+    auto weak = weak_from_this();
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        extension_review_deadline_ - std::chrono::steady_clock::now()).count();
+    extension_review_timer_pending_ = CefPostDelayedTask(TID_UI, new BridgeTask([weak] {
+      if (auto self = weak.lock()) {
+        self->extension_review_timer_pending_ = false;
+        if (self->stopped_ || !self->extension_review_ || !self->extension_review_->active()) return;
+        if (std::chrono::steady_clock::now() >= self->extension_review_deadline_ ||
+            !self->ScheduleReviewExpiry()) self->extension_review_->Cancel();
+      }
+    }), remaining > 0 ? remaining : 1);
+    return extension_review_timer_pending_;
+  }
+
   void ExpireCdp(int cdp_id) {
     CEF_REQUIRE_UI_THREAD();
     auto it = pending_cdp_.find(cdp_id);
@@ -898,6 +1005,10 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
 
   CefRefPtr<PageManager> manager_;
   CefRefPtr<CefWindow> root_;
+  std::unique_ptr<NativeExtensionReview> extension_review_;
+  std::string extension_review_nonce_;
+  bool extension_review_timer_pending_ = false;
+  std::chrono::steady_clock::time_point extension_review_deadline_;
   std::set<std::string> page_ids_;
   std::map<std::string, CefRefPtr<Observer>> observers_;
   std::map<std::string, CefRefPtr<CefRegistration>> registrations_;

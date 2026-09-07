@@ -743,3 +743,18 @@ guide document signatures, metadata bounds, profile grants, sanitized failures, 
 delivery during an admitted durable transaction and the absence of change events. Installation
 still needs a public artifact-transfer and trusted review contract; replacing the private extension
 controls with a complete default plugin remains open.
+
+### Public extension installation
+
+[EXTENSION-INSTALL-PLAN.md](EXTENSION-INSTALL-PLAN.md) tracks the complete upload/review/plugin path.
+Current evidence identifies two required changes: large package processing must run outside short
+SDK/MCP callbacks, and permission review needs a trusted native surface independent of the legacy
+controller screen. Scoped binary upload storage and a native review primitive are the first internal
+building blocks; no new public installation method is available yet.
+
+The internal upload/review foundation now has eight portable upload tests and a passing real Native
+review fixture, including native-button approval, scroll-gated permission pages, exact decision
+identity and clean exit. A fixture-only stdin wait was removed after it caused a timeout following
+successful approval. These primitives still require an owner-bound background coordinator, public
+SDK/MCP contracts, durable source ownership and a default extension plugin. The
+[installation plan](EXTENSION-INSTALL-PLAN.md) records those boundaries and verification evidence.

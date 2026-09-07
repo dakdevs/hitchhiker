@@ -1,0 +1,159 @@
+import assert from "node:assert/strict";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { NodeServices } from "@effect/platform-node";
+import { EngineConnection, NativeSurface } from "@hitchhiker/runtime";
+import { Effect, Layer, Schedule, Schema, Stream } from "effect";
+import { acquireProfileWriteLease } from "../src/profile-write-lease.ts";
+import { makeBrowserController } from "../src/controller.ts";
+
+const binary = process.env.HITCHHIKER_NATIVE_BINARY;
+const interactive = process.env.HITCHHIKER_INTERACTIVE_REVIEW === "1";
+const Decision = Schema.Struct({
+  nonce: Schema.String,
+  installationId: Schema.String,
+  digest: Schema.String,
+  approved: Schema.Boolean,
+});
+
+test(
+  "native extension review binds denial to its nonce and refuses synthetic approval",
+  {
+    skip: !binary,
+    timeout: interactive ? 180_000 : 60_000,
+  },
+  async (context) => {
+    const profile = await realpath(
+      await mkdtemp(join(tmpdir(), "hitchhiker-native-extension-review-")),
+    );
+    try {
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const lease = yield* acquireProfileWriteLease(profile, binary!);
+            yield* Effect.gen(function* () {
+              const engine = yield* EngineConnection;
+              yield* engine.ready;
+              const controller = yield* makeBrowserController(lease.profileRoot, {
+                profileLease: lease,
+              });
+              yield* controller.start;
+              const decisions: (typeof Decision.Type)[] = [];
+              yield* engine.events.pipe(
+                Stream.filter((event) => event.event === "extensions.reviewDecision"),
+                Stream.runForEach((event) =>
+                  Schema.decodeUnknownEffect(Decision)(event.params).pipe(
+                    Effect.tap((decision) =>
+                      Effect.sync(() => {
+                        decisions.push(decision);
+                      }),
+                    ),
+                  ),
+                ),
+                Effect.forkScoped,
+              );
+              const request = {
+                nonce: crypto.randomUUID(),
+                requester: "review-fixture",
+                profileId: "default",
+                name: "Review fixture\nUntrusted package text",
+                version: "1.0",
+                installationId: "a".repeat(32),
+                digest: "b".repeat(64),
+                expectedChromiumId: "c".repeat(32),
+                permissions: Array.from(
+                  { length: 25 },
+                  (_, index) => `fixture-permission-${index}`,
+                ),
+                hostPermissions: ["https://example.test/*"],
+                optionalPermissions: [],
+                optionalHostPermissions: [],
+              };
+              assert.equal(
+                (yield* engine
+                  .request("extensions.review.show", { ...request, approved: true })
+                  .pipe(Effect.result))._tag,
+                "Failure",
+              );
+              yield* engine.request("extensions.review.show", request);
+              assert.equal(
+                (yield* engine
+                  .request("extensions.review.show", { ...request, nonce: crypto.randomUUID() })
+                  .pipe(Effect.result))._tag,
+                "Failure",
+              );
+              assert.equal(
+                (yield* engine
+                  .request("extensions.review.cancel", { nonce: crypto.randomUUID() })
+                  .pipe(Effect.result))._tag,
+                "Failure",
+              );
+              assert.equal(
+                (yield* engine
+                  .request("extensions.review.approve", { nonce: request.nonce })
+                  .pipe(Effect.result))._tag,
+                "Failure",
+              );
+              assert.equal(decisions.length, 0);
+              yield* engine.request("extensions.review.cancel", { nonce: request.nonce });
+              yield* Effect.suspend(() =>
+                decisions.length === 1 ? Effect.void : Effect.fail("waiting for native denial"),
+              ).pipe(Effect.retry({ times: 80, schedule: Schedule.spaced(25) }));
+              assert.deepEqual(decisions, [
+                {
+                  nonce: request.nonce,
+                  installationId: request.installationId,
+                  digest: request.digest,
+                  approved: false,
+                },
+              ]);
+              yield* engine.request("extensions.review.cancel", { nonce: request.nonce });
+              assert.equal(decisions.length, 1);
+              if (interactive) {
+                const approvalRequest = {
+                  ...request,
+                  nonce: crypto.randomUUID(),
+                  name: "Long untrusted name\u2028\u206a ".repeat(35),
+                };
+                yield* engine
+                  .request("extensions.review.show", approvalRequest)
+                  .pipe(Effect.retry({ times: 20, schedule: Schedule.spaced(50) }));
+                yield* Effect.sync(() => console.error("HITCHHIKER_REVIEW_READY_FOR_LOCAL_INPUT"));
+                yield* Effect.suspend(() =>
+                  decisions.length === 2
+                    ? Effect.void
+                    : Effect.fail("waiting for local review decision"),
+                ).pipe(Effect.retry({ times: 1200, schedule: Schedule.spaced(100) }));
+                assert.deepEqual(decisions[1], {
+                  nonce: approvalRequest.nonce,
+                  installationId: approvalRequest.installationId,
+                  digest: approvalRequest.digest,
+                  approved: true,
+                });
+                yield* Effect.sync(() => console.error("HITCHHIKER_REVIEW_APPROVED"));
+              }
+              yield* engine.request("window.close");
+              assert.equal(yield* engine.exit.pipe(Effect.timeout(10_000)), 0);
+            }).pipe(
+              Effect.provide(
+                Layer.provideMerge(
+                  NativeSurface.layer,
+                  EngineConnection.layer({
+                    executable: binary!,
+                    profileRoot: lease.profileRoot,
+                    extensionManagement: false,
+                  }),
+                ),
+              ),
+            );
+          }),
+        ).pipe(Effect.provide(NodeServices.layer)),
+        { signal: context.signal },
+      );
+    } finally {
+      await rm(profile, { recursive: true, force: true });
+    }
+  },
+);
