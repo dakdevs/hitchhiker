@@ -39,7 +39,8 @@ The normal composed plugin interface also cannot display the legacy controller's
    grant revocation, owner shutdown, restart recovery and two-profile isolation. Native test prompts
    use disposable profiles. Keep production Keychain and release acceptance distinct.
 
-Implementation is in progress. Public upload, review and installation APIs are not yet available.
+Public upload and review-request APIs are implemented. The default management plugin, local picker,
+and packaged application acceptance remain in progress; see the latest evidence below.
 
 ## Internal foundation verification
 
@@ -154,3 +155,49 @@ Explicit manager tests confirm abandonment preserves installing, enabled, error,
 records byte-for-byte and never discards their artifacts. Owned discovery retains compatibility with
 older public records without operation IDs. This does not replace startup grant reconciliation,
 which still belongs to the pending coordinator.
+
+## Public coordinator integration in progress
+
+The working implementation adds the `extensions.install` capability, eight typed SDK/MCP
+operations, owner-bound background jobs, and browser activation wiring. Startup reconciliation
+checks persisted preparation owners against current grants before installation ports become
+available; revocation events and periodic checks remove only unsubmitted prepared artifacts.
+Authorization failures caused by storage errors preserve those records for recovery.
+
+Portable manager/reconciliation checks and an SDK binary-transfer test pass. The SDK test runs
+the actual bundled SDK without browser globals and verifies canonical encoding through the
+64 KiB chunk limit. Coordinator lifecycle testing and the real upload-to-native-review-to-install
+fixture are pending. This section records ongoing work, not a verified public release.
+
+The first real coordinator integration fixture passes: bounded SDK-shaped upload operations stage
+a complete MV3 package, request the trusted Native prompt, accept its actual Install button, observe
+the content script in a new Chromium page, remove the extension and close with exit zero
+(`work/extension-installation-native.log`, one pass, no skips). It uses a disposable mock-Keychain
+profile. This proves the isolated upload/review/install path, not the packaged application, public
+transport wiring in Chromium, or the still-pending cancellation and recovery acceptance.
+
+## Public coordinator checkpoint
+
+Nine coordinator tests pass for nonblocking background jobs, owner isolation, denial, admitted
+transaction cancellation, revocation, restart discovery, failed-review cancellation, expiry, durable
+removal refresh, bounded admission and owner-close prompt cleanup. Jobs use the application scope;
+owner closure waits for shared cleanup. Unsubmitted artifacts alone can be abandoned. Durable
+metadata supplies extension details without duplicating those arrays in terminal jobs.
+
+The SDK/MCP contract exposes eight installation operations under `extensions.install`, with
+strict input/output schemas and current grants. The browser wires fixed-owner ports into developer
+and installed plugin activations and MCP. The SDK encodes bounded Uint8Array chunks without
+requiring browser globals. Startup reconciliation and periodic revocation checks preserve
+admitted records and refuse to treat grant-storage errors as proof of revocation.
+
+The full repository check passes 453 portable tests, with 38 Native-gated skips, and passes dependency,
+type, lint, formatting and build checks (`work/extension-installation-full-check.log`). A separate
+Native run verifies a binary resource containing zero and high bytes through upload, approval,
+extension fetch, removal and clean exit (`work/extension-installation-native-binary.log`, one pass,
+no skips). No fixture host remains running. The public extension reference and marketing guide
+record signatures, permissions, bounds, status polling and cancellation limits.
+
+Remaining acceptance: actual compiled-plugin and MCP installation in Chromium, two-profile
+installation isolation, the default extension UI and private native picker, legacy pending-review
+control filtering, and full packaged startup with the production Keychain. Existing default grants
+are unchanged. The browser-framework and release goals are not complete.

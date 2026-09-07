@@ -139,6 +139,13 @@ export interface ExtensionManager {
     digest: string,
     identity: { readonly principal: string; readonly grantId: string },
   ) => Effect.Effect<void, ExtensionManagerError>;
+  /** Trusted startup/revocation reconciliation. Only never-admitted public reviews are removed. */
+  readonly reconcilePrepared: (
+    authorized: (identity: {
+      readonly principal: string;
+      readonly grantId: string;
+    }) => Effect.Effect<boolean, unknown>,
+  ) => Effect.Effect<void, ExtensionManagerError>;
   /** Re-open a persisted, unsubmitted review without accepting a new local path. */
   readonly reviewPrepared: (
     installationId: string,
@@ -668,6 +675,31 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
           .pipe(Effect.mapError((error) => failure(error.message)));
       }),
     );
+  const reconcilePrepared: ExtensionManager["reconcilePrepared"] = (authorized) =>
+    command(
+      Effect.gen(function* () {
+        const registry = yield* load();
+        const abandoned: StoredExtension[] = [];
+        for (const entry of registry.extensions) {
+          if (entry.state !== "prepared" || entry.source === "legacy-local") continue;
+          const allowed = yield* authorized({
+            principal: entry.source.principal,
+            grantId: entry.source.grantId,
+          }).pipe(Effect.mapError(() => failure("Extension ownership could not be verified")));
+          if (!allowed) abandoned.push(entry);
+        }
+        if (abandoned.length === 0) return;
+        yield* save({
+          version: 2,
+          extensions: registry.extensions.filter((entry) => !abandoned.includes(entry)),
+        });
+        for (const entry of abandoned) {
+          yield* options.artifacts
+            .discardUnused(entry.artifact.installationId, entry.artifact.digest)
+            .pipe(Effect.mapError(() => failure("Abandoned extension cleanup is pending")));
+        }
+      }),
+    );
   const reviewPrepared = (installationId: string, digest: string, owner?: ExtensionOwner) =>
     command(
       Effect.gen(function* () {
@@ -1024,6 +1056,7 @@ export const createExtensionManager = Effect.fn("ExtensionManager.create")(funct
     prepareOwned,
     listOwned,
     abandonPrepared,
+    reconcilePrepared,
     reviewPrepared,
     confirmInstall,
     cancelPreview,

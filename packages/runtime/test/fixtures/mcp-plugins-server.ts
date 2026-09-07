@@ -110,6 +110,44 @@ const program = Effect.gen(function* () {
               Effect.as({ ...extensionSnapshot, extensions: [] }),
             ),
         };
+  const extensionInstallation =
+    process.env.MCP_EXTENSION_INSTALLATION === "none"
+      ? undefined
+      : {
+          begin: () =>
+            record({ operation: "installation.begin" }).pipe(
+              Effect.as({
+                operationId: "d".repeat(32),
+                state: "receiving" as const,
+                upload: { completedFiles: 0, totalBytes: 0 },
+              }),
+            ),
+          beginFile: (operationId: string, path: string, size: number) =>
+            record({ operation: "installation.file", operationId, path, size }).pipe(
+              Effect.as({
+                operationId,
+                state: "receiving" as const,
+                upload: { completedFiles: 0, totalBytes: 0 },
+              }),
+            ),
+          append: (operationId: string, offset: number, dataBase64: string) =>
+            record({ operation: "installation.append", operationId, offset, dataBase64 }).pipe(
+              Effect.as({
+                operationId,
+                state: "receiving" as const,
+                upload: { completedFiles: 0, totalBytes: 0 },
+              }),
+            ),
+          finish: (operationId: string) =>
+            Effect.succeed({ operationId, state: "validating" as const }),
+          status: (operationId: string) =>
+            Effect.succeed({ operationId, state: "receiving" as const }),
+          list: () => Effect.succeed([]),
+          requestReview: (operationId: string) =>
+            Effect.succeed({ operationId, state: "awaiting_review" as const }),
+          cancel: (operationId: string) =>
+            Effect.succeed({ operationId, state: "canceled" as const }),
+        };
   yield* runMcpStdio({
     profileId: "profile",
     token,
@@ -125,6 +163,7 @@ const program = Effect.gen(function* () {
     },
     plugins,
     extensions,
+    extensionInstallation,
   });
 }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 

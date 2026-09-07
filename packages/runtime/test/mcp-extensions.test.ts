@@ -69,7 +69,7 @@ test("MCP extension tools are optional and separately authorize read and remove"
     try {
       assert.equal(
         (await absent.client.listTools()).tools.some((tool) =>
-          tool.name.startsWith("hitchhiker_extension"),
+          ["hitchhiker_extensions_list", "hitchhiker_extension_remove"].includes(tool.name),
         ),
         false,
       );

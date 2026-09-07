@@ -124,6 +124,14 @@ and expire or become stale after navigation; grant revocation is checked during 
 
 `api.extensions.list()` requires `extensions.read`; `api.extensions.remove(installationId)` requires
 `extensions.manage`. Both return a bounded profile inventory containing reviewed manifest metadata
-and installation state. Installation and permission review still use the trusted local controls.
+and installation state. Permission approval remains on the trusted Native surface.
+`api.extensions.installation` requires `extensions.install` and supports bounded upload operations:
+`begin`, `beginFile`, `append`, `finish`, `status`, `list`, `requestReview`, and `cancel`.
+`append` accepts a `Uint8Array`; callers never provide an owner, grant, or host path. Requesting a
+review asks the trusted local surface to review permissions and never approves an installation.
+`finish` validates asynchronously; poll `status(operationId)`. The eight methods are `begin`,
+`beginFile`, `append`, `finish`, `status`, `list`, `requestReview`, and `cancel`. Uploads allow 64 KiB
+chunks, 256 MiB files, 512 MiB total, 10,000 entries, depth 64, and 4,096-byte relative paths. Native
+approval is under end-to-end validation and this adapter is omitted in safe/raw-CDP or degraded mode.
 Read the [extension API reference](../../docs/EXTENSIONS.md#public-inventory-and-removal) for MCP
 equivalents, raw-CDP restrictions, revocation and recovery semantics, and the compiled Native fixture.

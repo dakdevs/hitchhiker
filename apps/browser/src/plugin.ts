@@ -16,6 +16,8 @@ import type { PluginArtifact } from "./plugin-artifacts.ts";
 import type { InstalledPluginActivation } from "./plugin-manager.ts";
 import type { PluginManagement } from "./plugin-management.ts";
 import type { ExtensionManagement } from "./extension-management.ts";
+import type { createExtensionInstallation } from "./extension-installation.ts";
+type ExtensionInstallation = Effect.Success<ReturnType<typeof createExtensionInstallation>>;
 
 /** Captures only trusted services; persisted grant IDs never become wire credentials. */
 export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledPluginLauncher")(
@@ -28,6 +30,7 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
     readonly composition?: BrowserComposition;
     readonly management?: PluginManagement;
     readonly extensions?: ExtensionManagement;
+    readonly extensionInstallation?: ExtensionInstallation;
   }) {
     const engine = yield* EngineConnection;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -82,7 +85,31 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
                 ),
             )
           : undefined;
+        const extensionInstallation =
+          options.extensionInstallation &&
+          artifact.manifest.capabilities.some(
+            (capability) =>
+              capability === "extensions.install" || capability === "browser.full-control",
+          )
+            ? yield* options.extensionInstallation.forOwner({
+                principal: artifact.manifest.id,
+                grantId,
+                authorize: options.grants
+                  .authorizeGrant(grantId, {
+                    profileId: activation.profileId,
+                    capability: "extensions.install",
+                  })
+                  .pipe(
+                    Effect.flatMap((authorized) =>
+                      authorized.principal === artifact.manifest.id
+                        ? Effect.void
+                        : Effect.fail("Plugin identity no longer authorized"),
+                    ),
+                  ),
+              })
+            : undefined;
         yield* runLivePlugin({
+          extensionInstallation,
           dom: options.dom,
           devtools,
           manifest: artifact.manifest,
@@ -202,6 +229,7 @@ export const runPluginDirectory = Effect.fn("Browser.runPluginDirectory")(functi
   readonly controller: BrowserController;
   readonly dom?: ScopedDomDriver;
   readonly extensions?: ExtensionManagement;
+  readonly extensionInstallation?: ExtensionInstallation;
   readonly onRecoveryFailure?: Effect.Effect<void>;
 }) {
   const files = yield* readPluginPackage(options.directory);
@@ -250,7 +278,30 @@ export const runPluginDirectory = Effect.fn("Browser.runPluginDirectory")(functi
           ),
       )
     : undefined;
+  const extensionInstallation =
+    options.extensionInstallation &&
+    manifest.capabilities.some(
+      (capability) => capability === "extensions.install" || capability === "browser.full-control",
+    )
+      ? yield* options.extensionInstallation.forOwner({
+          principal: manifest.id,
+          grantId: credential.grant.id,
+          authorize: options.grants
+            .authorize(options.token, {
+              profileId: "default",
+              capability: "extensions.install",
+            })
+            .pipe(
+              Effect.flatMap((authorized) =>
+                authorized.principal === manifest.id && authorized.grant.id === credential.grant.id
+                  ? Effect.void
+                  : Effect.fail("Plugin identity no longer authorized"),
+              ),
+            ),
+        })
+      : undefined;
   yield* runLivePlugin({
+    extensionInstallation,
     dom: options.dom,
     extensions: options.extensions?.forOwner((capability) =>
       options.grants

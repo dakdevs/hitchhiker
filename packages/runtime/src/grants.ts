@@ -161,6 +161,7 @@ const DelegationInput = Schema.Struct({
       "plugins.manage",
       "extensions.read",
       "extensions.manage",
+      "extensions.install",
       "devtools.manage",
       "storage.local",
       "browser.full-control",

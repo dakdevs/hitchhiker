@@ -40,13 +40,22 @@ const fixture = (initial: readonly string[] = ["first", "second"]) => {
   const unexpectedDevTools = async (): Promise<never> => {
     throw new Error("This plugin must not invoke DevTools");
   };
+  const unexpectedExtension = async (): Promise<never> => {
+    throw new Error("Unexpected extension API call");
+  };
   const api: PluginApi = {
     extensions: {
-      list: async () => {
-        throw new Error("Unexpected extension API call");
-      },
-      remove: async () => {
-        throw new Error("Unexpected extension API call");
+      list: unexpectedExtension,
+      remove: unexpectedExtension,
+      installation: {
+        begin: unexpectedExtension,
+        beginFile: unexpectedExtension,
+        append: unexpectedExtension,
+        finish: unexpectedExtension,
+        status: unexpectedExtension,
+        list: unexpectedExtension,
+        requestReview: unexpectedExtension,
+        cancel: unexpectedExtension,
       },
     },
     dom: { snapshot: unexpectedDevTools, click: unexpectedDevTools, fill: unexpectedDevTools },

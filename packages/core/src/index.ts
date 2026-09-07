@@ -297,6 +297,7 @@ export type Capability =
   | "plugins.manage"
   | "extensions.read"
   | "extensions.manage"
+  | "extensions.install"
   | "devtools.manage"
   | "storage.local"
   | "browser.full-control"
@@ -323,6 +324,7 @@ const capabilityNames: readonly Capability[] = [
   "plugins.manage",
   "extensions.read",
   "extensions.manage",
+  "extensions.install",
   "devtools.manage",
   "storage.local",
   "browser.full-control",

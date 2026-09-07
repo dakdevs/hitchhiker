@@ -1003,3 +1003,56 @@ test("trusted abandonment preserves admitted state and legacy owned records rema
     await rm(profile, { recursive: true, force: true });
   }
 });
+
+test("reconciliation removes only unauthorized public prepared records and preserves data on authority-read failure", async () => {
+  const profile = await realpath(await mkdtemp(join(tmpdir(), "hitchhiker-extension-reconcile-")));
+  try {
+    const directory = join(profile, "hitchhiker-extensions");
+    await mkdir(directory, { mode: 0o700 });
+    const path = join(directory, "extensions.json");
+    const records = ["prepared", "prepared", "prepared", "installing", "enabled", "error"].map(
+      (state, index) => {
+        const value = artifact(profile, String(index).repeat(32));
+        return {
+          artifact: { ...value, directory: undefined },
+          source:
+            index === 2
+              ? "legacy-local"
+              : { principal: index === 1 ? "live" : "revoked", grantId: "grant" },
+          state,
+          recoveryAttempts: 0,
+        };
+      },
+    );
+    const original = JSON.stringify({ version: 2, extensions: records });
+    await writeFile(path, original, { mode: 0o600 });
+    const discarded: string[] = [];
+    const manager = await Effect.runPromise(
+      createExtensionManager({
+        profileRoot: profile,
+        lease: lease(profile),
+        engine: engine(),
+        artifacts: {
+          ...store(),
+          discardUnused: (id) =>
+            Effect.sync(() => {
+              discarded.push(id);
+            }),
+        },
+      }),
+    );
+    await assert.rejects(
+      Effect.runPromise(manager.reconcilePrepared(() => Effect.fail("storage unavailable"))),
+    );
+    assert.equal(await readFile(path, "utf8"), original);
+    assert.deepEqual(discarded, []);
+    await Effect.runPromise(
+      manager.reconcilePrepared((identity) => Effect.succeed(identity.principal === "live")),
+    );
+    const remaining = JSON.parse(await readFile(path, "utf8"));
+    assert.deepEqual(remaining.extensions, JSON.parse(JSON.stringify(records.slice(1))));
+    assert.deepEqual(discarded, ["0".repeat(32)]);
+  } finally {
+    await rm(profile, { recursive: true, force: true });
+  }
+});

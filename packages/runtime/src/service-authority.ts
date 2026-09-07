@@ -16,6 +16,7 @@ const capabilityScopes = {
   "plugins.manage": "originless",
   "extensions.read": "originless",
   "extensions.manage": "originless",
+  "extensions.install": "originless",
   "devtools.manage": "originless",
   "storage.local": "originless",
   "browser.full-control": "wildcard",

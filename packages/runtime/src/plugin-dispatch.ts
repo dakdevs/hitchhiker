@@ -24,6 +24,11 @@ import {
   ExtensionManagementSnapshotSchema,
   type ExtensionManagementApi,
 } from "./extension-management.ts";
+import {
+  ExtensionInstallationListSchema,
+  ExtensionInstallationSnapshotSchema,
+  type ExtensionInstallationApi,
+} from "./extension-installation.ts";
 
 export const LivePluginManifest = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{1,62}$/)),
@@ -51,6 +56,7 @@ export const LivePluginManifest = Schema.Struct({
       "plugins.manage",
       "extensions.read",
       "extensions.manage",
+      "extensions.install",
       "devtools.manage",
       "browser.full-control",
       "cdp.connect",
@@ -138,6 +144,7 @@ export interface PluginDispatchOptions {
   readonly management?: PluginManagementApi;
   /** Trusted profile-bound Chrome extension manager; never exposes source paths or review confirmation. */
   readonly extensions?: ExtensionManagementApi;
+  readonly extensionInstallation?: ExtensionInstallationApi;
   /** Trusted profile-wide DevTools frontend adapter; absent adapters fail closed. */
   readonly devtools?: DevToolsApi;
   /** Activation-scoped DOM reference namespace. It is never a raw browser protocol bridge. */
@@ -462,6 +469,81 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
         return yield* options.extensions.remove(installationId).pipe(
           Effect.mapError(denied),
           Effect.flatMap((snapshot) => decode(ExtensionManagementSnapshotSchema, snapshot)),
+        );
+      }
+      case "extensions.installation.begin": {
+        yield* authorize("extensions.install");
+        yield* decode(Schema.Record(Schema.String, Schema.Never), params);
+        if (!options.extensionInstallation) return yield* denied();
+        return yield* options.extensionInstallation.begin().pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((value) => decode(ExtensionInstallationSnapshotSchema, value)),
+        );
+      }
+      case "extensions.installation.beginFile": {
+        yield* authorize("extensions.install");
+        const input = yield* decode(
+          Schema.Struct({
+            operationId: Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/)),
+            path: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+            size: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 256 * 1024 * 1024 })),
+          }),
+          params,
+        );
+        if (!options.extensionInstallation) return yield* denied();
+        return yield* options.extensionInstallation
+          .beginFile(input.operationId, input.path, input.size)
+          .pipe(
+            Effect.mapError(denied),
+            Effect.flatMap((value) => decode(ExtensionInstallationSnapshotSchema, value)),
+          );
+      }
+      case "extensions.installation.append": {
+        yield* authorize("extensions.install");
+        const input = yield* decode(
+          Schema.Struct({
+            operationId: Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/)),
+            offset: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 256 * 1024 * 1024 })),
+            dataBase64: Schema.String.check(Schema.isMaxLength(87_384)),
+          }),
+          params,
+        );
+        if (!options.extensionInstallation) return yield* denied();
+        return yield* options.extensionInstallation
+          .append(input.operationId, input.offset, input.dataBase64)
+          .pipe(
+            Effect.mapError(denied),
+            Effect.flatMap((value) => decode(ExtensionInstallationSnapshotSchema, value)),
+          );
+      }
+      case "extensions.installation.finish":
+      case "extensions.installation.status":
+      case "extensions.installation.requestReview":
+      case "extensions.installation.cancel": {
+        yield* authorize("extensions.install");
+        const { operationId } = yield* decode(
+          Schema.Struct({ operationId: Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/)) }),
+          params,
+        );
+        if (!options.extensionInstallation) return yield* denied();
+        const operation = {
+          "extensions.installation.finish": options.extensionInstallation.finish,
+          "extensions.installation.status": options.extensionInstallation.status,
+          "extensions.installation.requestReview": options.extensionInstallation.requestReview,
+          "extensions.installation.cancel": options.extensionInstallation.cancel,
+        }[method]!;
+        return yield* operation(operationId).pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((value) => decode(ExtensionInstallationSnapshotSchema, value)),
+        );
+      }
+      case "extensions.installation.list": {
+        yield* authorize("extensions.install");
+        yield* decode(Schema.Record(Schema.String, Schema.Never), params);
+        if (!options.extensionInstallation) return yield* denied();
+        return yield* options.extensionInstallation.list().pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((value) => decode(ExtensionInstallationListSchema, value)),
         );
       }
       case "configuration.set": {

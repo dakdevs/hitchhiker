@@ -8,6 +8,11 @@ import {
   type ExtensionManagementApi,
 } from "./extension-management.ts";
 import {
+  ExtensionInstallationListSchema,
+  ExtensionInstallationSnapshotSchema,
+  type ExtensionInstallationApi,
+} from "./extension-installation.ts";
+import {
   DevToolsInspectPointSchema,
   DevToolsPageIdSchema,
   DevToolsStatusSchema,
@@ -69,6 +74,8 @@ export interface McpOptions {
   readonly plugins?: McpPluginApi;
   /** Trusted profile-bound extension manager. It has no filesystem-path or install-review methods. */
   readonly extensions?: ExtensionManagementApi;
+  /** Optional trusted owner-bound upload/review port. Absence omits install tools. */
+  readonly extensionInstallation?: ExtensionInstallationApi;
   readonly dom?: ScopedDomDriver;
   /** Profile-wide Chromium DevTools frontend authority; never raw CDP. */
   readonly devtools?: DevToolsApi;
@@ -190,6 +197,81 @@ const extensionTools = Toolkit.make(
         parseOptions: { onExcessProperty: "error" },
       },
     ),
+    success: Result,
+    failure: McpActionError,
+  }),
+);
+const OperationId = Schema.String.check(Schema.isPattern(/^[a-f0-9]{32}$/));
+const UploadPath = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096));
+const UploadSize = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 256 * 1024 * 1024 }));
+const UploadOffset = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 256 * 1024 * 1024 }));
+const UploadBase64 = Schema.String.check(Schema.isMaxLength(87_384));
+const installationTools = Toolkit.make(
+  Tool.make("hitchhiker_extension_install_begin", {
+    description: "Begin an owner-bound extension upload; requires extensions.install.",
+    parameters: EmptyParameters,
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_extension_install_begin_file", {
+    description: "Declare one relative extension file.",
+    parameters: Schema.Struct({
+      operationId: OperationId,
+      path: UploadPath,
+      size: UploadSize,
+    }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_extension_install_append", {
+    description: "Append canonical base64 upload bytes at an exact offset.",
+    parameters: Schema.Struct({
+      operationId: OperationId,
+      offset: UploadOffset,
+      dataBase64: UploadBase64,
+    }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_extension_install_finish", {
+    description:
+      "Start background package validation; poll installation status before requesting local review.",
+    parameters: Schema.Struct({ operationId: OperationId }).annotate({
+      parseOptions: { onExcessProperty: "error" },
+    }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_extension_install_status", {
+    description:
+      "Read an owned installation operation, including validation and native review progress.",
+    parameters: Schema.Struct({ operationId: OperationId }).annotate({
+      parseOptions: { onExcessProperty: "error" },
+    }),
+    success: Result,
+    failure: McpActionError,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("hitchhiker_extension_install_list", {
+    description:
+      "List this owner's bounded installation operations and recoverable prepared reviews.",
+    parameters: EmptyParameters,
+    success: Result,
+    failure: McpActionError,
+  }).annotate(Tool.Readonly, true),
+  Tool.make("hitchhiker_extension_install_review", {
+    description: "Request trusted local permission review; this never approves installation.",
+    parameters: Schema.Struct({ operationId: OperationId }).annotate({
+      parseOptions: { onExcessProperty: "error" },
+    }),
+    success: Result,
+    failure: McpActionError,
+  }),
+  Tool.make("hitchhiker_extension_install_cancel", {
+    description:
+      "Cancel unsubmitted work; an admitted installation may finish, so inspect the returned state.",
+    parameters: Schema.Struct({ operationId: OperationId }).annotate({
+      parseOptions: { onExcessProperty: "error" },
+    }),
     success: Result,
     failure: McpActionError,
   }),
@@ -649,5 +731,52 @@ export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (opt
         ),
     });
     yield* McpServer.registerToolkit(extensionTools).pipe(Effect.provide(extensionHandlers));
+  }
+  const installation = options.extensionInstallation;
+  if (installation !== undefined) {
+    const snapshot = (operation: Effect.Effect<unknown, unknown>) =>
+      authorized("extensions.install", operation).pipe(
+        Effect.flatMap((value) =>
+          Schema.decodeUnknownEffect(ExtensionInstallationSnapshotSchema, {
+            onExcessProperty: "error",
+          })(value).pipe(
+            Effect.mapError(
+              () =>
+                new McpActionError({ message: "The extension installer returned invalid data." }),
+            ),
+          ),
+        ),
+        Effect.flatMap(json),
+      );
+    const installationHandlers = installationTools.toLayer({
+      hitchhiker_extension_install_begin: () => snapshot(installation.begin()),
+      hitchhiker_extension_install_begin_file: ({ operationId, path, size }) =>
+        snapshot(installation.beginFile(operationId, path, size)),
+      hitchhiker_extension_install_append: ({ operationId, offset, dataBase64 }) =>
+        snapshot(installation.append(operationId, offset, dataBase64)),
+      hitchhiker_extension_install_finish: ({ operationId }) =>
+        snapshot(installation.finish(operationId)),
+      hitchhiker_extension_install_status: ({ operationId }) =>
+        snapshot(installation.status(operationId)),
+      hitchhiker_extension_install_list: () =>
+        authorized("extensions.install", installation.list()).pipe(
+          Effect.flatMap((value) =>
+            Schema.decodeUnknownEffect(ExtensionInstallationListSchema, {
+              onExcessProperty: "error",
+            })(value).pipe(
+              Effect.mapError(
+                () =>
+                  new McpActionError({ message: "The extension installer returned invalid data." }),
+              ),
+            ),
+          ),
+          Effect.flatMap(json),
+        ),
+      hitchhiker_extension_install_review: ({ operationId }) =>
+        snapshot(installation.requestReview(operationId)),
+      hitchhiker_extension_install_cancel: ({ operationId }) =>
+        snapshot(installation.cancel(operationId)),
+    });
+    yield* McpServer.registerToolkit(installationTools).pipe(Effect.provide(installationHandlers));
   }
 });

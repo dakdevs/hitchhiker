@@ -776,3 +776,11 @@ decisions, handles revocation and caller interruption, and performs bounded asyn
 recovery on failure. Real Native approval and scoped cancellation fixtures pass using disposable test
 Keychains. The full public installation coordinator, its SDK/MCP contracts, startup reconciliation,
 local picker and default extension plugin remain open; these helpers do not expose public approval.
+
+The public extension upload/review coordinator now connects the SDK and MCP to owner-bound
+background validation, trusted native approval and durable installation. Startup/revocation
+reconciliation removes only unsubmitted preparations. The complete portable check passes 453 tests;
+a separate real Chromium fixture passes uploaded binary-resource integrity, native approval,
+content-script execution, removal and clean exit. The [installation checkpoint](EXTENSION-INSTALL-PLAN.md#public-coordinator-checkpoint)
+records remaining public-transport Native acceptance, default management plugin/local picker, and
+production startup gaps. This does not complete all Chromium APIs or the browser-framework goal.

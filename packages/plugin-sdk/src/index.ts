@@ -101,6 +101,32 @@ export interface ExtensionManagementSnapshot {
   readonly readOnly: boolean;
   readonly extensions: readonly ExtensionManagementSummary[];
 }
+export interface ExtensionInstallationSnapshot {
+  readonly operationId: string;
+  readonly state:
+    | "receiving"
+    | "validating"
+    | "awaiting_review"
+    | "reviewing"
+    | "installing"
+    | "enabled"
+    | "canceled"
+    | "rejected"
+    | "error"
+    | "removed";
+  readonly upload?: {
+    readonly completedFiles: number;
+    readonly totalBytes: number;
+    readonly file?: { readonly path: string; readonly size: number; readonly offset: number };
+  };
+  readonly extension?: ExtensionManagementSummary;
+  readonly error?:
+    | "validation_failed"
+    | "review_failed"
+    | "installation_failed"
+    | "unavailable"
+    | "expired";
+}
 export type ServiceSnapshot =
   | { readonly available: false }
   | {
@@ -220,6 +246,24 @@ export interface PluginApi {
   readonly extensions: {
     list(): Promise<ExtensionManagementSnapshot>;
     remove(installationId: string): Promise<ExtensionManagementSnapshot>;
+    readonly installation: {
+      begin(): Promise<ExtensionInstallationSnapshot>;
+      beginFile(
+        operationId: string,
+        path: string,
+        size: number,
+      ): Promise<ExtensionInstallationSnapshot>;
+      append(
+        operationId: string,
+        offset: number,
+        data: Uint8Array,
+      ): Promise<ExtensionInstallationSnapshot>;
+      finish(operationId: string): Promise<ExtensionInstallationSnapshot>;
+      status(operationId: string): Promise<ExtensionInstallationSnapshot>;
+      list(): Promise<readonly ExtensionInstallationSnapshot[]>;
+      requestReview(operationId: string): Promise<ExtensionInstallationSnapshot>;
+      cancel(operationId: string): Promise<ExtensionInstallationSnapshot>;
+    };
   };
   readonly ui: {
     /** Legacy whole-window API; aliases publishLayout for the configured layout in composition mode. */
@@ -334,6 +378,55 @@ const api = (host: HostBridge): PluginApi =>
       list: () => call<ExtensionManagementSnapshot>(host, "extensions.list", {}),
       remove: (installationId: string) =>
         call<ExtensionManagementSnapshot>(host, "extensions.remove", { installationId }),
+      installation: Object.freeze({
+        begin: () => call<ExtensionInstallationSnapshot>(host, "extensions.installation.begin", {}),
+        beginFile: (operationId: string, path: string, size: number) =>
+          call<ExtensionInstallationSnapshot>(host, "extensions.installation.beginFile", {
+            operationId,
+            path,
+            size,
+          }),
+        append: (operationId: string, offset: number, data: Uint8Array) => {
+          if (data.byteLength > 65_536)
+            return Promise.reject(
+              new RangeError("Extension upload chunks may not exceed 65536 bytes"),
+            );
+          const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+          let encoded = "";
+          for (let index = 0; index < data.length; index += 3) {
+            const value =
+              (data[index]! << 16) | ((data[index + 1] ?? 0) << 8) | (data[index + 2] ?? 0);
+            encoded +=
+              alphabet[(value >>> 18) & 63]! +
+              alphabet[(value >>> 12) & 63]! +
+              (index + 1 < data.length ? alphabet[(value >>> 6) & 63]! : "=") +
+              (index + 2 < data.length ? alphabet[value & 63]! : "=");
+          }
+          return call<ExtensionInstallationSnapshot>(host, "extensions.installation.append", {
+            operationId,
+            offset,
+            dataBase64: encoded,
+          });
+        },
+        finish: (operationId: string) =>
+          call<ExtensionInstallationSnapshot>(host, "extensions.installation.finish", {
+            operationId,
+          }),
+        status: (operationId: string) =>
+          call<ExtensionInstallationSnapshot>(host, "extensions.installation.status", {
+            operationId,
+          }),
+        list: () =>
+          call<readonly ExtensionInstallationSnapshot[]>(host, "extensions.installation.list", {}),
+        requestReview: (operationId: string) =>
+          call<ExtensionInstallationSnapshot>(host, "extensions.installation.requestReview", {
+            operationId,
+          }),
+        cancel: (operationId: string) =>
+          call<ExtensionInstallationSnapshot>(host, "extensions.installation.cancel", {
+            operationId,
+          }),
+      }),
     }),
     ui: Object.freeze({
       publish: (surface: Omit<Surface, "identity">) =>

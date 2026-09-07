@@ -31,9 +31,17 @@ import { makeBrowserController } from "./controller.ts";
 import { makeBrowserDomDriver } from "./dom.ts";
 import { acquireProfileWriteLease } from "./profile-write-lease.ts";
 import { createExtensionArtifactStore } from "./extension-artifacts.ts";
-import { createExtensionManager, type ExtensionManagerError } from "./extension-manager.ts";
+import {
+  createExtensionManager,
+  ExtensionManagerError,
+  type ExtensionManager,
+} from "./extension-manager.ts";
 import type { BrowserExtensionControls } from "./extension-controls.ts";
 import { createExtensionManagement, type ExtensionManagement } from "./extension-management.ts";
+import { createExtensionInstallation } from "./extension-installation.ts";
+import { createExtensionUploadStore } from "./extension-upload.ts";
+import { createNativeExtensionReview } from "./extension-review.ts";
+import { reconcileExtensionInstallations } from "./extension-installation-reconciliation.ts";
 
 const argument = (name: string) => {
   const prefix = `${name}=`;
@@ -73,6 +81,7 @@ const program = Effect.gen(function* () {
     const rawCdp = process.argv.includes("--cdp");
     let extensions: BrowserExtensionControls | undefined;
     let extensionManagement: ExtensionManagement | undefined;
+    let extensionManager: ExtensionManager | undefined;
     if (!safeMode) {
       yield* engine.ready;
       const extensionServices = yield* Effect.gen(function* () {
@@ -97,6 +106,7 @@ const program = Effect.gen(function* () {
         const checked = <A>(operation: Effect.Effect<A, ExtensionManagerError>) =>
           operation.pipe(Effect.tapError(onFailure));
         return {
+          manager,
           management: createExtensionManagement(manager, onFailure),
           controls: {
             list: manager.list,
@@ -122,6 +132,7 @@ const program = Effect.gen(function* () {
       );
       extensions = extensionServices?.controls;
       extensionManagement = extensionServices?.management;
+      extensionManager = extensionServices?.manager;
     }
     const installedPluginMode =
       pluginExecutable !== undefined && !safeMode && pluginDirectory === undefined;
@@ -155,6 +166,36 @@ const program = Effect.gen(function* () {
         message: "The trusted interface could not be restored; closing the browser",
       }),
     ).pipe(Effect.asVoid);
+    const extensionInstallation =
+      extensionManager && !rawCdp
+        ? yield* Effect.gen(function* () {
+            const manager = extensionManager!;
+            const onFailure = (error: unknown) =>
+              error instanceof ExtensionManagerError && error.restartRequired
+                ? recoveryFailure
+                : Effect.void;
+            yield* reconcileExtensionInstallations({
+              manager,
+              grants,
+              profileId: "default",
+              onFailure,
+            });
+            const uploads = yield* createExtensionUploadStore({ profileLease });
+            return yield* createExtensionInstallation({
+              manager,
+              uploads,
+              profileId: "default",
+              onFailure,
+              review: createNativeExtensionReview({ engine, onCleanupFailure: recoveryFailure }),
+            });
+          }).pipe(
+            Effect.catch(() =>
+              Effect.logError("Chrome extension installation is unavailable for this launch.").pipe(
+                Effect.as(undefined),
+              ),
+            ),
+          )
+        : undefined;
     const readLegacyPlan = Effect.gen(function* () {
       const composition = yield* readCompositionRecipe(profileLease.profileRoot);
       const services = yield* readServiceRecipe(profileLease.profileRoot);
@@ -207,6 +248,7 @@ const program = Effect.gen(function* () {
         composition,
         management,
         extensions: extensionManagement,
+        extensionInstallation,
       });
       const manager = yield* createPluginManager({
         profileRoot: profileLease.profileRoot,
@@ -322,6 +364,7 @@ const program = Effect.gen(function* () {
         controller,
         dom,
         extensions: extensionManagement,
+        extensionInstallation,
         onRecoveryFailure: recoveryFailure,
       }).pipe(
         Effect.catchCause(() => Effect.logError("Plugin stopped.")),
@@ -366,11 +409,28 @@ const program = Effect.gen(function* () {
             ),
           ),
       );
+      const mcpInstallation = extensionInstallation
+        ? yield* extensionInstallation.forOwner({
+            principal: mcpIdentity.principal,
+            grantId: mcpIdentity.grant.id,
+            authorize: grants
+              .authorize(token, { profileId: "default", capability: "extensions.install" })
+              .pipe(
+                Effect.flatMap((authorized) =>
+                  authorized.principal === mcpIdentity.principal &&
+                  authorized.grant.id === mcpIdentity.grant.id
+                    ? Effect.void
+                    : Effect.fail("MCP identity no longer authorized"),
+                ),
+              ),
+          })
+        : undefined;
       yield* Effect.raceFirst(
         browserExit,
         runMcpStdio({
           devtools,
           extensions: mcpExtensions,
+          extensionInstallation: mcpInstallation,
           profileId: "default",
           token,
           grants,

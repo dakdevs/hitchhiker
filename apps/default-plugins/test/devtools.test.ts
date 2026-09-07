@@ -54,7 +54,20 @@ const fakeApi = () => {
     throw new Error("Unexpected public API call");
   };
   const api: PluginApi = {
-    extensions: { list: unexpected, remove: unexpected },
+    extensions: {
+      list: unexpected,
+      remove: unexpected,
+      installation: {
+        begin: unexpected,
+        beginFile: unexpected,
+        append: unexpected,
+        finish: unexpected,
+        status: unexpected,
+        list: unexpected,
+        requestReview: unexpected,
+        cancel: unexpected,
+      },
+    },
     storage: { read: unexpected, write: unexpected },
     services: {
       publish: unexpected,

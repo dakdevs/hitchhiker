@@ -56,8 +56,8 @@ export const pluginGuide: readonly GuideSection[] = [
         ],
         [
           "Chrome extensions",
-          "Local review/install; SDK and MCP list/remove; restart replay",
-          "Inventory and removal implemented",
+          "SDK/MCP upload and review requests, inventory, removal and restart replay",
+          "Native approval remains trusted; default management plugin planned",
         ],
         [
           "DevTools interface",
@@ -74,11 +74,43 @@ export const pluginGuide: readonly GuideSection[] = [
       "api.extensions.list() requires extensions.read; api.extensions.remove(installationId) requires extensions.manage. Declare the capability and obtain a grant for the profile. These permissions are profile-wide, not origin-scoped. Both methods return {readOnly, extensions}; removal includes the updated inventory under its manage grant. MCP exposes hitchhiker_extensions_list and hitchhiker_extension_remove with the same grant requirements.",
       "Inventory contains up to 16 managed entries: installation ID, digest, expected and optional actual Chromium ID, name, version, four reviewed manifest permission arrays, state and optional error intent. It excludes local paths and raw engine errors. This is Hitchhiker's managed inventory, not Chromium-wide enumeration or live permission state. There is no change event yet. Refresh after user actions rather than continuously polling.",
       "Removal is permanent rather than temporary disabling. It can remove extension data, and already-running page scripts are not retroactively undone. Authority is rechecked after waiting for the manager lock. An admitted operation may finish after cancellation or revocation, so refresh state before retrying an uncertain result. Plugin failures use sanitized PluginApiError code denied; a revoked plugin may stop before its handler runs.",
-      "Local staging and permission review remain private. Safe mode omits this adapter; raw-CDP mode allows inventory but refuses removal. Compiled developer and installed plugin fixtures verify real Chromium removal and content-script absence in a new fully loaded page, using disposable test Keychains. Installation APIs, change events, CRX/Web Store support and full extension compatibility remain unfinished.",
+      "Local filesystem staging remains private. The extensions.install upload API accepts bounded relative files and requests trusted local Native review; SDK and MCP callers cannot approve it. Safe mode and raw-CDP omit installation; raw-CDP also refuses removal. Compiled developer and installed plugin fixtures verify real Chromium removal and content-script absence in a new fully loaded page. The isolated uploaded binary-resource and native approval fixture passes. CRX/Web Store support, change events, the default management plugin, and packaged application acceptance remain unfinished.",
     ],
     code: `const inventory = await api.extensions.list();
 // Render entries with Native primitives; invoke on the user's Remove action.
 const updated = await api.extensions.remove(selectedInstallationId);`,
+  },
+  {
+    id: "extension-installation-api",
+    title: "Upload an extension and request permission review",
+    paragraphs: [
+      "Declare extensions.install and obtain a profile grant. browser.full-control includes this capability, but cdp.connect remains separate. api.extensions.installation accepts relative files, never a host path or caller-selected identity. Each operation belongs to the authenticated principal and grant; receiving uploads also belong to the current activation or connection.",
+      "Upload every package resource in contiguous chunks of at most 64 KiB. Limits are one receiving or validating upload per profile, 512 MiB total, 256 MiB per file, a 1 MiB manifest, 10,000 entries including directories, depth 64, and 4,096 UTF-8 bytes per relative path. Canonical base64 is used on MCP; the SDK accepts Uint8Array. Receiving uploads expire after 10 idle minutes or 60 total minutes.",
+      "finish starts background validation and returns promptly. Poll status from a timer or subsequent action; do not hold a plugin event callback while waiting. Once awaiting_review, requestReview opens trusted Native permission review. Only its native button can approve. Snapshots contain operationId, state, and optional upload progress, reviewed extension metadata or a sanitized error. list returns up to 32 snapshots. There is no change event yet.",
+      "Owner closure or revocation stops unsubmitted work. An installation already admitted to durable intent may finish; cancel does not uninstall it. Refresh status or extension inventory after an uncertain result. Receiving uploads cannot reconnect, while persisted operations can be rediscovered by the same principal and grant. Restart reconciliation removes prepared records whose grants are no longer valid. Safe mode and raw-CDP omit installation tools.",
+      "The table maps SDK methods beneath api.extensions.installation to exact MCP names. All return a snapshot except list, which returns an array. Portable protocol and lifecycle tests accompany an isolated real Chromium binary-upload, native approval and removal fixture. Full packaged startup and compiled-plugin/MCP installation acceptance remain open.",
+    ],
+    table: {
+      headings: ["SDK method", "MCP tool", "MCP arguments"],
+      rows: [
+        ["begin()", "hitchhiker_extension_install_begin", "{}"],
+        [
+          "beginFile(operationId, path, size)",
+          "hitchhiker_extension_install_begin_file",
+          "{operationId, path, size}",
+        ],
+        [
+          "append(operationId, offset, bytes)",
+          "hitchhiker_extension_install_append",
+          "{operationId, offset, dataBase64}",
+        ],
+        ["finish(operationId)", "hitchhiker_extension_install_finish", "{operationId}"],
+        ["status(operationId)", "hitchhiker_extension_install_status", "{operationId}"],
+        ["list()", "hitchhiker_extension_install_list", "{}"],
+        ["requestReview(operationId)", "hitchhiker_extension_install_review", "{operationId}"],
+        ["cancel(operationId)", "hitchhiker_extension_install_cancel", "{operationId}"],
+      ],
+    },
   },
   {
     id: "plugin-dom",

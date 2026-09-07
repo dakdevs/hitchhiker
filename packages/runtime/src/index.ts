@@ -133,3 +133,13 @@ export {
   InstalledPluginPlanSchema,
 } from "./installed-plugin-plan.ts";
 export type { InstalledPluginPlanInput, InstalledPluginPlan } from "./installed-plugin-plan.ts";
+
+export {
+  ExtensionOperationIdSchema,
+  ExtensionInstallationSnapshotSchema,
+  ExtensionInstallationListSchema,
+} from "./extension-installation.ts";
+export type {
+  ExtensionInstallationApi,
+  ExtensionInstallationSnapshot,
+} from "./extension-installation.ts";
