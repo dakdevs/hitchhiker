@@ -58,6 +58,15 @@ export type { PluginDispatchOptions } from "./plugin-dispatch.ts";
 export { runLivePlugin } from "./plugin-session.ts";
 export type { LivePluginOptions } from "./plugin-session.ts";
 
+export { composePluginSurface, routeCompositionEvent } from "./composition.ts";
+export type { CompositionOwner, CompositionRoute, ComposedPluginSurface } from "./composition.ts";
+export { makePluginComposition } from "./composition-session.ts";
+export type {
+  PluginCompositionRecipe,
+  PluginCompositionSession,
+  MakePluginCompositionOptions,
+} from "./composition-session.ts";
+
 export {
   NativePageGeneration,
   AttachedPageGeneration,

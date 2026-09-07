@@ -17,6 +17,12 @@ import { TestClock } from "effect/testing";
 import { makeBrowserController, normalizeAddressDraft } from "../src/controller.ts";
 import { saveBrowserPersistence } from "../src/persistence.ts";
 
+const waitUntil = (label: string, condition: Effect.Effect<boolean, unknown>) =>
+  condition.pipe(
+    Effect.flatMap((ready) => (ready ? Effect.void : Effect.fail(new Error(label)))),
+    Effect.retry({ times: 100, schedule: Schedule.spaced(10) }),
+  );
+
 test("normalizes addresses and keeps plain search text out of engine navigation", () => {
   assert.equal(normalizeAddressDraft("example.com"), "https://example.com/");
   assert.equal(normalizeAddressDraft("https://example.test/path"), "https://example.test/path");
@@ -106,7 +112,19 @@ test("restores a complete session before its first persistence and render", asyn
             ),
           );
           yield* controller.start;
-          yield* Effect.sleep(20);
+          yield* waitUntil(
+            "restored page opens",
+            Effect.sync(() => opened.length === 3),
+          );
+          yield* waitUntil(
+            "restored lifecycle events",
+            controller.snapshot.pipe(
+              Effect.map(
+                (snapshot) =>
+                  snapshot.pages.find((page) => page.id === "first")?.title === "Updated first",
+              ),
+            ),
+          );
           assert.deepEqual(opened, ["first", "second", "third"]);
           assert.equal(commits.length, 0, "partial restored pages must not render");
           assert.deepEqual(
@@ -123,11 +141,24 @@ test("restores a complete session before its first persistence and render", asyn
             event: "pages.created",
             params: { pageId: "third", generation: 1 },
           });
-          yield* Effect.sleep(20);
+          yield* waitUntil(
+            "completed restore render",
+            Effect.sync(() => commits.length === 1),
+          );
           assert.equal(commits.length, 1, "the completed restore renders once");
           assert.deepEqual(
             (yield* controller.snapshot).pages.map((page) => page.id),
             ["first", "second", "third"],
+          );
+          yield* waitUntil(
+            "completed restore persistence",
+            Effect.promise(
+              async () =>
+                JSON.parse(
+                  await readFile(join(directory, "browser-state.json"), "utf8"),
+                ).pages.find((page: { id: string }) => page.id === "first")?.title ===
+                "Updated first",
+            ),
           );
           const rendered = JSON.stringify(commits[0]);
           assert.match(rendered, /"value":"https:\/\/first\.test\/"/);
@@ -304,7 +335,32 @@ test("a canceled close retries only the interrupted restored page", async () => 
             ),
           );
           yield* controller.start.pipe(Effect.timeout(1_000));
-          yield* Effect.sleep(20);
+          yield* waitUntil(
+            "cancelled restored-page retry",
+            Effect.sync(
+              () =>
+                JSON.stringify(opened) === JSON.stringify(["first", "second", "second", "third"]),
+            ),
+          );
+          yield* waitUntil(
+            "cancelled restored-page attachment",
+            controller.snapshot.pipe(
+              Effect.map(
+                (snapshot) =>
+                  JSON.stringify(snapshot.pages.map((page) => page.id)) ===
+                  JSON.stringify(["first", "second", "third"]),
+              ),
+            ),
+          );
+          yield* controller.dispatch("page.pin:first");
+          yield* waitUntil(
+            "cancelled restore persistence",
+            Effect.promise(
+              async () =>
+                JSON.parse(await readFile(join(directory, "browser-state.json"), "utf8")).interface
+                  .pinnedPageIds?.[0] === "first",
+            ),
+          );
           assert.deepEqual(opened, ["first", "second", "second", "third"]);
           assert.deepEqual(
             (yield* controller.snapshot).pages.map((page) => page.id),
@@ -771,7 +827,10 @@ test("drops a generation-zero close while an initial browser attachment is openi
             event: "pages.closed",
             params: { pageId: failed, generation: 0, reason: "page-close", remainingPages: 0 },
           });
-          yield* Effect.yieldNow;
+          yield* waitUntil(
+            "generation-zero close",
+            controller.snapshot.pipe(Effect.map((snapshot) => snapshot.pages.length === 0)),
+          );
           assert.equal((yield* controller.snapshot).pages.length, 0);
 
           const next = yield* controller.openPage("https://next.test/");
@@ -779,7 +838,25 @@ test("drops a generation-zero close while an initial browser attachment is openi
             event: "pages.created",
             params: { pageId: next, generation: 1 },
           });
-          yield* Effect.yieldNow;
+          yield* waitUntil(
+            "next page attachment",
+            controller.snapshot.pipe(
+              Effect.map(
+                (snapshot) => snapshot.pages.length === 1 && snapshot.pages[0]?.id === next,
+              ),
+            ),
+          );
+          yield* waitUntil(
+            "next page persistence",
+            Effect.promise(
+              async () =>
+                JSON.stringify(
+                  JSON.parse(
+                    await readFile(join(directory, "browser-state.json"), "utf8"),
+                  ).pages.map((page: { id: string }) => page.id),
+                ) === JSON.stringify([next]),
+            ),
+          );
           assert.equal((yield* controller.snapshot).pages[0]?.id, next);
         }),
       ),

@@ -14,6 +14,7 @@ import {
   PubSub,
   Queue,
   Schema,
+  Scope,
   Stream,
   Take,
 } from "effect";
@@ -106,6 +107,7 @@ export class EngineConnection extends Context.Service<
     return Layer.effect(
       EngineConnection,
       Effect.gen(function* () {
+        const engineScope = yield* Effect.scope;
         const requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
         const eventDrainTimeoutMs = options.eventDrainTimeoutMs ?? 5_000;
         if (
@@ -469,6 +471,15 @@ export class EngineConnection extends Context.Service<
           Effect.forkScoped,
         );
 
+        const terminateAmbiguousCommit = Effect.fn("EngineConnection.terminateAmbiguousCommit")(
+          function* (error: EngineError) {
+            yield* finishHost(error).pipe(Effect.provideService(Scope.Scope, engineScope));
+            yield* child
+              .kill({ killSignal: "SIGTERM", forceKillAfter: 100 })
+              .pipe(Effect.catch(() => Effect.void));
+          },
+          Effect.uninterruptible,
+        );
         const request = Effect.fn("EngineConnection.request")(function* (
           method: string,
           params: JsonObject = {},
@@ -498,8 +509,24 @@ export class EngineConnection extends Context.Service<
           }).pipe(
             Effect.timeoutOrElse({
               duration: requestTimeoutMs,
-              orElse: () => Effect.fail(failure("timeout", `Engine request timed out: ${method}`)),
+              orElse: () =>
+                Effect.gen(function* () {
+                  const error = failure("timeout", `Engine request timed out: ${method}`);
+                  if (method === "ui.commit") {
+                    // Adoption may have happened without an acknowledgement. Never
+                    // allow a caller to retry against unknown Native state.
+                    yield* terminateAmbiguousCommit(error);
+                  }
+                  return yield* error;
+                }),
             }),
+            Effect.onInterrupt(() =>
+              method === "ui.commit"
+                ? terminateAmbiguousCommit(
+                    failure("commit-interrupted", "Native commit acknowledgement was interrupted"),
+                  )
+                : Effect.void,
+            ),
             Effect.ensuring(
               Effect.sync(() => {
                 pending.delete(id);

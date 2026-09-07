@@ -129,6 +129,9 @@ class PageManager : public CefBaseRefCounted {
   // viewport.
   bool SetViewports(const std::vector<PageViewport>& viewports);
 
+  // Invalidate placements after a Native tree commit, including during shutdown.
+  void ClearViewports();
+
   // Repositions visible page windows using the cached root-relative viewport
   // bindings and the root window's current screen position.
   void Layout();

@@ -13,14 +13,26 @@ interface RecordedRequest {
 const mockEngine = Effect.gen(function* () {
   const events = yield* PubSub.unbounded<EngineEvent>();
   const requests: RecordedRequest[] = [];
+  let commitFailure: EngineError | undefined;
+  let beforeCommit: Effect.Effect<unknown> = Effect.void;
   const engine = EngineConnection.of({
     pid: 1,
     ready: Effect.succeed({ event: "host.ready", params: { version: 1 } }),
     exit: Effect.never,
     events: Stream.fromPubSub(events),
     request: (method, params = {}) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         requests.push({ method, params });
+        if (method === "ui.commit" && commitFailure) {
+          const failure = commitFailure;
+          commitFailure = undefined;
+          return yield* failure;
+        }
+        if (method === "ui.commit") {
+          const callback = beforeCommit;
+          beforeCommit = Effect.void;
+          yield* callback;
+        }
         return {};
       }),
     loadUnpacked: () => Effect.fail(new EngineError({ code: "unsupported", message: "unused" })),
@@ -29,6 +41,12 @@ const mockEngine = Effect.gen(function* () {
   });
   return {
     requests,
+    beforeNextCommit: (effect: Effect.Effect<unknown>) => {
+      beforeCommit = effect;
+    },
+    rejectNextCommit: () => {
+      commitFailure = new EngineError({ code: "-32602", message: "rejected" });
+    },
     layer: Layer.succeed(EngineConnection, engine),
     emit: (params: JsonObject) => PubSub.publish(events, { event: "ui.event", params }),
   };
@@ -76,9 +94,13 @@ test("commits trusted JSON and rejects bindings that do not name a declared view
         assert.equal(yield* surface.commit(mainSurface()), 1);
         assert.deepEqual(
           mock.requests.map((request) => request.method),
-          ["ui.commit", "viewports.set"],
+          ["ui.commit"],
         );
-        assert.deepEqual(mock.requests[0]?.params, { revision: 1, root: mainRoot() });
+        assert.deepEqual(mock.requests[0]?.params, {
+          revision: 1,
+          root: mainRoot(),
+          clearViewports: true,
+        });
         const rejected = yield* surface
           .commit({
             root: row("root", [text("copy", "invalid")]),
@@ -86,7 +108,7 @@ test("commits trusted JSON and rejects bindings that do not name a declared view
           })
           .pipe(Effect.flip);
         assert.equal(rejected.code, "surface");
-        assert.equal(mock.requests.length, 2);
+        assert.equal(mock.requests.length, 1);
       }),
     ),
   );
@@ -150,7 +172,9 @@ test("accepts an empty drag-region leaf as a portable surface boundary", async (
       Effect.gen(function* () {
         const root = row("root", [{ key: "window-drag", kind: "drag-region", flex: 1 }]);
         assert.equal(yield* surface.commit({ root, bindings: [] }), 1);
-        assert.deepEqual(mock.requests, [{ method: "ui.commit", params: { revision: 1, root } }]);
+        assert.deepEqual(mock.requests, [
+          { method: "ui.commit", params: { revision: 1, root, clearViewports: false } },
+        ]);
       }),
     ),
   );
@@ -228,6 +252,7 @@ test("accepts default-surface style objects whose undefined background is omitte
           {
             method: "ui.commit",
             params: {
+              clearViewports: false,
               revision: 1,
               root: {
                 key: "root",
@@ -414,7 +439,6 @@ test("unchanged bindings keep placements during text-only redraws", async () => 
         yield* surface.commit(mainSurface("after"));
         const placements = mock.requests.filter((request) => request.method === "viewports.set");
         assert.deepEqual(placements, [
-          { method: "viewports.set", params: { viewports: [] } },
           {
             method: "viewports.set",
             params: { viewports: [{ pageId: "page-one", x: 0, y: 0, width: 20, height: 20 }] },
@@ -451,6 +475,70 @@ test("compact tab rows and labeled pinned tiles cross the surface boundary", asy
         });
         assert.equal(mock.requests.length, 1);
         assert.equal(mock.requests[0]?.method, "ui.commit");
+      }),
+    ),
+  );
+});
+
+test("rejected binding changes preserve revision and do not issue a second placement transaction", async () => {
+  await Effect.runPromise(
+    withSurface((surface, mock) =>
+      Effect.gen(function* () {
+        yield* surface.commit(mainSurface());
+        mock.rejectNextCommit();
+        const rejected = yield* surface
+          .commit({ root: row("empty", []), bindings: [] })
+          .pipe(Effect.flip);
+        assert.equal(rejected.code, "-32602");
+        assert.equal(yield* surface.commit(mainSurface("still here")), 2);
+        assert.deepEqual(
+          mock.requests.map((request) => request.method),
+          ["ui.commit", "ui.commit", "ui.commit"],
+        );
+        assert.deepEqual(mock.requests.at(-1)?.params, {
+          revision: 2,
+          root: mainRoot("still here"),
+          clearViewports: false,
+        });
+      }),
+    ),
+  );
+});
+
+test("viewport events emitted before the commit reply use the newly adopted binding", async () => {
+  await Effect.runPromise(
+    withSurface((surface, mock) =>
+      Effect.gen(function* () {
+        yield* surface.commit(mainSurface());
+        const measured = yield* surface.events.pipe(
+          Stream.filter((event) => event.event === "viewport"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* Effect.yieldNow;
+        mock.beforeNextCommit(
+          mock
+            .emit(
+              event(2, "viewport", "page-region", {
+                viewportId: "main-page",
+                x: 0,
+                y: 0,
+                width: 50,
+                height: 50,
+              }),
+            )
+            .pipe(Effect.andThen(Effect.yieldNow)),
+        );
+        yield* surface.commit({
+          ...mainSurface(),
+          bindings: [{ viewportId: "main-page", pageId: "page-two" }],
+        });
+        yield* Fiber.join(measured).pipe(Effect.timeout(1000));
+        assert.deepEqual(mock.requests.at(-1), {
+          method: "viewports.set",
+          params: { viewports: [{ pageId: "page-two", x: 0, y: 0, width: 50, height: 50 }] },
+        });
       }),
     ),
   );

@@ -86,3 +86,31 @@ pinning changes. Measure startup, actual aggregate plugin memory, event-to-frame
 work with the full default set. Existing per-process watchdog limits are ceilings, not evidence that
 many tiny feature processes meet the performance goal. Do not give first-party plugins privileged
 API shortcuts or weaken isolation to obtain better numbers.
+
+## Composition foundation in progress
+
+The first code slice extracts the Native surface validator and introduces a deterministic compositor
+and a trusted composition session. Layout slots receive independently owned fragments in configured
+order. Keys, actions and viewport identities are namespaced by owner, activation generation and
+contribution; page identities are unchanged. Final validation applies to the expanded tree, including
+global node/depth limits and distinct page bindings. A real Chromium fixture verifies Native viewport
+layout and retained document state across an unrelated layout update.
+
+The session must publish state and input routes only after Native accepts the complete candidate,
+reject stale worker generations, and fall back to an injected recovery surface when the layout is
+absent. This is host infrastructure, not a claim that installed plugins or defaults have migrated.
+Public worker dispatch, dependency services, profile recipe persistence, activation transactions and
+the separate default plugin packages remain required before the first implementation packet is done.
+
+Native tree adoption and changed-page placement invalidation now use one `ui.commit` transaction.
+Rejected trees keep the previous placements; successful commits invalidate changed bindings before
+replying, then accept measured geometry for the new revision. Closing windows reject commits.
+A missing acknowledgement or interrupted raw commit terminates the uncertain engine connection;
+callers must recover the process rather than retry against unknown Native state. Surface state adoption
+is uninterruptible once admitted, and stale plugin cleanup is an idempotent no-op.
+
+Verification on September 6: all 219 native runtime/browser tests passed without skips after the
+transaction changes, including retained documents under composed Native viewports, rejected commit
+state preservation, geometry arriving before acknowledgement, and fatal timeout/interruption behavior.
+This verifies the host composition foundation, not installed-plugin composition or performance of a
+complete default plugin set.

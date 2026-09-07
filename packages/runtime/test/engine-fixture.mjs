@@ -17,6 +17,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (method === "error")
     return send({ id, error: { code: -32602, message: "Fixture rejection" } });
   if (method === "never") return;
+  if (method === "ui.commit") return send({ event: "ui.received", params: {} });
   if (method === "burst") {
     for (let index = 0; index < 40; index++) send({ event: "fixture.event", params: { index } });
     return send({ id, result: {} });

@@ -70,6 +70,7 @@ class PageManagerCore : public std::enable_shared_from_this<PageManagerCore> {
   void CancelCloseAll();
   bool AcknowledgeCloseCancelled(CefRefPtr<CefBrowser> browser);
   bool SetViewports(const std::vector<PageViewport>& viewports);
+  void ClearViewports();
   void Layout();
   CefRefPtr<CefBrowser> BrowserForPage(const std::string& page_id) const;
   std::optional<PageSnapshot> SnapshotForPage(const std::string& page_id) const;
@@ -463,6 +464,12 @@ bool PageManagerCore::SetViewports(
   viewports_ = std::move(next_viewports);
   Layout();
   return true;
+}
+
+void PageManagerCore::ClearViewports() {
+  CEF_REQUIRE_UI_THREAD();
+  viewports_.clear();
+  Layout();
 }
 
 void PageManagerCore::Layout() {
@@ -860,6 +867,10 @@ bool PageManager::AcknowledgeCloseCancelled(
 bool PageManager::SetViewports(
     const std::vector<PageViewport>& viewports) {
   return core_->SetViewports(viewports);
+}
+
+void PageManager::ClearViewports() {
+  core_->ClearViewports();
 }
 
 void PageManager::Layout() {

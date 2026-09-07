@@ -61,6 +61,14 @@ class ShellWindowDelegate : public CefWindowDelegate {
       bridge_->SetCloseRequestHandler([this] { RequestCloseFromBridge(); });
       bridge_->SetUiCommitHandler([this](CefRefPtr<CefDictionaryValue> params,
                                         std::string* error) {
+        if (closing_ || !root_ || root_->IsClosed() || !manager_ || manager_->closing_all()) {
+          *error = "window is closing";
+          return false;
+        }
+        if (params->HasKey("clearViewports") && params->GetType("clearViewports") != VTYPE_BOOL) {
+          *error = "clearViewports must be a boolean";
+          return false;
+        }
         const auto type = params->GetType("revision");
         const double revision = type == VTYPE_INT ? params->GetInt("revision") :
                                 type == VTYPE_DOUBLE ? params->GetDouble("revision") : 0;
@@ -76,6 +84,9 @@ class ShellWindowDelegate : public CefWindowDelegate {
           *error = "invalid or stale native tree";
           return false;
         }
+        // Tree adoption and placement invalidation form one UI-thread transaction.
+        // No fallible request may follow adoption before the successful reply.
+        if (params->GetBool("clearViewports")) manager_->ClearViewports();
         runtime_ui_ = true;
         const auto bounds = root_->GetClientAreaBoundsInScreen();
         ResizeNativeSurface(sidebar_, bounds.width, bounds.height);

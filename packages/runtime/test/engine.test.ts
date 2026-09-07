@@ -576,3 +576,42 @@ test("framing retains UTF-8 across reads and limits each complete or incomplete 
   partial.push(Buffer.from("partial"));
   assert.throws(() => partial.finish(), /incomplete/);
 });
+
+test("an unacknowledged Native commit terminates the connection instead of permitting a retry", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      assert.equal(
+        (yield* engine.request("ui.commit", { revision: 1 }).pipe(Effect.flip)).code,
+        "timeout",
+      );
+      assert.equal((yield* engine.request("echo").pipe(Effect.flip)).code, "timeout");
+      assert.equal((yield* engine.exit.pipe(Effect.flip, Effect.timeout(2000))).code, "timeout");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("interrupting an enqueued Native commit terminates the uncertain connection", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const received = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "ui.received"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      const pending = yield* engine.request("ui.commit", { revision: 1 }).pipe(Effect.forkScoped);
+      yield* Fiber.join(received);
+      yield* Fiber.interrupt(pending);
+      assert.equal((yield* engine.request("echo").pipe(Effect.flip)).code, "commit-interrupted");
+      assert.equal(
+        (yield* engine.exit.pipe(Effect.flip, Effect.timeout(2000))).code,
+        "commit-interrupted",
+      );
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
