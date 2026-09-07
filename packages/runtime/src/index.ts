@@ -3,7 +3,14 @@ export { DevToolsStatusSchema, DevToolsInspectPointSchema } from "./devtools.ts"
 export type { DevToolsApi, DevToolsStatus, DevToolsInspectPoint } from "./devtools.ts";
 export { createPluginStorage, PluginStorageError } from "./plugin-storage.ts";
 export type { PluginStorageAdapter } from "./plugin-storage.ts";
-export type { EngineOptions, EngineEvent, JsonObject, RawCdpConnection } from "./engine.ts";
+export type {
+  EngineOptions,
+  EngineEvent,
+  JsonObject,
+  ManagedCdpEvent,
+  ManagedCdpSession,
+  RawCdpConnection,
+} from "./engine.ts";
 export { NativeSurface } from "./surface.ts";
 export type { SurfaceEvent } from "./surface.ts";
 export { GrantStore, GrantStoreError, create as createGrantStore } from "./grants.ts";

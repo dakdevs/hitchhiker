@@ -38,6 +38,7 @@ test("native extension review binds the staged digest, shows every permission an
             request: () => Effect.succeed({}),
             loadUnpacked: () => Effect.die("unexpected direct engine load"),
             uninstall: () => Effect.die("unexpected direct engine uninstall"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unexpected raw CDP"),
           });
           const surface = NativeSurface.of({

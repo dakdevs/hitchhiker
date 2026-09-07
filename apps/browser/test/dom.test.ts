@@ -139,6 +139,7 @@ const withDriver = <A>(
         },
         loadUnpacked: () => Effect.die("unused extension load"),
         uninstall: () => Effect.die("unused extension uninstall"),
+        openCdpSession: () => Effect.die("unused managed CDP session"),
         claimRawCdp: Effect.die("unused raw CDP claim"),
       });
       const driver = yield* makeBrowserDomDriver({

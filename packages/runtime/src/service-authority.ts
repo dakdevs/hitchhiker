@@ -64,12 +64,7 @@ const effectiveAuthority = (party: ServiceParty, grant: CapabilityGrant): Effect
         case "wildcard":
           return manifestFullControl && grantFullControl;
         case "cdp":
-          // A manifest full-control declaration covers CDP under the existing
-          // plugin dispatch semantics, but the durable grant must name CDP.
-          return (
-            includes(grant.capabilities, capability) &&
-            (includes(party.declaredCapabilities, capability) || manifestFullControl)
-          );
+          return allowsManifest(capability) && allowsGrant(capability);
         case "scoped":
           if (!grantFullControl && grant.origins.length === 0) return false;
           return allowsManifest(capability) && allowsGrant(capability);

@@ -55,6 +55,7 @@ test("restoration settles for an empty profile and propagates startup or host fa
               request: () => Effect.succeed({}),
               loadUnpacked: () => Effect.die("unused"),
               uninstall: () => Effect.die("unused"),
+              openCdpSession: () => Effect.die("unused managed CDP session"),
               claimRawCdp: Effect.die("unused"),
             });
             let commits = 0;
@@ -162,6 +163,7 @@ test("plugin interface mode keeps page lifecycle while withholding legacy UI and
               }),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(directory, {
@@ -284,6 +286,7 @@ test("restores a complete session before its first persistence and render", asyn
               }),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const surface = NativeSurface.of({
@@ -434,6 +437,7 @@ test("restore drains a bounded lifecycle queue while pages.open is still resolvi
               }),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const surface = NativeSurface.of({
@@ -539,6 +543,7 @@ test("a canceled close retries only the interrupted restored page", async () => 
               }),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(directory).pipe(
@@ -624,6 +629,7 @@ test("a non-close pages.open error remains fatal during restore", async () => {
               }).pipe(Effect.andThen(new EngineError({ code: "transport", message: "Timed out" }))),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(directory).pipe(
@@ -683,6 +689,7 @@ test("a close rejection followed by clean host exit preserves staged restore met
               ),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(directory).pipe(
@@ -743,6 +750,7 @@ test("shutdown during restore retains every unresolved opening page", async () =
             request: () => Effect.succeed({}),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(directory).pipe(
@@ -796,6 +804,7 @@ test("a lifecycle update queued before window closing tolerates only the typed c
             request: () => Effect.succeed({}),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const surface = NativeSurface.of({
@@ -878,6 +887,7 @@ test("window shutdown preserves the session, while cancellation persists actual 
             request: () => Effect.succeed({}),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(directory).pipe(
@@ -981,6 +991,7 @@ test("filters non-page engine feedback, selects a successor, and persists the cu
               }),
             loadUnpacked: () => Effect.die("unused extension load"),
             uninstall: () => Effect.die("unused extension uninstall"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused raw CDP claim"),
           });
           const surface = NativeSurface.of({
@@ -1114,6 +1125,7 @@ test("drops a generation-zero close while an initial browser attachment is openi
             request: () => Effect.succeed({}),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(directory).pipe(
@@ -1198,6 +1210,7 @@ test("keeps a logical page and its persistence through replacement while rejecti
               }),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(directory).pipe(
@@ -1365,6 +1378,7 @@ test("freezing requires idle navigation and protects pending scoped DOM writes",
               }),
             loadUnpacked: () => Effect.die("unused extension load"),
             uninstall: () => Effect.die("unused extension uninstall"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused raw CDP claim"),
           });
           const surface = NativeSurface.of({
@@ -1580,6 +1594,7 @@ test("configuration invalidations subscribe before initial delivery and coalesce
           request: () => Effect.succeed({}),
           loadUnpacked: () => Effect.die("unused"),
           uninstall: () => Effect.die("unused"),
+          openCdpSession: () => Effect.die("unused managed CDP session"),
           claimRawCdp: Effect.die("unused"),
         });
         const controller = yield* makeBrowserController(directory, {

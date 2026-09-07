@@ -91,7 +91,7 @@ test("authenticates the full durable chain and intersects manifest and grant aut
         generation: broadManifest.generation,
         profileId: broadManifest.profileId,
         grantId: broadManifest.grantId,
-        capabilities: ["cdp.connect"],
+        capabilities: [],
         origins: [],
       } satisfies EffectiveAuthority);
 
@@ -224,9 +224,15 @@ test("preserves future full-control and CDP as separate containment requirements
       const cdpProvider = yield* issueParty(store, {
         id: "cdp-provider",
         grantCapabilities: ["cdp.connect"],
-        declaredCapabilities: ["browser.full-control"],
+        declaredCapabilities: ["cdp.connect"],
       });
       yield* assertDenied(authority.authorizeService(wildcardConsumer, cdpProvider));
+      const undeclaredConsumer = yield* issueParty(store, {
+        id: "undeclared-cdp-consumer",
+        grantCapabilities: ["browser.full-control", "cdp.connect"],
+        declaredCapabilities: ["browser.full-control"],
+      });
+      yield* assertDenied(authority.authorizeService(undeclaredConsumer, cdpProvider));
       const cdpConsumer = yield* issueParty(store, {
         id: "cdp-consumer",
         grantCapabilities: ["cdp.connect"],

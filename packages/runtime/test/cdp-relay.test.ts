@@ -110,6 +110,7 @@ const makeFakeEngine = Effect.fn("makeFakeEngine")(function* (): Effect.fn.Retur
         Effect.fail(new EngineError({ code: "unsupported", message: "unused in relay tests" })),
       uninstall: () =>
         Effect.fail(new EngineError({ code: "unsupported", message: "unused in relay tests" })),
+      openCdpSession: () => Effect.die("unused in relay tests"),
       claimRawCdp: Effect.suspend(() => {
         if (claimed)
           return Effect.fail(new EngineError({ code: "cdp-owned", message: "already claimed" }));

@@ -57,6 +57,7 @@ test("portable settings persist together, retain pages and custom UI, and surviv
               }),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(directory, { freezeEnabled: false }).pipe(
@@ -158,6 +159,7 @@ test("a failed portable-settings write leaves the controller's current settings 
                     request: () => Effect.succeed({}),
                     loadUnpacked: () => Effect.die("unused"),
                     uninstall: () => Effect.die("unused"),
+                    openCdpSession: () => Effect.die("unused managed CDP session"),
                     claimRawCdp: Effect.die("unused"),
                   }),
                 ),

@@ -44,6 +44,47 @@ const CdpFailure = Schema.Struct({
   }),
 });
 const decodeCdpFailure = Schema.decodeUnknownOption(CdpFailure, { onExcessProperty: "error" });
+const CdpSessionResult = Schema.Struct({
+  id: Schema.Int,
+  result: Schema.Json,
+  sessionId: Schema.String,
+});
+const decodeCdpSessionResult = Schema.decodeUnknownOption(CdpSessionResult, {
+  onExcessProperty: "error",
+});
+const CdpSessionFailure = Schema.Struct({
+  id: Schema.Int,
+  sessionId: Schema.String,
+  error: Schema.Struct({
+    code: Schema.Union([Schema.String, Schema.Int]),
+    message: Schema.String,
+    data: Schema.optional(Schema.Json),
+  }),
+});
+const decodeCdpSessionFailure = Schema.decodeUnknownOption(CdpSessionFailure, {
+  onExcessProperty: "error",
+});
+const CdpAttachedSession = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+});
+const decodeCdpAttachedSession = Schema.decodeUnknownOption(CdpAttachedSession, {
+  onExcessProperty: "error",
+});
+const CdpDetachedSession = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  targetId: Schema.optional(Schema.String),
+});
+const decodeCdpDetachedSession = Schema.decodeUnknownOption(CdpDetachedSession, {
+  onExcessProperty: "error",
+});
+const CdpSessionEvent = Schema.Struct({
+  method: Schema.NonEmptyString,
+  params: Schema.optional(JsonObject),
+  sessionId: Schema.NonEmptyString,
+});
+const decodeCdpSessionEvent = Schema.decodeUnknownOption(CdpSessionEvent, {
+  onExcessProperty: "preserve",
+});
 const LoadUnpackedResult = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^[a-p]{32}$/)),
 });
@@ -57,8 +98,27 @@ const ChromiumExtensionId = /^[a-p]{32}$/;
 const InternalCdpRequestIdFloor = 2_147_000_000;
 const InternalCdpRequestIdCeiling = 2_147_483_647;
 const MaxPendingExtensionRequests = 8;
+const MaxPendingSessionRequests = 32;
+const MaxSessionEvents = 32;
+const MaxManagedSessions = 8;
+const MaxSessionEventBytes = 256 * 1024;
 export type EngineEvent = typeof Event.Type;
 export type JsonObject = typeof JsonObject.Type;
+
+export interface ManagedCdpEvent {
+  readonly method: string;
+  readonly params: JsonObject;
+}
+
+/** A trusted, engine-owned flattened CDP page session. This is not a public relay. */
+export interface ManagedCdpSession {
+  readonly events: Stream.Stream<ManagedCdpEvent, EngineError>;
+  readonly request: (
+    method: string,
+    params?: JsonObject,
+  ) => Effect.Effect<Schema.Json, EngineError>;
+  readonly close: Effect.Effect<void, EngineError>;
+}
 
 export interface RawCdpConnection {
   readonly events: Stream.Stream<JsonObject>;
@@ -100,6 +160,10 @@ export class EngineConnection extends Context.Service<
       canonicalArtifactDirectory: string,
     ) => Effect.Effect<string, EngineError>;
     readonly uninstall: (extensionId: string) => Effect.Effect<void, EngineError>;
+    /** Opens a scoped, trusted page session. Callers must never pass untrusted target IDs here. */
+    readonly openCdpSession: (
+      targetId: string,
+    ) => Effect.Effect<ManagedCdpSession, EngineError, Scope.Scope>;
     readonly claimRawCdp: Effect.Effect<RawCdpConnection, EngineError>;
   }
 >()("@hitchhiker/runtime/EngineConnection") {
@@ -139,9 +203,46 @@ export class EngineConnection extends Context.Service<
         const ready = yield* Deferred.make<EngineEvent, EngineError>();
         const pending = new Map<number, Deferred.Deferred<Schema.Json, EngineError>>();
         const pendingExtension = new Map<number, Deferred.Deferred<JsonObject, EngineError>>();
+        type PendingSession = {
+          readonly sessionId?: string;
+          readonly ownerSessionId?: string;
+          readonly method: string;
+          readonly deferred: Deferred.Deferred<JsonObject, EngineError>;
+        };
+        type ManagedSessionState = {
+          readonly sessionId: string;
+          readonly events: Queue.Queue<ManagedCdpEvent, Cause.Done>;
+          readonly pending: Set<number>;
+          readonly terminal: Deferred.Deferred<void, EngineError>;
+          readonly closeDone: Deferred.Deferred<void, EngineError>;
+          closed: boolean;
+          closing: boolean;
+          subscribed: boolean;
+        };
+        const pendingSession = new Map<number, PendingSession>();
+        const externallyDetachedPending = new Set<number>();
+        const attachingSessionIds = new Set<string>();
+        const pendingAttachEvents = new Map<string, ManagedCdpEvent[]>();
+        const pendingAttachErrors = new Map<string, EngineError>();
+        const detachedAttachments = new Set<string>();
+        const managedSessions = new Map<string, ManagedSessionState>();
         let sequence = 0;
         let extensionSequence = InternalCdpRequestIdCeiling;
+        let sessionSequence = 0;
+        let managedOperations = 0;
         let cdpOwner: "management" | "uncertain" | "raw" = "management";
+        let unknownAttachment = false;
+        const uncertainSessionIds = new Set<string>();
+        const retainAttachingSession = (sessionId: string) => {
+          if (attachingSessionIds.has(sessionId)) return true;
+          if (managedOperations === 0) return false;
+          if (attachingSessionIds.size >= MaxManagedSessions) {
+            unknownAttachment = true;
+            return false;
+          }
+          attachingSessionIds.add(sessionId);
+          return true;
+        };
         let extensionOperations = 0;
         let stopped: EngineError | undefined;
         let childExitCode: number | undefined;
@@ -202,6 +303,14 @@ export class EngineConnection extends Context.Service<
           pending.clear();
           for (const deferred of pendingExtension.values()) yield* Deferred.fail(deferred, error);
           pendingExtension.clear();
+          for (const pending of pendingSession.values())
+            yield* Deferred.fail(pending.deferred, error);
+          pendingSession.clear();
+          for (const session of managedSessions.values()) {
+            session.closed = true;
+            yield* Deferred.fail(session.terminal, error);
+            yield* Queue.shutdown(session.events);
+          }
         });
         const completeSubscribersIfDrained = () => {
           if (!acceptingEventSubscribers && preterminalSubscribers.size === 0)
@@ -440,7 +549,158 @@ export class EngineConnection extends Context.Service<
                 // Reserved replies without a pending trusted request are late or unsolicited.
                 return;
               }
-              if (cdpOwner === "raw") yield* Queue.offer(rawIncoming, message);
+              if (cdpOwner === "raw") {
+                yield* Queue.offer(rawIncoming, message);
+                return;
+              }
+              if (message.method === "Target.detachedFromTarget") {
+                const detached = decodeCdpDetachedSession(message.params);
+                const detachedSessionId = Option.isSome(detached)
+                  ? detached.value.sessionId
+                  : undefined;
+                if (detachedSessionId) {
+                  const session = managedSessions.get(detachedSessionId);
+                  if (!session && retainAttachingSession(detachedSessionId))
+                    detachedAttachments.add(detachedSessionId);
+                  if (session) {
+                    const error = failure(
+                      "cdp-session-closed",
+                      "Chromium detached the CDP session",
+                    );
+                    session.closed = true;
+                    managedSessions.delete(detachedSessionId);
+                    uncertainSessionIds.delete(detachedSessionId);
+                    for (const id of session.pending) {
+                      const pending = pendingSession.get(id);
+                      if (pending) {
+                        externallyDetachedPending.add(id);
+                        yield* Deferred.fail(pending.deferred, error);
+                      }
+                    }
+                    for (const [id, pending] of pendingSession) {
+                      if (
+                        pending.method === "Target.detachFromTarget" &&
+                        pending.ownerSessionId === detachedSessionId
+                      ) {
+                        externallyDetachedPending.add(id);
+                        yield* Deferred.succeed(pending.deferred, { id, result: {} });
+                      }
+                    }
+                    yield* Deferred.fail(session.terminal, error);
+                    yield* Deferred.succeed(session.closeDone, undefined);
+                    yield* Queue.end(session.events);
+                  }
+                  return;
+                }
+              }
+              if (Option.isSome(decodedId)) {
+                const pending = pendingSession.get(decodedId.value.id);
+                if (pending) {
+                  const receivedSessionId = message.sessionId;
+                  if (
+                    pending.sessionId === undefined ||
+                    (typeof receivedSessionId === "string" &&
+                      receivedSessionId === pending.sessionId)
+                  ) {
+                    if (pending.method === "Target.attachToTarget") {
+                      const attach = decodeCdpResult(message);
+                      const value = Option.isSome(attach) ? attach.value.result : undefined;
+                      const attached = decodeCdpAttachedSession(value);
+                      if (Option.isSome(attached)) retainAttachingSession(attached.value.sessionId);
+                    }
+                    yield* Deferred.succeed(pending.deferred, message);
+                  }
+                  // A mismatched session reply is deliberately not handed to another lane.
+                  return;
+                }
+              }
+              const event = decodeCdpSessionEvent(message);
+              if (Option.isSome(event)) {
+                const { sessionId: eventSessionId, method: eventMethod } = event.value;
+                const params = event.value.params ?? {};
+                const session = managedSessions.get(eventSessionId);
+                if (!session) {
+                  if (!retainAttachingSession(eventSessionId)) return;
+                  if (pendingAttachErrors.has(eventSessionId)) return;
+                  const buffered = pendingAttachEvents.get(eventSessionId) ?? [];
+                  if (
+                    buffered.length >= MaxSessionEvents ||
+                    Buffer.byteLength(JSON.stringify(message)) > MaxSessionEventBytes
+                  ) {
+                    pendingAttachErrors.set(
+                      eventSessionId,
+                      failure(
+                        "cdp-event-capacity",
+                        "CDP attachment event buffer exceeded its limit",
+                      ),
+                    );
+                    return;
+                  }
+                  buffered.push({ method: eventMethod, params });
+                  pendingAttachEvents.set(eventSessionId, buffered);
+                  return;
+                }
+                if (session.closed) return;
+                if (Buffer.byteLength(JSON.stringify(message)) > MaxSessionEventBytes) {
+                  session.closed = true;
+                  yield* Deferred.fail(
+                    session.terminal,
+                    failure("cdp-event-size", "CDP session event exceeds 256 KiB"),
+                  );
+                  yield* Queue.end(session.events);
+                  yield* closeManagedSession(session).pipe(Effect.forkScoped);
+                  return;
+                }
+                if (
+                  !Queue.offerUnsafe(session.events, {
+                    method: eventMethod,
+                    params,
+                  })
+                ) {
+                  // Dropping queues never stall the shared pipe. A full lane is terminal so
+                  // consumers never mistake a silently dropped protocol event for completeness.
+                  session.closed = true;
+                  for (const id of session.pending) {
+                    const pending = pendingSession.get(id);
+                    if (pending)
+                      yield* Deferred.fail(
+                        pending.deferred,
+                        failure(
+                          "cdp-event-capacity",
+                          "CDP session event delivery exceeded its bounded queue",
+                        ),
+                      );
+                  }
+                  yield* Deferred.fail(
+                    session.terminal,
+                    failure(
+                      "cdp-event-capacity",
+                      "CDP session event delivery exceeded its bounded queue",
+                    ),
+                  );
+                  yield* Queue.end(session.events);
+                  yield* closeManagedSession(session).pipe(Effect.forkScoped);
+                }
+                return;
+              }
+              if (typeof message.sessionId === "string" && !("id" in message)) {
+                const error = failure(
+                  "cdp-session-protocol",
+                  "Chromium returned an invalid session event",
+                );
+                if (
+                  !managedSessions.has(message.sessionId) &&
+                  retainAttachingSession(message.sessionId)
+                )
+                  pendingAttachErrors.set(message.sessionId, error);
+                const session = managedSessions.get(message.sessionId);
+                if (session && !session.closed) {
+                  session.closed = true;
+                  yield* Deferred.fail(session.terminal, error);
+                  yield* Queue.end(session.events);
+                  yield* closeManagedSession(session).pipe(Effect.forkScoped);
+                }
+              }
             }),
           ),
           Effect.catch(stopOperations),
@@ -555,6 +815,269 @@ export class EngineConnection extends Context.Service<
           if (beforeOffer) return yield* beforeOffer;
           if (!(yield* Queue.offer(rawOutgoing, bytes)))
             return yield* failure("closed", "CDP pipe closed");
+        });
+        const sendManaged = Effect.fn("EngineConnection.sendManaged")(function* (
+          method: string,
+          params: JsonObject,
+          session?: ManagedSessionState,
+          ownerSessionId = session?.sessionId,
+        ): Effect.fn.Return<JsonObject, EngineError> {
+          if (
+            pendingSession.size >=
+              MaxPendingSessionRequests +
+                (method === "Target.detachFromTarget" ? MaxManagedSessions : 0) ||
+            sessionSequence >= InternalCdpRequestIdFloor - 1
+          )
+            return yield* failure("capacity", "CDP session request capacity reached");
+          if (session?.closed) return yield* failure("cdp-session-closed", "CDP session is closed");
+          const id = ++sessionSequence;
+          const deferred = yield* Deferred.make<JsonObject, EngineError>();
+          pendingSession.set(id, {
+            sessionId: session?.sessionId,
+            ownerSessionId,
+            method,
+            deferred,
+          });
+          session?.pending.add(id);
+          let sent = false;
+          let certain = false;
+          return yield* Effect.gen(function* () {
+            sent = true;
+            yield* offerCdp({
+              id,
+              method,
+              params,
+              ...(session ? { sessionId: session.sessionId } : {}),
+            });
+            const reply = yield* Deferred.await(deferred);
+            const rejected = session ? decodeCdpSessionFailure(reply) : decodeCdpFailure(reply);
+            if (
+              Option.isSome(rejected) &&
+              rejected.value.id === id &&
+              (!session ||
+                ("sessionId" in rejected.value && rejected.value.sessionId === session.sessionId))
+            ) {
+              certain = true;
+              return yield* failure("cdp-session-rejected", rejected.value.error.message);
+            }
+            const result = session ? decodeCdpSessionResult(reply) : decodeCdpResult(reply);
+            if (
+              Option.isNone(result) ||
+              result.value.id !== id ||
+              (session &&
+                (!("sessionId" in result.value) || result.value.sessionId !== session.sessionId))
+            )
+              return yield* failure(
+                "cdp-session-protocol",
+                "Chromium returned an invalid CDP session response",
+              );
+            certain = true;
+            return reply;
+          }).pipe(
+            Effect.timeoutOrElse({
+              duration: requestTimeoutMs,
+              orElse: () =>
+                Effect.fail(
+                  failure("cdp-session-timeout", `CDP session request timed out: ${method}`),
+                ),
+            }),
+            Effect.ensuring(
+              Effect.sync(() => {
+                pendingSession.delete(id);
+                session?.pending.delete(id);
+                // A command may have reached Chromium without a reliable response. Keep the
+                // lane out of raw ownership until the process is restarted or it is detached.
+                const detached = externallyDetachedPending.delete(id);
+                if (sent && !certain && !detached) {
+                  if (ownerSessionId) {
+                    if (managedSessions.has(ownerSessionId))
+                      uncertainSessionIds.add(ownerSessionId);
+                  } else unknownAttachment = true;
+                }
+              }),
+            ),
+          );
+        });
+        const closeManagedSession = (session: ManagedSessionState) =>
+          Effect.uninterruptibleMask((restore) =>
+            Effect.gen(function* (): Effect.fn.Return<void, EngineError> {
+              if (session.closed && !managedSessions.has(session.sessionId)) return;
+              if (session.closing) return yield* Deferred.await(session.closeDone);
+              session.closed = true;
+              session.closing = true;
+              for (const id of session.pending) {
+                const pending = pendingSession.get(id);
+                if (pending)
+                  yield* Deferred.fail(
+                    pending.deferred,
+                    failure(
+                      "cdp-session-closed",
+                      "CDP session closed while its request was pending",
+                    ),
+                  );
+                pendingSession.delete(id);
+              }
+              session.pending.clear();
+              yield* Queue.end(session.events);
+              const reply = yield* restore(
+                sendManaged(
+                  "Target.detachFromTarget",
+                  { sessionId: session.sessionId },
+                  undefined,
+                  session.sessionId,
+                ),
+              );
+              const result = decodeCdpResult(reply);
+              if (Option.isNone(result))
+                return yield* failure(
+                  "cdp-session-protocol",
+                  "Chromium returned an invalid detach response",
+                );
+              managedSessions.delete(session.sessionId);
+              uncertainSessionIds.delete(session.sessionId);
+              yield* Deferred.succeed(session.terminal, undefined);
+              yield* Deferred.succeed(session.closeDone, undefined);
+            }),
+          ).pipe(
+            Effect.tapError((error) =>
+              Effect.all([
+                Deferred.fail(session.terminal, error),
+                Deferred.fail(session.closeDone, error),
+              ]),
+            ),
+            Effect.onInterrupt(() =>
+              Effect.all([
+                Deferred.fail(
+                  session.terminal,
+                  failure("cdp-session-interrupted", "CDP detach was interrupted"),
+                ),
+                Deferred.fail(
+                  session.closeDone,
+                  failure("cdp-session-interrupted", "CDP detach was interrupted"),
+                ),
+              ]),
+            ),
+          );
+        const openCdpSession = Effect.fn("EngineConnection.openCdpSession")(function* (
+          targetId: string,
+        ): Effect.fn.Return<ManagedCdpSession, EngineError, Scope.Scope> {
+          if (typeof targetId !== "string" || targetId.length === 0)
+            return yield* failure("cdp-target", "CDP target ID is invalid");
+          const stoppedNow = stoppedError();
+          if (stoppedNow) return yield* stoppedNow;
+          if (cdpOwner === "raw")
+            return yield* failure("cdp-owned", "Raw CDP already owns the browser pipe");
+          if (cdpOwner === "uncertain" || unknownAttachment || uncertainSessionIds.size > 0)
+            return yield* failure(
+              "extension-uncertain",
+              "CDP ownership is uncertain; restart the engine",
+            );
+          if (managedOperations + managedSessions.size >= MaxManagedSessions)
+            return yield* failure("capacity", "CDP session capacity reached");
+          managedOperations += 1;
+          return yield* Effect.uninterruptibleMask((restore) =>
+            Effect.gen(function* (): Effect.fn.Return<ManagedCdpSession, EngineError, Scope.Scope> {
+              const reply = yield* restore(
+                sendManaged("Target.attachToTarget", { targetId, flatten: true }),
+              );
+              const result = decodeCdpResult(reply);
+              const value = Option.isSome(result) ? result.value.result : undefined;
+              const attached = decodeCdpAttachedSession(value);
+              const sessionId = Option.isSome(attached) ? attached.value.sessionId : undefined;
+              if (!sessionId) unknownAttachment = true;
+              if (!sessionId)
+                return yield* failure(
+                  "cdp-session-protocol",
+                  "Chromium returned an invalid attach response",
+                );
+              if (detachedAttachments.delete(sessionId)) {
+                attachingSessionIds.delete(sessionId);
+                pendingAttachEvents.delete(sessionId);
+                pendingAttachErrors.delete(sessionId);
+                return yield* failure(
+                  "cdp-session-closed",
+                  "Chromium detached the session during attachment",
+                );
+              }
+              const events = yield* Queue.dropping<ManagedCdpEvent, Cause.Done>(MaxSessionEvents);
+              const terminal = yield* Deferred.make<void, EngineError>();
+              const closeDone = yield* Deferred.make<void, EngineError>();
+              const session: ManagedSessionState = {
+                sessionId,
+                events,
+                pending: new Set(),
+                terminal,
+                closeDone,
+                closed: false,
+                closing: false,
+                subscribed: false,
+              };
+              if (managedSessions.has(sessionId)) {
+                unknownAttachment = true;
+                return yield* failure(
+                  "cdp-session-protocol",
+                  "Chromium reused an active CDP session ID",
+                );
+              }
+              managedSessions.set(sessionId, session);
+              attachingSessionIds.delete(sessionId);
+              for (const event of pendingAttachEvents.get(sessionId) ?? [])
+                Queue.offerUnsafe(events, event);
+              pendingAttachEvents.delete(sessionId);
+              const request = Effect.fn("EngineConnection.managedCdpRequest")(function* (
+                method: string,
+                params: JsonObject = {},
+              ): Effect.fn.Return<Schema.Json, EngineError> {
+                if (session.closed)
+                  return yield* failure("cdp-session-closed", "CDP session is closed");
+                if (method.startsWith("Extensions.") || method.startsWith("Target."))
+                  return yield* failure("cdp-session-method", "CDP session method is reserved");
+                const reply = yield* sendManaged(method, params, session);
+                const result = decodeCdpSessionResult(reply);
+                if (Option.isNone(result))
+                  return yield* failure(
+                    "cdp-session-protocol",
+                    "Chromium returned an invalid CDP session response",
+                  );
+                return result.value.result;
+              });
+              const eventsStream = Stream.unwrap(
+                Effect.sync(() => {
+                  if (session.subscribed)
+                    return Stream.fail(
+                      failure("cdp-session-events", "CDP session events allow one consumer"),
+                    );
+                  session.subscribed = true;
+                  return Stream.fromQueue(session.events).pipe(
+                    Stream.concat(
+                      Stream.fromEffect(Deferred.await(session.terminal)).pipe(Stream.drain),
+                    ),
+                  );
+                }),
+              );
+              const close = closeManagedSession(session);
+              yield* Effect.addFinalizer(() => close.pipe(Effect.catch(() => Effect.void)));
+              const attachError = pendingAttachErrors.get(sessionId);
+              pendingAttachErrors.delete(sessionId);
+              if (attachError) {
+                yield* close.pipe(Effect.catch(() => Effect.void));
+                return yield* attachError;
+              }
+              return { events: eventsStream, request, close } satisfies ManagedCdpSession;
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  managedOperations -= 1;
+                  if (managedOperations === 0) {
+                    attachingSessionIds.clear();
+                    pendingAttachEvents.clear();
+                    pendingAttachErrors.clear();
+                    detachedAttachments.clear();
+                  }
+                }),
+              ),
+            ),
+          );
         });
         const validateArtifactDirectory = Effect.fn("EngineConnection.validateArtifactDirectory")(
           function* (directory: string): Effect.fn.Return<string, EngineError> {
@@ -728,8 +1251,16 @@ export class EngineConnection extends Context.Service<
               "An extension operation has an uncertain result; restart the engine",
             );
           if (cdpOwner === "raw") return failure("cdp-owned", "Raw CDP is already claimed");
-          if (extensionOperations !== 0 || pendingExtension.size !== 0)
-            return failure("cdp-owned", "Extension operations are still pending");
+          if (unknownAttachment || uncertainSessionIds.size > 0)
+            return failure("cdp-owned", "A managed CDP operation has an uncertain result");
+          if (
+            extensionOperations !== 0 ||
+            pendingExtension.size !== 0 ||
+            managedOperations !== 0 ||
+            pendingSession.size !== 0 ||
+            managedSessions.size !== 0
+          )
+            return failure("cdp-owned", "Managed CDP operations are still pending");
           cdpOwner = "raw";
           return Effect.succeed({
             events: Stream.fromQueue(rawIncoming).pipe(Stream.catchCause(() => Stream.empty)),
@@ -749,6 +1280,7 @@ export class EngineConnection extends Context.Service<
           request,
           loadUnpacked,
           uninstall,
+          openCdpSession,
           claimRawCdp,
         });
       }),

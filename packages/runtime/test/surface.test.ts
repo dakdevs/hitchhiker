@@ -37,6 +37,7 @@ const mockEngine = Effect.gen(function* () {
       }),
     loadUnpacked: () => Effect.fail(new EngineError({ code: "unsupported", message: "unused" })),
     uninstall: () => Effect.fail(new EngineError({ code: "unsupported", message: "unused" })),
+    openCdpSession: () => Effect.die("unused in surface tests"),
     claimRawCdp: Effect.succeed({ events: Stream.empty, send: () => Effect.void }),
   });
   return {

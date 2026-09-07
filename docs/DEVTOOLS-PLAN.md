@@ -7,17 +7,12 @@ observer per page generation and shares domain state with trusted browser inspec
 not become a public passthrough: a plugin disabling Runtime or enabling Fetch interception could
 disrupt the host, and a stopped plugin could leave a page paused.
 
-Before committing a public signature, a Native feasibility fixture must prove separate protocol
-sessions on the pinned CEF build. Investigate flattened `Target.attachToTarget` sessions through
-`SendDevToolsMessage`; an observer registration alone does not establish session isolation.
-The existing engine also starts Chromium's remote debugging pipe and already has private flattened
-session test helpers. A new `native-cdp-sessions.test.ts` fixture investigates that backend first,
-with two sessions on one page and the trusted host observer active. It currently claims the exclusive
-raw connection with extension management disabled; this is backend feasibility, not a public broker
-or evidence of coexistence with extension management.
-Verify command results and events route to the owning session, and detaching one session leaves
-another session and the trusted DOM driver usable. If CEF cannot provide this, evaluate a separate
-trusted DevTools client backend. Do not fall back to sharing the internal connection.
+The existing engine starts Chromium's remote debugging pipe. The `native-cdp-sessions.test.ts`
+fixture proves flattened sessions on that backend, with two sessions on one page and the trusted
+host observer active. It claims the exclusive raw connection with extension management disabled;
+this is backend feasibility, not a public broker or evidence of coexistence with extension
+management. A CEF observer registration alone does not establish session isolation. The implementation
+must use owned pipe sessions rather than sharing the private host connection.
 
 The intended public contract needs opaque owner-bound handles, page-generation checks, bounded
 pending calls and events, authorization before commands and event delivery, and cleanup on grant
@@ -56,6 +51,31 @@ commands. Public sessions must be drained before handing the transport to the ex
 Test active session traffic alongside extension install/removal and reject cross-page and extension
 worker access before wiring the public SDK and MCP. Observed detach cleanup is useful evidence,
 but does not replace deadlines, grant revocation cleanup or recovery when detach itself fails.
+
+### Engine session lane implementation
+
+The trusted `EngineConnection.openCdpSession(targetId)` lane is implemented. It attaches a target
+selected by trusted browser code, allocates protocol IDs internally, exposes only that session's
+results/events, and detaches on scope closure. It coexists with typed extension operations while
+refusing raw relay takeover until all attachments and sessions are drained. Unresolved attachments
+remain fenced until engine restart; a confirmed detach clears only its own session's uncertainty.
+
+Portable fixtures cover ownership, events before and after attach replies, cleanup at capacity,
+overflow, timeout, concurrent closes and unsolicited detach. The Native managed-session fixture
+keeps sessions active during a real extension load and removal and verifies the content script
+appears and disappears on new document loads. It also verifies scoped Fetch cleanup, page closure,
+stale handles and raw handoff after cleanup. This is trusted-manager testing, not an approval-UI
+test. This internal lane is not the public permission boundary: controller page-generation binding,
+plugin grants, method policy and SDK/MCP entry points remain unfinished.
+
+The public broker will require an explicit `cdp.connect` manifest declaration and durable grant.
+This remains profile-wide, non-delegable authority, excluded from `browser.full-control` and
+separate from `devtools.manage`. An origins list cannot constrain general Runtime/Page/Network/
+Debugger/Fetch access: frames, redirects and subresources can cross origins, while debugging and
+interception affect page execution. Page IDs and generations bind routing and cleanup, not site
+authority. Reauthorize commands and event delivery and close sessions on revocation. The dispatcher
+and service containment now exclude CDP from their full-control declaration fallback. A service
+consumer with a CDP grant but no explicit declaration cannot invoke a provider with CDP authority.
 
 ## Original integration scope
 

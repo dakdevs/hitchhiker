@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { Deferred, Effect, Fiber, Schema, Scope, Stream } from "effect";
+import { Deferred, Effect, Exit, Fiber, Schema, Scope, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { EngineConnection } from "../src/engine.ts";
 import { FrameDecoder } from "../src/framing.ts";
@@ -16,6 +16,13 @@ const layer = EngineConnection.layer({
   profileRoot: "/tmp/hitchhiker-transport-fixture",
   extensionManagement: false,
   requestTimeoutMs: 150,
+});
+
+const managedFunctionalLayer = EngineConnection.layer({
+  executable: fixture,
+  profileRoot: "/tmp/hitchhiker-transport-fixture",
+  extensionManagement: false,
+  requestTimeoutMs: 3_000,
 });
 
 test("private transport routes concurrent responses, typed failures and actual fd3/fd4 frames", async () => {
@@ -48,6 +55,335 @@ test("private transport routes concurrent responses, typed failures and actual f
       assert.equal(yield* engine.exit, 0);
     }).pipe(Effect.provide(layer), Effect.scoped),
   );
+});
+
+test("trusted managed CDP sessions isolate flattened replies and queued events", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const first = yield* engine.openCdpSession("page-a");
+      const second = yield* engine.openCdpSession("page-b");
+      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+
+      // Attach events arrive before either caller subscribes and must remain local to their lane.
+      const firstAttach = yield* first.events.pipe(Stream.take(1), Stream.runCollect);
+      const secondAttach = yield* second.events.pipe(Stream.take(1), Stream.runCollect);
+      assert.deepEqual(firstAttach, [
+        { method: "Runtime.executionContextCreated", params: { targetId: "page-a" } },
+      ]);
+      assert.deepEqual(secondAttach, [
+        { method: "Runtime.executionContextCreated", params: { targetId: "page-b" } },
+      ]);
+
+      const values = yield* Effect.all(
+        [
+          first.request("Runtime.evaluate", { expression: "first" }),
+          second.request("Runtime.evaluate", { expression: "second" }),
+        ],
+        { concurrency: 2 },
+      );
+      assert.deepEqual(values, [{ value: "first" }, { value: "second" }]);
+      assert.equal(
+        (yield* first.request("Target.closeTarget").pipe(Effect.flip)).code,
+        "cdp-session-method",
+      );
+      assert.equal(
+        (yield* second.request("Extensions.loadUnpacked").pipe(Effect.flip)).code,
+        "cdp-session-method",
+      );
+
+      yield* first.close;
+      assert.equal(
+        (yield* first.request("Runtime.enable").pipe(Effect.flip)).code,
+        "cdp-session-closed",
+      );
+      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+      yield* second.close;
+      yield* engine.claimRawCdp;
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("an external session detach closes its lane and releases raw ownership", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const session = yield* engine.openCdpSession("externally-detached");
+      assert.equal(
+        (yield* session.request("Runtime.triggerDetach").pipe(Effect.flip)).code,
+        "cdp-session-closed",
+      );
+      assert.equal(
+        (yield* session.request("Runtime.evaluate").pipe(Effect.flip)).code,
+        "cdp-session-closed",
+      );
+      yield* engine.claimRawCdp;
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("attach events are retained both before and after the reply, before a consumer starts", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      for (const targetId of ["same-write", "pre-reply"]) {
+        const session = yield* engine.openCdpSession(targetId);
+        assert.deepEqual(yield* session.events.pipe(Stream.take(1), Stream.runCollect), [
+          { method: "Runtime.executionContextCreated", params: { targetId } },
+        ]);
+        yield* session.close;
+      }
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("a root detach event completes a close whose detach reply never arrives", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const session = yield* engine.openCdpSession("detach-event");
+      yield* session.close;
+      yield* engine.claimRawCdp;
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("a silent detach timeout terminalizes the session event stream", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const session = yield* engine.openCdpSession("detach-never");
+      assert.equal((yield* session.close.pipe(Effect.flip)).code, "cdp-session-timeout");
+      assert.equal(
+        (yield* session.events.pipe(Stream.runDrain, Effect.flip)).code,
+        "cdp-session-timeout",
+      );
+      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("scope release bounds a silent detach cleanup", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const released = yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* engine.openCdpSession("detach-never");
+        }),
+      ).pipe(
+        Effect.as(true),
+        Effect.timeoutOrElse({ duration: 2_000, orElse: () => Effect.succeed(false) }),
+      );
+      assert.equal(released, true);
+      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("closing a full session request lane releases capacity for its bounded detach", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const session = yield* engine.openCdpSession("full-lane");
+      const received = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "session.holds"),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      const pending = yield* Effect.all(
+        Array.from({ length: 32 }, () =>
+          session.request("Runtime.hold").pipe(Effect.flip, Effect.forkScoped),
+        ),
+      );
+      yield* Effect.yieldNow;
+      yield* Fiber.join(received);
+      yield* session.close;
+      for (const fiber of pending)
+        assert.equal((yield* Fiber.join(fiber)).code, "cdp-session-closed");
+      yield* engine.claimRawCdp;
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(managedFunctionalLayer), Effect.scoped),
+  );
+});
+
+test("eight concurrent closes reserve detach capacity beyond 32 normal requests", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const sessions = yield* Effect.all(
+        Array.from({ length: 8 }, (_, index) => engine.openCdpSession(`reserve-${index}`)),
+      );
+      const received = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "session.holds"),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      const pending = yield* Effect.all(
+        Array.from({ length: 32 }, (_, index) =>
+          sessions[index % sessions.length]
+            .request("Runtime.hold")
+            .pipe(Effect.flip, Effect.forkScoped),
+        ),
+      );
+      yield* Effect.yieldNow;
+      yield* Fiber.join(received);
+      const closes = yield* Effect.all(
+        sessions.map((session) => session.close.pipe(Effect.exit, Effect.forkScoped)),
+      );
+      for (const close of closes) assert.equal((yield* Fiber.join(close))._tag, "Success");
+      for (const request of pending)
+        assert.equal((yield* Fiber.join(request)).code, "cdp-session-closed");
+      yield* engine.claimRawCdp;
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(managedFunctionalLayer), Effect.scoped),
+  );
+});
+
+test("overflow fails a session event stream and schedules detach without stalling the pipe", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const session = yield* engine.openCdpSession("overflow");
+      const written = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "session.overflow-sent"),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      yield* session.request("Runtime.overflow");
+      yield* Fiber.join(written);
+      // All burst bytes precede this result on fd4. Keep the event consumer stopped
+      // until the burst has either closed the lane or passed this ordering barrier.
+      yield* session.request("Runtime.evaluate", { expression: "barrier" }).pipe(Effect.exit);
+      assert.equal(
+        (yield* session.events.pipe(Stream.runDrain, Effect.flip)).code,
+        "cdp-event-capacity",
+      );
+      yield* session.close;
+      yield* engine.claimRawCdp;
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("one root detach cannot settle another concurrent close", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const first = yield* engine.openCdpSession("concurrent-a");
+      const second = yield* engine.openCdpSession("concurrent-b");
+      const both = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "detach.both-received"),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkScoped,
+      );
+      const firstClose = yield* first.close.pipe(Effect.exit, Effect.forkScoped);
+      const secondClose = yield* second.close.pipe(Effect.exit, Effect.forkScoped);
+      yield* Fiber.join(both);
+      assert.equal((yield* Fiber.join(firstClose))._tag, "Success");
+      assert.equal((yield* Fiber.join(secondClose))._tag, "Failure");
+      assert.equal(
+        (yield* second.events.pipe(Stream.runDrain, Effect.flip)).code,
+        "cdp-session-timeout",
+      );
+      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(managedFunctionalLayer), Effect.scoped),
+  );
+});
+
+test("an unknown attach cannot be cleared by closing another session", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const known = yield* engine.openCdpSession("known-b");
+      assert.equal(
+        (yield* engine.openCdpSession("attach-never").pipe(Effect.flip)).code,
+        "cdp-session-timeout",
+      );
+      yield* known.close;
+      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("one session timeout stays fenced when a different session closes", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const engine = yield* EngineConnection;
+      yield* engine.ready;
+      const timedOut = yield* engine.openCdpSession("timeout-a");
+      const other = yield* engine.openCdpSession("timeout-b");
+      assert.equal(
+        (yield* timedOut.request("Runtime.never").pipe(Effect.flip)).code,
+        "cdp-session-timeout",
+      );
+      yield* other.close;
+      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+      yield* timedOut.close;
+      yield* engine.claimRawCdp;
+      yield* engine.request("window.close");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+});
+
+test("overflow and oversized events during attach never silently drop a lane", async () => {
+  for (const targetId of [
+    "overflow-attach33",
+    "pre-reply-overflow",
+    "oversized-attach",
+    "detach-before-adoption",
+  ]) {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const engine = yield* EngineConnection;
+        yield* engine.ready;
+        const opened = yield* engine.openCdpSession(targetId).pipe(Effect.exit);
+        if (Exit.isSuccess(opened)) {
+          const error = yield* opened.value.events.pipe(
+            Stream.runDrain,
+            Effect.flip,
+            Effect.timeoutOrElse({
+              duration: 500,
+              orElse: () =>
+                Effect.succeed({
+                  code: "timeout",
+                  message: "attach event failure was not delivered",
+                }),
+            }),
+          );
+          assert.ok(
+            ["cdp-event-capacity", "cdp-event-size", "cdp-session-closed"].includes(error.code),
+          );
+          yield* opened.value.close.pipe(Effect.catch(() => Effect.void));
+        }
+        yield* engine.claimRawCdp;
+        yield* engine.request("window.close");
+      }).pipe(Effect.provide(layer), Effect.scoped),
+    );
+  }
 });
 
 const withExtensionEngine = async (
@@ -132,6 +468,39 @@ test("extension management is typed, bounded to profile artifacts, and exclusive
       }),
     // This checks capability/transport behavior; dedicated timeout cases retain the short deadline.
     3_000,
+  );
+});
+
+test("managed sessions coexist with extension management and reserve extension replies first", async () => {
+  await withExtensionEngine(
+    (engine, artifacts) =>
+      Effect.gen(function* () {
+        const session = yield* engine.openCdpSession("managed-extension-page");
+        const install = yield* engine.loadUnpacked(artifacts.f).pipe(Effect.forkScoped);
+        const value = yield* session.request("Runtime.evaluate", { expression: "managed" });
+        assert.deepEqual(value, { value: "managed" });
+        assert.equal(yield* Fiber.join(install), "a".repeat(32));
+        assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+        yield* session.close;
+        yield* engine.claimRawCdp;
+      }),
+    3_000,
+  );
+});
+
+test("a timed-out managed request fences raw only until detach while extensions remain usable", async () => {
+  await withExtensionEngine((engine, artifacts) =>
+    Effect.gen(function* () {
+      const session = yield* engine.openCdpSession("managed-timeout");
+      assert.equal(
+        (yield* session.request("Runtime.never").pipe(Effect.flip)).code,
+        "cdp-session-timeout",
+      );
+      assert.equal(yield* engine.loadUnpacked(artifacts.a), "a".repeat(32));
+      assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-owned");
+      yield* session.close;
+      yield* engine.claimRawCdp;
+    }),
   );
 });
 

@@ -189,7 +189,8 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
     ) {
       if (
         !options.manifest.capabilities.includes(capability) &&
-        !options.manifest.capabilities.includes("browser.full-control")
+        (capability === "cdp.connect" ||
+          !options.manifest.capabilities.includes("browser.full-control"))
       )
         return yield* denied();
     });

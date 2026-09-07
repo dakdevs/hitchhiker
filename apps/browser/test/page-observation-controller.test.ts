@@ -48,6 +48,7 @@ test("controller observations retain trusted open URLs and history routes only l
               }),
             loadUnpacked: () => Effect.die("unused"),
             uninstall: () => Effect.die("unused"),
+            openCdpSession: () => Effect.die("unused managed CDP session"),
             claimRawCdp: Effect.die("unused"),
           });
           const controller = yield* makeBrowserController(root).pipe(

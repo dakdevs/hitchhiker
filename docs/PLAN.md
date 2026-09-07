@@ -847,6 +847,12 @@ prove the [owned CDP session prerequisite](DEVTOOLS-PLAN.md#plugin-protocol-sess
 
 The new Native CDP fixture now proves separate flattened pipe sessions on one page, independent
 Runtime subscriptions alongside the private host observer, intercepted-fetch release on detach,
-and renderer timer resumption after debugger detach. The next step is the engine-owned session
-lane described in the [feasibility checkpoint](DEVTOOLS-PLAN.md#remote-debugging-pipe-feasibility-checkpoint),
-followed by owner/grant enforcement and SDK/MCP integration. No public CDP API is shipped yet.
+and renderer timer resumption after debugger detach. The subsequent engine-owned session lane now
+coexists with real extension install/removal, cleans up on scope exit and target closure, and keeps
+raw relay ownership separate. Portable regression tests cover request/event bounds, pre-reply events,
+independent concurrent cleanup, unknown attachments and timeout fences. Full repository checks pass
+525 portable tests with 48 Native-gated skips (`work/managed-cdp-full-check.log`). The separate final
+Native session fixtures pass 2 tests with no skips (`work/native-cdp-final.log`). See the
+[implementation checkpoint](DEVTOOLS-PLAN.md#engine-session-lane-implementation).
+Next bind sessions to controller page generations and plugin/MCP owners, enforce explicit durable
+`cdp.connect`, and expose documented SDK/MCP operations. No public CDP API is shipped yet.

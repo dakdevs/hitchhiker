@@ -102,6 +102,32 @@ accessibility and interactive input verification are not complete.
 
 ## Grants and CDP relay
 
+### Trusted managed sessions
+
+`EngineConnection.openCdpSession(targetId)` is an internal, scoped API for trusted browser code.
+It returns `request(method, params?)`, a single-consumer `events` stream of `{ method, params }`,
+and an awaited `close` effect. It never returns protocol request or session IDs. The caller must
+derive the Chromium target from authoritative page state; do not expose this connection or accept
+untrusted target IDs. A public plugin CDP API is not implemented yet.
+
+The lane supports eight active/opening sessions, 32 normal pending protocol requests and eight
+reserved cleanup slots. Each session buffers at most 32 events of at most 256 KiB each. Initial
+events have the same bounds, including events received before the attach response. Overflow fails
+the opening operation before adoption, or the event stream after adoption, and starts detach rather
+than blocking extension reply delivery. Commands use the
+engine request deadline (15 seconds by default) and the existing 32 MiB CDP frame limit. Scope
+release awaits cleanup. A failed detach remains closed and prevents raw takeover until detachment is
+confirmed; an unknown attach
+requires engine restart. Closing another session cannot clear that uncertainty.
+
+The transport denies `Target.*` and `Extensions.*` in session requests and injects owned session
+IDs itself. Typed extension installation/removal retains its reserved request-ID range and remains
+available during managed sessions. Raw relay ownership stays exclusive. This transport boundary
+does not implement plugin authorization, origin isolation or a public method policy. See the
+[DevTools plan](DEVTOOLS-PLAN.md#engine-session-lane-implementation) for verification and remaining work.
+
+### Durable grants and raw relay
+
 The grant store generates a 32-byte random bearer credential and persists only its SHA-256 hash.
 The containing directory is mode 0700 and the atomically replaced grant file is mode 0600. The store
 limits file size and grant count. Authorization rereads durable state under its mutation permit and

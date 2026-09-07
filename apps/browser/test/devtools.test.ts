@@ -78,6 +78,7 @@ const fixture = Effect.gen(function* () {
         yield* Deferred.succeed(closed, undefined);
         return { ...next };
       }),
+    openCdpSession: () => Effect.die("unused managed CDP session"),
     claimRawCdp: Effect.die("Unused"),
     loadUnpacked: () => Effect.die("Unused"),
     uninstall: () => Effect.die("Unused"),
