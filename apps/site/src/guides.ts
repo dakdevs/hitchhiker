@@ -15,7 +15,7 @@ export const pluginGuide: readonly GuideSection[] = [
     title: "A browser assembled from plugins",
     paragraphs: [
       "Hitchhiker is being built as a Chromium host with a shared Native design framework. The target default browser is a composition of plugins: a tab model, vertical or horizontal presentation, optional pinning, navigation, and developer tools. Those pieces must use the same public APIs as third-party plugins.",
-      "This migration is not complete. A configured profile can compose a layout and its declared UI contributions, while the built-in controller still owns default tab behavior. Generic plugin services and dependency-aware activation remain pending. Do not assume that every default-browser feature is a plugin yet.",
+      "This migration is not complete. Installed plugins can now exchange declared services with dependency-aware activation, while the built-in controller still owns default tab behavior. Default browser migration and live service-recipe editing remain pending. Do not assume that every default-browser feature is a plugin yet.",
     ],
   },
   {
@@ -143,6 +143,85 @@ definePlugin({
 });`,
   },
   {
+    id: "plugin-services",
+    title: "Connect installed plugins with services",
+    paragraphs: [
+      "Services work for installed plugins without a UI layout. Declare each provided service and dependency in hitchhiker.plugin.json with the same exact contract { name, version, digest }. A contract digest records the agreement between plugins; each plugin still validates its own state and command data. Copy the profile binding file to hitchhiker-plugins/services.json before startup. It selects a provider service for each consumer dependency alias and never installs code or grants permissions.",
+      "The manager starts providers before required consumers. Disabling, uninstalling, or replacing a required provider stops dependent workers but retains their enabled preference, so they resume when the provider is usable again. Optional consumers stay running and see unavailable state. A consumer's effective grant must contain the provider's authority, including origins; cdp.connect must be granted explicitly even when browser.full-control is present.",
+      "Use services.publish(service, value), get(dependency), subscribe(dependency), and call(dependency, method, params). subscribe returns the current snapshot, then service.state announces revisions; use get for the current value. Providers register handlers under definePlugin({ services }). Calls time out after three seconds and the SDK never retries them automatically, because a timed-out provider may still complete a side effect.",
+      "Each JSON state, input, and result is limited to 128 KiB, depth 32, 4,096 nodes, and 64 KiB of combined string and key bytes. Published state shares a 1 MiB broker budget. The broker permits 16 pending calls per consumer, 32 per provider, and 128 total; subscriptions retain only the latest revision for each dependency.",
+    ],
+    code: `// service-provider.hitchhiker.plugin.json
+{
+  "id": "service-provider",
+  "name": "Counter service",
+  "version": "1.0.0",
+  "capabilities": [],
+  "provides": [{
+    "id": "counter",
+    "contract": {
+      "name": "example.counter",
+      "version": "1.0.0",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  }]
+}
+
+// hitchhiker-plugins/services.json
+{
+  "bindings": [{
+    "consumer": "service-consumer",
+    "dependency": "counter",
+    "provider": "service-provider",
+    "service": "counter"
+  }]
+}`,
+  },
+  {
+    id: "service-api",
+    title: "Publish state and handle commands",
+    paragraphs: [
+      "The consumer manifest declares requires with the same counter contract and may mark a dependency optional: true. The provider can publish initial state during activate. Consumers should use the snapshot returned by subscribe during activation because service event forwarding begins after activation resolves.",
+    ],
+    code: `import { definePlugin, type PluginApi } from "@hitchhiker/plugin-sdk";
+
+let api: PluginApi;
+let value = 0;
+definePlugin({
+  async activate(host) {
+    api = host;
+    await api.services.publish("counter", { value });
+  },
+  services: {
+    async counter(method) {
+      if (method !== "increment") throw new Error("Unknown counter command");
+      value += 1;
+      await api.services.publish("counter", { value });
+      return { value };
+    },
+  },
+});
+
+`,
+  },
+  {
+    id: "service-consumer",
+    title: "Read a dependency during activation",
+    paragraphs: [
+      "This is a complete consumer entry point. Its manifest declares counter in requires with the exact contract shown for the provider, and services.json binds that dependency before startup.",
+    ],
+    code: `import { definePlugin } from "@hitchhiker/plugin-sdk";
+
+definePlugin({
+  async activate(api) {
+    const initial = await api.services.subscribe("counter");
+    const current = await api.services.get("counter");
+    const result = await api.services.call("counter", "increment", null);
+    await api.services.publish("report", { initial, current, result });
+  },
+});`,
+  },
+  {
     id: "plugin-api",
     title: "Plugin API reference",
     paragraphs: [
@@ -157,6 +236,26 @@ definePlugin({
         ["pages.close(pageId)", "pages.manage", "void; requests closure through Chromium"],
         ["configuration.get()", "configuration.write", "BrowserConfiguration"],
         ["configuration.set(configuration)", "configuration.write", "void; validated replacement"],
+        [
+          "services.publish(service, value)",
+          "Declared provides; bound consumer authority",
+          "{ revision }; publishes portable provider state",
+        ],
+        [
+          "services.get(dependency)",
+          "Declared requires; profile binding and authority containment",
+          "ServiceSnapshot; unavailable optional providers return { available: false }",
+        ],
+        [
+          "services.subscribe(dependency)",
+          "Declared requires; profile binding and authority containment",
+          "ServiceSnapshot; later revisions arrive as service.state events",
+        ],
+        [
+          "services.call(dependency, method, params)",
+          "Declared requires; profile binding and authority containment",
+          "JSON result; provider handler has a three-second response deadline",
+        ],
         [
           "ui.publish(surface)",
           "ui.compose",

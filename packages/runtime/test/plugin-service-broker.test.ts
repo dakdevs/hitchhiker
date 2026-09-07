@@ -373,3 +373,132 @@ test("a timed-out call rejects its late response and releases routing capacity",
     }),
   );
 });
+
+test("invalid reconfiguration preserves active state, routing, and pending calls", async () => {
+  const installed = [
+    plugin("provider", ["echo"]),
+    plugin("provider-b", ["echo"]),
+    plugin("consumer", [], [{ id: "echo" }]),
+  ];
+  const bindings = [
+    { consumer: "consumer", dependency: "echo", provider: "provider", service: "echo" },
+  ];
+  await withBroker(installed, bindings, (broker) =>
+    Effect.gen(function* () {
+      const providerB = consumer(1, "provider-b");
+      yield* broker.activate(provider());
+      yield* broker.ready(owner(provider()));
+      yield* broker.publish(owner(provider()), "echo", { stable: true });
+      yield* broker.activate(providerB);
+      yield* broker.ready(owner(providerB));
+      yield* broker.activate(consumer());
+
+      const call = yield* Effect.forkScoped(
+        broker.call(owner(consumer()), "echo", "pending", null),
+      );
+      const request = yield* nextEvent(broker, provider());
+      const payload = Schema.decodeUnknownSync(Schema.Struct({ callId: Schema.String }))(
+        request.payload,
+      );
+      const changed = yield* validateServiceGraph(installed, [
+        {
+          consumer: "consumer",
+          dependency: "echo",
+          provider: "provider-b",
+          service: "echo",
+        },
+      ]);
+      assert(Exit.isFailure(yield* Effect.exit(broker.reconfigure(changed))));
+      const removed = yield* validateServiceGraph([], []);
+      assert(Exit.isFailure(yield* Effect.exit(broker.reconfigure(removed))));
+
+      assert.deepEqual(yield* broker.get(owner(consumer()), "echo"), {
+        available: true,
+        providerGeneration: 1,
+        revision: 1,
+        value: { stable: true },
+      });
+      yield* broker.respond(owner(provider()), { callId: payload.callId, result: { ok: true } });
+      assert.deepEqual(yield* Fiber.join(call), { ok: true });
+    }),
+  );
+});
+
+test("optional provider admission and removal retain the consumer and notify latest state", async () => {
+  const withoutProvider = [plugin("consumer", [], [{ id: "echo", optional: true }])];
+  const withProvider = [plugin("provider", ["echo"]), ...withoutProvider];
+  const binding = [
+    { consumer: "consumer", dependency: "echo", provider: "provider", service: "echo" },
+  ];
+  await withBroker(withoutProvider, [], (broker) =>
+    Effect.gen(function* () {
+      yield* broker.activate(consumer());
+      assert.deepEqual(yield* broker.subscribe(owner(consumer()), "echo"), {
+        available: false,
+      });
+
+      yield* broker.reconfigure(yield* validateServiceGraph(withProvider, binding));
+      yield* broker.activate(provider());
+      yield* broker.ready(owner(provider()));
+      yield* broker.publish(owner(provider()), "echo", { available: true });
+      assert.deepEqual((yield* nextEvent(broker, consumer())).payload, {
+        dependency: "echo",
+        providerGeneration: 1,
+        revision: 1,
+        available: true,
+      });
+
+      yield* broker.deactivate(owner(provider()));
+      yield* broker.reconfigure(yield* validateServiceGraph(withoutProvider, []));
+      assert.deepEqual((yield* nextEvent(broker, consumer())).payload, {
+        dependency: "echo",
+        providerGeneration: 1,
+        revision: 0,
+        available: false,
+      });
+      assert.deepEqual(yield* broker.get(owner(consumer()), "echo"), { available: false });
+
+      yield* broker.reconfigure(yield* validateServiceGraph(withProvider, binding));
+      assert(Exit.isFailure(yield* Effect.exit(broker.activate(provider()))));
+      yield* broker.activate(provider(2));
+    }),
+  );
+});
+
+test("optional binding replacement rejects affected pending calls without stopping peers", async () => {
+  const installed = [
+    plugin("provider", ["echo"]),
+    plugin("consumer", [], [{ id: "echo", optional: true }]),
+  ];
+  const binding = [
+    { consumer: "consumer", dependency: "echo", provider: "provider", service: "echo" },
+  ];
+  await withBroker(installed, binding, (broker) =>
+    Effect.gen(function* () {
+      yield* broker.activate(provider());
+      yield* broker.ready(owner(provider()));
+      yield* broker.activate(consumer());
+      const call = yield* Effect.forkScoped(
+        Effect.exit(broker.call(owner(consumer()), "echo", "pending", null)),
+      );
+      const request = yield* nextEvent(broker, provider());
+      const payload = Schema.decodeUnknownSync(Schema.Struct({ callId: Schema.String }))(
+        request.payload,
+      );
+
+      yield* broker.reconfigure(yield* validateServiceGraph(installed, []));
+      assert(Exit.isFailure(yield* Fiber.join(call)));
+      assert(
+        Exit.isFailure(
+          yield* Effect.exit(
+            broker.respond(owner(provider()), { callId: payload.callId, result: { late: true } }),
+          ),
+        ),
+      );
+      assert.deepEqual(yield* broker.get(owner(consumer()), "echo"), { available: false });
+      assert.deepEqual(yield* broker.publish(owner(provider()), "echo", { still: "active" }), {
+        revision: 1,
+      });
+    }),
+  );
+});

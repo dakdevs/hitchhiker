@@ -1,0 +1,26 @@
+{
+  "id": "service-consumer",
+  "name": "Counter consumer",
+  "version": "1.0.0",
+  "capabilities": [],
+  "provides": [
+    {
+      "id": "report",
+      "contract": {
+        "name": "example.counter",
+        "version": "1.0.0",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ],
+  "requires": [
+    {
+      "id": "counter",
+      "contract": {
+        "name": "example.counter",
+        "version": "1.0.0",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ]
+}

@@ -712,18 +712,22 @@ test("cross-manager writers preserve both durable registry entries and reject sy
           });
           const launcher = (_artifact: unknown, _grant: string, ready: Effect.Effect<void>) =>
             ready.pipe(Effect.andThen(Effect.never));
-          const a = yield* createPluginManager({ profileRoot: root, grants, launch: launcher });
-          const secondGrants = {
-            authenticateGrant: () => Effect.succeed({ principal: "second-plugin", grant: {} }),
-            authorizeGrant: () => Effect.succeed({ principal: "second-plugin", grant: {} }),
-          } as unknown as GrantStoreApi;
+          const sharedGrants = compositionGrants({
+            "grant-1": "manager-plugin",
+            "grant-2": "second-plugin",
+          });
+          const a = yield* createPluginManager({
+            profileRoot: root,
+            grants: sharedGrants,
+            launch: launcher,
+          });
           const b = yield* createPluginManager({
             profileRoot: root,
-            grants: secondGrants,
+            grants: sharedGrants,
             launch: launcher,
           });
           yield* Effect.forEach(
-            [a.install(first.hash, "grant-1"), b.install(second.hash, "grant-1")],
+            [a.install(first.hash, "grant-1"), b.install(second.hash, "grant-2")],
             (effect) => effect,
             { concurrency: "unbounded" },
           );

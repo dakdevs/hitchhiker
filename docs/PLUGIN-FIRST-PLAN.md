@@ -41,8 +41,8 @@ their controls belong to plugins; invariant security enforcement stays in the ho
 
 `apps/browser/src/controller.ts` imports the default interface, owns tab selection/order/pins,
 dispatches default action strings, and renders navigation/settings/plugin screens. The SDK exposes
-whole-window `ui.publish`/`ui.release` and configured independent UI contributions. Service dependencies
-are not yet connected to installed workers, and the default features still use the controller.
+whole-window `ui.publish`/`ui.release`, configured independent UI contributions and installed service
+dependencies. The default features still use the controller.
 Legacy `ui.release` returns to a trusted default, which must become a configured plugin composition.
 The installed package manager, grants and isolated worker machinery can be reused, but do not prove
 the default experience is plugin-based.
@@ -215,3 +215,32 @@ recipe/manager wiring and default feature extraction remain unimplemented.
 Verification on September 6: `pnpm check` passed, and the complete native suite passed all 252 tests
 without skips (142 runtime, 110 browser). This verifies the generic service foundation and SDK
 transport fixture, not installed service composition or the performance of the final default plugins.
+
+## Installed services integration
+
+Use a separate profile-local `hitchhiker-plugins/services.json` for trusted service bindings so a
+headless service graph does not require a UI layout. The file is bounded, strictly decoded and read
+at startup; it grants no authority and does not install code. Manager orchestration must validate
+the prospective enabled cohort before replacing live workers. Restore, updates, rollback and crash
+recovery must use that same coordinator. Deliberate provider changes stop required consumers as
+expected lifecycle changes, preserving their enabled preferences; failed providers must not trigger
+unrelated consumer rollback. Optional providers may disappear without restarting their consumers.
+The installed launcher now binds the broker to the manager-selected grant and activation generation.
+Manager preflight checks the prospective runnable cohort before mutations, preserves enabled
+preferences for consumers blocked by missing required providers, and reconciles in dependency order.
+Broker reconfiguration retains optional consumers and unchanged state. Same-artifact grant changes
+restart the worker and its required dependents. Before automatic provider fallback, expected dependent
+stops are explicitly joined so a draining old worker cannot suppress its replacement.
+
+Focused manager tests cover required suspension/resumption, optional consumer retention, incompatible
+contract rejection, changed credential bindings and gated crash cleanup before fallback. A real MCP
+fixture installs the two SDK examples, replaces the provider, restores both after a fresh process,
+removes/reinstalls the provider, and starts safe mode with a malformed service recipe. Exported plugin
+requirements retain service declarations. The marketing-site guide includes the service APIs,
+permissions, binding example and complete provider/consumer entry points.
+
+Final integration verification on September 6: `pnpm check` passed and all 264 native tests passed
+without skips (146 runtime, 118 browser). The first concurrent repository check hit the existing
+two-second MCP child shutdown deadline; its focused suite and the full rerun passed without changing
+the deadline. The default-feature plugin extraction and complete Chromium/DevTools API coverage
+remain unfinished.

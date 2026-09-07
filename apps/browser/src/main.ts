@@ -15,6 +15,7 @@ import { createInstalledPluginLauncher, runPluginDirectory } from "./plugin.ts";
 import { createPluginArtifactStore } from "./plugin-artifacts.ts";
 import { createBrowserComposition } from "./composition.ts";
 import { readCompositionRecipe } from "./composition-recipe.ts";
+import { readServiceRecipe } from "./service-recipe.ts";
 import { createPluginManager } from "./plugin-manager.ts";
 import { browserMcpApi } from "./mcp.ts";
 import { makeBrowserController } from "./controller.ts";
@@ -116,7 +117,8 @@ const program = Effect.gen(function* () {
       }),
     ).pipe(Effect.asVoid);
     const recipe = safeMode ? undefined : yield* readCompositionRecipe(profileLease.profileRoot);
-    if (recipe && pluginDirectory)
+    const serviceRecipe = safeMode ? undefined : yield* readServiceRecipe(profileLease.profileRoot);
+    if ((recipe || serviceRecipe) && pluginDirectory)
       return yield* Effect.die(
         "A profile composition uses installed plugins; --plugin cannot replace it. Use a separate developer profile.",
       );
@@ -146,6 +148,7 @@ const program = Effect.gen(function* () {
         grants,
         launch,
         compositionOwners: composition?.owners,
+        serviceBindings: serviceRecipe?.bindings,
         safeMode: process.argv.includes("--safe-mode") || pluginDirectory !== undefined,
         onRecoveryFailure: recoveryFailure,
       });
@@ -169,17 +172,16 @@ const program = Effect.gen(function* () {
         rollback: manager.rollback,
         requirements: () =>
           manager.list().pipe(
-            Effect.map((entries) =>
-              entries.map((entry) => ({
-                manifest: {
-                  id: entry.id,
-                  name: entry.name,
-                  version: entry.version,
-                  capabilities: entry.capabilities,
-                },
-                hash: entry.hash,
-                enabled: entry.enabled,
-              })),
+            Effect.flatMap((entries) =>
+              Effect.forEach(entries, (entry) =>
+                artifacts.read(entry.hash).pipe(
+                  Effect.map((artifact) => ({
+                    manifest: artifact.manifest,
+                    hash: entry.hash,
+                    enabled: entry.enabled,
+                  })),
+                ),
+              ),
             ),
           ),
       };

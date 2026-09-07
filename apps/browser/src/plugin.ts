@@ -6,6 +6,7 @@ import type { BrowserController } from "./controller.ts";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import type { BrowserComposition } from "./composition.ts";
 import type { PluginArtifact } from "./plugin-artifacts.ts";
+import type { InstalledPluginActivation } from "./plugin-manager.ts";
 
 /** Captures only trusted services; persisted grant IDs never become wire credentials. */
 export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledPluginLauncher")(
@@ -18,11 +19,22 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
   }) {
     const engine = yield* EngineConnection;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    let generation = 0;
-    return (artifact: PluginArtifact, grantId: string, onReady: Effect.Effect<void>) => {
+    return (
+      artifact: PluginArtifact,
+      grantId: string,
+      onReady: Effect.Effect<void>,
+      activation: InstalledPluginActivation,
+    ) => {
       const owner = crypto.randomUUID();
       const composition = options.composition;
-      const composedOwner = { id: artifact.manifest.id, generation: ++generation };
+      const composedOwner = { id: artifact.manifest.id, generation: activation.generation };
+      const services = activation.services;
+      const serviceParty = {
+        ...composedOwner,
+        profileId: activation.profileId,
+        grantId,
+        declaredCapabilities: artifact.manifest.capabilities,
+      };
       const hasUi = artifact.manifest.capabilities.some(
         (capability) => capability === "ui.compose" || capability === "browser.full-control",
       );
@@ -38,7 +50,7 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
         code: artifact.code,
         executable: options.executable,
         token: "trusted-installed-grant",
-        profileId: "default",
+        profileId: activation.profileId,
         grants: boundGrants,
         browser: browserMcpApi(options.controller),
         publish: (surface) => options.controller.publishPluginSurface(owner, surface),
@@ -46,7 +58,21 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
           ? composition.release(composedOwner)
           : options.controller.releasePluginSurface(owner),
         onStop: composition ? Effect.void : undefined,
-        stopWhen: composition?.failure(composedOwner),
+        stopWhen: Effect.raceFirst(
+          composition?.failure(composedOwner) ?? Effect.never,
+          services?.failure(composedOwner) ?? Effect.never,
+        ),
+        serviceEvents: services?.events(composedOwner),
+        services: services
+          ? {
+              publish: (service, value) => services.publish(composedOwner, service, value),
+              get: (dependency) => services.get(composedOwner, dependency),
+              subscribe: (dependency) => services.subscribe(composedOwner, dependency),
+              call: (dependency, method, params) =>
+                services.call(composedOwner, dependency, method, params),
+              respond: (response) => services.respond(composedOwner, response),
+            }
+          : undefined,
         composition: composition
           ? {
               publishLayout: (surface) => composition.publishLayout(composedOwner, surface),
@@ -55,7 +81,7 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
               withdrawContribution: (id) => composition.withdrawContribution(composedOwner, id),
             }
           : undefined,
-        onReady,
+        onReady: services ? services.ready(composedOwner).pipe(Effect.andThen(onReady)) : onReady,
         onRecoveryFailure: options.onRecoveryFailure,
         events: Stream.merge(
           composition ? composition.events(composedOwner) : options.controller.pluginEvents(owner),
@@ -65,13 +91,21 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
           ),
         ),
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
-      if (!composition || !hasUi) return run;
-      return Effect.acquireRelease(composition.activate(composedOwner), () =>
-        composition.remove(composedOwner).pipe(
-          Effect.asVoid,
-          Effect.catchCause((cause) => options.onRecoveryFailure ?? Effect.die(cause)),
-        ),
-      ).pipe(Effect.andThen(run), Effect.scoped);
+      const composedRun =
+        !composition || !hasUi
+          ? run
+          : Effect.acquireRelease(composition.activate(composedOwner), () =>
+              composition.remove(composedOwner).pipe(
+                Effect.asVoid,
+                Effect.catchCause((cause) => options.onRecoveryFailure ?? Effect.die(cause)),
+              ),
+            ).pipe(Effect.andThen(run), Effect.scoped);
+      const supervised = composedRun.pipe(Effect.ensuring(activation.onStopping));
+      return services
+        ? Effect.acquireRelease(services.activate(serviceParty), () =>
+            services.deactivate(composedOwner),
+          ).pipe(Effect.andThen(supervised), Effect.scoped)
+        : supervised;
     };
   },
 );

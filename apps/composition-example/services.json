@@ -1,0 +1,10 @@
+{
+  "bindings": [
+    {
+      "consumer": "service-consumer",
+      "dependency": "counter",
+      "provider": "service-provider",
+      "service": "counter"
+    }
+  ]
+}

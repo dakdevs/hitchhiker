@@ -44,17 +44,18 @@ input inbox; early actions are retained, and overflowing one inbox stops only th
 
 See [the runnable composition example](../../apps/composition-example/README.md),
 [the canvas example](../../apps/canvas-plugin/src/index.ts), and
-[development instructions](../../docs/DEVELOPMENT.md). The built-in tabs/controller migration and
-generic plugin services are still pending; do not assume every Chromium API or default-browser feature
+[development instructions](../../docs/DEVELOPMENT.md). The built-in tabs/controller migration
+is still pending; do not assume every Chromium API or default-browser feature
 is exposed by this SDK.
 
-## Experimental service transport
+## Plugin services
 
 The SDK includes `services.publish(service, value)`, `get(dependency)`, `subscribe(dependency)` and
-`call(dependency, method, params)`. These require a host service adapter. Installed browser profiles
-do not bind this adapter yet, so these operations currently fail there. The runtime fixture in
-[`native-plugin-services.test.ts`](../runtime/test/native-plugin-services.test.ts) exercises the
-intended integration using two separately isolated SDK artifacts.
+`call(dependency, method, params)`. Installed plugins receive an identity-bound adapter when their
+manifest declares provided services or dependencies. Profile-local `hitchhiker-plugins/services.json`
+binds dependencies independently of UI composition. It is read at startup and ignored in safe mode.
+The [installed native fixture](../runtime/test/native-installed-services.test.ts) exercises real SDK
+artifacts through MCP installation, provider replacement and fresh-process restore.
 
 A provider declares `provides` in its manifest and registers handlers through
 `definePlugin({ services: { serviceId: handler }, activate })`. A consumer declares `requires`.
@@ -72,13 +73,21 @@ sharing with those consumers.
 `get` to read the latest snapshot. A missing optional provider yields `{ available: false }`.
 Feature schemas, including any future tab model, remain outside the host.
 
+The manager starts providers before consumers. Disabling or uninstalling a required provider stops
+its consumers while preserving their enabled preferences; restoring the provider resumes them.
+Optional consumers keep running and receive availability changes. A compatible provider update
+restarts required consumers after joining their old workers. Incompatible contracts or grants reject
+the update before stopping the current cohort. A changed grant restarts the worker even when its
+artifact hash is unchanged. Recipes may retain bindings for future or disabled plugins; only the
+runnable cohort is admitted. Live recipe editing is not supported yet.
+
 Providers may publish initial state during `activate`. Consumers must use the returned subscription
 snapshot during activation: event forwarding begins after activation resolves, so waiting for a later
 event inside `activate` would prevent startup. Service handlers may call dependencies that have already
 become ready. A command timeout does not prove the provider stopped executing it; consumers must not
 automatically retry commands with side effects.
 
-The experimental broker limits each JSON value to 128 KiB, depth 32, 4,096 nodes and 64 KiB of
+The broker limits each JSON value to 128 KiB, depth 32, 4,096 nodes and 64 KiB of
 combined string/key bytes. Published state shares a 1 MiB budget across the broker. Calls have a
 three-second response deadline and limits of 16 per consumer, 32 per provider and 128 overall.
 Notifications retain only the latest revision for each subscribed dependency. These are resource

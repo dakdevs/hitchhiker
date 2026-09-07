@@ -2,9 +2,18 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import type { Capability } from "@hitchhiker/core";
-import type { GrantStoreApi } from "@hitchhiker/runtime";
+import {
+  createPluginServiceBroker,
+  createServiceAuthority,
+  validateServiceGraph,
+  type GrantStoreApi,
+  type PluginServiceBroker,
+  type ServiceBinding,
+  type ServiceGraph,
+} from "@hitchhiker/runtime";
 import { Clock, Deferred, Effect, Fiber, Option, Schema, Semaphore, Scope } from "effect";
 import { createPluginArtifactStore, type PluginArtifact } from "./plugin-artifacts.ts";
+import { planInstalledServices, requiredDependentClosure } from "./installed-service-plan.ts";
 
 const RegistryName = "plugins.json";
 const MutationLockName = ".plugin-write-lock";
@@ -14,6 +23,8 @@ const RegistryLimit = 32 * 1024;
 const MutationLockTimeoutMs = 1_000;
 const MutationLockRetryMs = 25;
 const Hash = /^[a-f0-9]{64}$/;
+// A compositor can outlive a manager scope during in-process recovery.
+let nextActivationGeneration = 0;
 
 export class PluginManagerError extends Schema.TaggedError<PluginManagerError>()(
   "PluginManagerError",
@@ -76,6 +87,13 @@ export interface PluginManager {
   readonly rollback: (id: string) => Effect.Effect<void, PluginManagerError>;
   readonly restore: () => Effect.Effect<void, PluginManagerError>;
 }
+export interface InstalledPluginActivation {
+  readonly generation: number;
+  readonly profileId: string;
+  readonly services?: PluginServiceBroker;
+  /** Runs before the launcher removes this provider from the broker. */
+  readonly onStopping: Effect.Effect<void>;
+}
 export interface PluginManagerOptions {
   readonly profileRoot: string;
   readonly profileId?: string;
@@ -85,10 +103,12 @@ export interface PluginManagerOptions {
     grantId: string,
     /** The launcher runs this only after activation has fulfilled. */
     onReady: Effect.Effect<void>,
+    activation: InstalledPluginActivation,
   ) => Effect.Effect<void, unknown>;
   readonly safeMode?: boolean;
   /** Configured UI owners use the host compositor instead of whole-window ownership. */
   readonly compositionOwners?: ReadonlySet<string>;
+  readonly serviceBindings?: readonly ServiceBinding[];
   /** Reserved for launcher failures to restore the trusted interface. */
   readonly onRecoveryFailure?: Effect.Effect<void>;
 }
@@ -154,20 +174,29 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
   );
   const lock = yield* Semaphore.make(1);
   const managerScope = yield* Scope.make();
-  let nextGeneration = 0;
   const running = new Map<
     string,
     {
       readonly generation: number;
+      readonly hash: string;
+      readonly grantId: string;
       expectedStop: boolean;
       readonly stop: () => Effect.Effect<void>;
     }
   >();
+  const latestGeneration = new Map<string, number>();
   yield* Effect.addFinalizer((exit) =>
     Effect.sync(() => {
       for (const record of running.values()) record.expectedStop = true;
     }).pipe(Effect.andThen(Scope.close(managerScope, exit))),
   );
+  let serviceGraph = yield* validateServiceGraph([], []).pipe(Effect.orDie);
+  const serviceAuthority = createServiceAuthority(options.grants);
+  const serviceBroker = yield* createPluginServiceBroker({
+    graph: serviceGraph,
+    profileId,
+    authority: serviceAuthority,
+  }).pipe(Effect.provideService(Scope.Scope, managerScope));
   let mutationPoisoned = false;
   const poisonMutation = Effect.sync(() => {
     mutationPoisoned = true;
@@ -418,9 +447,26 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       return yield* failure("Configured composition owner must declare ui.compose");
     yield* authorize(artifact, plugin.revision.grantId);
     const ready = yield* Deferred.make<void, PluginManagerError>();
-    const generation = ++nextGeneration;
+    if (nextActivationGeneration >= Number.MAX_SAFE_INTEGER)
+      return yield* failure("Plugin activation generation limit reached");
+    const generation = ++nextActivationGeneration;
     const launched = options
-      .launch(artifact, plugin.revision.grantId, Deferred.succeed(ready, undefined))
+      .launch(artifact, plugin.revision.grantId, Deferred.succeed(ready, undefined), {
+        generation,
+        profileId,
+        services:
+          (artifact.manifest.provides?.length ?? 0) + (artifact.manifest.requires?.length ?? 0) > 0
+            ? serviceBroker
+            : undefined,
+        onStopping: Effect.sync(() => {
+          if (latestGeneration.get(plugin.id) !== generation) return;
+          for (const id of requiredDependentClosure(serviceGraph, new Set([plugin.id]))) {
+            if (id === plugin.id) continue;
+            const dependent = running.get(id);
+            if (dependent) dependent.expectedStop = true;
+          }
+        }),
+      })
       .pipe(Effect.catch(() => Deferred.fail(ready, failure("Plugin host stopped"))));
     const fiber = yield* launched.pipe(
       Effect.mapError(() => failure("Plugin host stopped")),
@@ -433,9 +479,12 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     );
     const record = {
       generation,
+      hash: plugin.revision.hash,
+      grantId: plugin.revision.grantId,
       expectedStop: false,
       stop: () => Fiber.interrupt(fiber).pipe(Effect.asVoid),
     };
+    latestGeneration.set(plugin.id, generation);
     running.set(plugin.id, record);
     yield* Effect.gen(function* () {
       yield* Deferred.await(ready).pipe(
@@ -460,6 +509,87 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     artifact.manifest.capabilities.some(
       (capability) => capability === "ui.compose" || capability === "browser.full-control",
     );
+  const prepareServices = Effect.fn("PluginManager.prepareServices")(function* (
+    registry: Registry,
+    requiredTarget?: string,
+  ) {
+    const enabled = registry.plugins.filter((plugin) => plugin.enabled);
+    const selected = new Map<
+      string,
+      { readonly plugin: StoredPlugin; readonly artifact: PluginArtifact }
+    >();
+    for (const plugin of enabled) {
+      const artifact = yield* artifactFor(plugin, plugin.revision);
+      selected.set(plugin.id, { plugin, artifact });
+    }
+    const plan = yield* planInstalledServices(
+      [...selected.values()].map(({ artifact }) => ({
+        manifest: artifact.manifest,
+        enabled: true,
+      })),
+      options.serviceBindings ?? [],
+    ).pipe(Effect.mapError((error) => failure(error.message)));
+    if (requiredTarget && !plan.graph.order.includes(requiredTarget))
+      return yield* failure("Required service provider is unavailable");
+    if (plan.graph.order.length > MaxRunning) return yield* failure("At most four plugins may run");
+    for (const id of plan.graph.order) {
+      const entry = selected.get(id)!;
+      yield* authorize(entry.artifact, entry.plugin.revision.grantId);
+    }
+    const party = (id: string) => {
+      const entry = selected.get(id)!;
+      return {
+        id,
+        generation: 1,
+        profileId,
+        grantId: entry.plugin.revision.grantId,
+        declaredCapabilities: entry.artifact.manifest.capabilities,
+      };
+    };
+    for (const binding of plan.graph.bindings)
+      yield* serviceAuthority
+        .authorizeService(party(binding.consumer), party(binding.provider))
+        .pipe(Effect.mapError(() => failure("Service authority is not authorized")));
+    return plan.graph;
+  });
+  const quiesceServices = Effect.fn("PluginManager.quiesceServices")(function* (
+    registry: Registry,
+    next: ServiceGraph,
+  ) {
+    const desired = new Map(registry.plugins.map((plugin) => [plugin.id, plugin]));
+    const changed = new Set<string>();
+    for (const [id, record] of running)
+      if (
+        record.expectedStop ||
+        !next.order.includes(id) ||
+        desired.get(id)?.revision.hash !== record.hash ||
+        desired.get(id)?.revision.grantId !== record.grantId
+      )
+        changed.add(id);
+    const affected = requiredDependentClosure(serviceGraph, changed);
+    // Mark the entire closure before any provider cleanup can wake a crash supervisor.
+    for (const id of affected) {
+      const record = running.get(id);
+      if (record) record.expectedStop = true;
+    }
+    const order = [...serviceGraph.order, ...running.keys()].filter(
+      (id, index, all) => all.indexOf(id) === index,
+    );
+    for (const id of order.reverse()) if (affected.has(id)) yield* stop(id);
+    yield* serviceBroker.reconfigure(next).pipe(Effect.mapError((error) => failure(error.message)));
+    serviceGraph = next;
+  });
+  const reconcileServices = Effect.fn("PluginManager.reconcileServices")(function* (
+    registry: Registry,
+  ): Effect.fn.Return<void, PluginManagerError> {
+    const next = yield* prepareServices(registry);
+    yield* quiesceServices(registry, next);
+    for (const id of next.order) {
+      if (running.has(id)) continue;
+      const plugin = registry.plugins.find((entry) => entry.id === id)!;
+      yield* start(plugin);
+    }
+  });
   const activate = Effect.fn("PluginManager.activate")(function* (
     registry: Registry,
     plugin: StoredPlugin,
@@ -483,8 +613,13 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       failures,
       lastFailure: undefined,
     };
+    const prospective = {
+      version: 1 as const,
+      plugins: [...registry.plugins.filter((entry) => entry.id !== plugin.id), starting],
+    };
+    yield* prepareServices(prospective, plugin.id);
     yield* put(registry, starting);
-    yield* start(starting);
+    yield* reconcileServices(prospective);
     const fresh = yield* load();
     const persisted = fresh.plugins.find((entry) => entry.id === plugin.id);
     if (!persisted || persisted.revision.hash !== starting.revision.hash)
@@ -502,12 +637,13 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       if (!old) {
         const current = fresh.plugins.find((entry) => entry.id === candidate.id) ?? candidate;
         yield* put(fresh, { ...current, enabled: false, starting: false, lastFailure: reason });
+        yield* reconcileServices(yield* load());
         return;
       }
       const recovered = { ...old, starting: false, lastFailure: reason };
       yield* put(fresh, recovered);
       if (recovered.enabled && !options.safeMode)
-        yield* start(recovered).pipe(
+        yield* reconcileServices(yield* load()).pipe(
           Effect.catch((error) =>
             Effect.gen(function* () {
               yield* stop(recovered.id);
@@ -517,6 +653,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
                 starting: false,
                 lastFailure: error.message,
               });
+              yield* reconcileServices(yield* load());
             }),
           ),
         );
@@ -541,6 +678,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
   runtimeFailure = (id, failedGeneration) =>
     withMutationLock(
       Effect.gen(function* () {
+        if (latestGeneration.get(id) !== failedGeneration) return;
         const active = running.get(id);
         if (active && active.generation !== failedGeneration) return;
         if (active?.generation === failedGeneration) running.delete(id);
@@ -566,6 +704,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
                   starting: false,
                   lastFailure: error.message,
                 });
+                yield* reconcileServices(yield* load());
               }),
             ),
           );
@@ -577,6 +716,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
           starting: false,
           lastFailure: "Plugin host stopped",
         });
+        yield* reconcileServices(yield* load());
       }).pipe(Effect.tapError(() => poisonMutation)),
     );
   const restore = () =>
@@ -608,7 +748,8 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
                   }
                 : { ...plugin, starting: false };
               if (plugin.starting) yield* put(registry, recovered);
-              yield* start(recovered).pipe(
+              yield* artifactFor(recovered, recovered.revision).pipe(
+                Effect.flatMap((artifact) => authorize(artifact, recovered.revision.grantId)),
                 Effect.catch((error) =>
                   Effect.gen(function* () {
                     const fresh = yield* load();
@@ -618,6 +759,27 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
                       starting: false,
                       lastFailure: error.message,
                     });
+                  }),
+                ),
+              );
+            }
+            const registry = yield* load();
+            const plan = yield* prepareServices(registry);
+            yield* quiesceServices(registry, plan);
+            for (const id of plan.order) {
+              if (!serviceGraph.order.includes(id) || running.has(id)) continue;
+              const current = (yield* load()).plugins.find((entry) => entry.id === id)!;
+              yield* start(current).pipe(
+                Effect.catch((error) =>
+                  Effect.gen(function* () {
+                    yield* put(yield* load(), {
+                      ...current,
+                      enabled: false,
+                      starting: false,
+                      lastFailure: error.message,
+                    });
+                    const updated = yield* load();
+                    yield* quiesceServices(updated, yield* prepareServices(updated));
                   }),
                 ),
               );
@@ -664,12 +826,20 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
             : { enabled: !options.safeMode }),
           starting: old?.enabled === true,
         };
+        const prospective: Registry = {
+          version: 1,
+          plugins: [...registry.plugins.filter((entry) => entry.id !== candidate.id), candidate],
+        };
+        const plan = yield* prepareServices(
+          prospective,
+          candidate.enabled ? candidate.id : undefined,
+        );
         yield* recoverMutation(
           old,
           candidate,
           "Activation failed",
           Effect.gen(function* () {
-            if (old?.enabled) yield* stop(old.id);
+            yield* quiesceServices(prospective, plan);
             yield* put(registry, candidate);
             if (!candidate.enabled) return;
             yield* activate(
@@ -694,6 +864,13 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         const plugin = registry.plugins.find((entry) => entry.id === id);
         if (!plugin) return yield* failure("Plugin is not installed");
         const candidate = { ...plugin, enabled: true };
+        yield* prepareServices(
+          {
+            version: 1,
+            plugins: [...registry.plugins.filter((entry) => entry.id !== id), candidate],
+          },
+          id,
+        );
         yield* recoverMutation(
           undefined,
           candidate,
@@ -708,10 +885,17 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         const registry = yield* load();
         const plugin = registry.plugins.find((entry) => entry.id === id);
         if (!plugin) return yield* failure("Plugin is not installed");
+        const next: Registry = {
+          version: 1,
+          plugins: registry.plugins.map((entry) =>
+            entry.id === id ? { ...entry, enabled: false, starting: false } : entry,
+          ),
+        };
+        const plan = yield* prepareServices(next);
         yield* Effect.uninterruptible(
           Effect.gen(function* () {
-            yield* stop(id);
-            yield* put(registry, { ...plugin, enabled: false, starting: false });
+            yield* quiesceServices(next, plan);
+            yield* save(next);
           }).pipe(Effect.tapError(() => poisonMutation)),
         );
       }),
@@ -732,9 +916,14 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         const owned = grants.filter((grant) => grantIds.has(grant.id));
         if (owned.some((grant) => grant.principal !== id || grant.profileId !== profileId))
           return yield* failure("Plugin revision grant does not belong to this plugin and profile");
+        const next: Registry = {
+          version: 1,
+          plugins: registry.plugins.filter((entry) => entry.id !== id),
+        };
+        const plan = yield* prepareServices(next);
         yield* Effect.uninterruptible(
           Effect.gen(function* () {
-            yield* stop(id);
+            yield* quiesceServices(next, plan);
             // Retain revision grant IDs in disabled state until revocation succeeds.
             yield* put(registry, { ...plugin, enabled: false, starting: false });
             for (const grant of owned) {
@@ -761,12 +950,17 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
           previous: plugin.revision,
           starting: plugin.enabled,
         };
+        const prospective: Registry = {
+          version: 1,
+          plugins: [...registry.plugins.filter((entry) => entry.id !== id), next],
+        };
+        const plan = yield* prepareServices(prospective, next.enabled ? id : undefined);
         yield* recoverMutation(
           plugin,
           next,
           "Rollback failed",
           Effect.gen(function* () {
-            yield* stop(id);
+            yield* quiesceServices(prospective, plan);
             yield* put(registry, next);
             if (!next.enabled) return;
             yield* activate(

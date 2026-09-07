@@ -64,6 +64,8 @@ export type ServiceEvent =
     };
 
 export interface PluginServiceBroker {
+  /** Host-only graph replacement. Active required contracts and bindings must remain unchanged. */
+  readonly reconfigure: (graph: ValidatedServiceGraph) => Effect.Effect<void, ServiceBrokerError>;
   readonly activate: (party: ServiceParty) => Effect.Effect<void, ServiceBrokerError>;
   readonly ready: (owner: ServiceOwner) => Effect.Effect<void, ServiceBrokerError>;
   readonly deactivate: (owner: ServiceOwner) => Effect.Effect<void>;
@@ -107,6 +109,53 @@ const failed = (message: string) => new ServiceBrokerError({ message });
 const bindingKey = (consumer: string, dependency: string) => `${consumer}\u0000${dependency}`;
 const serviceKey = (provider: string, service: string) => `${provider}\u0000${service}`;
 const ownerKey = (owner: ServiceOwner) => `${owner.id}\u0000${owner.generation}`;
+
+const sameContract = (
+  left: ResolvedServiceBinding["service"]["contract"],
+  right: ResolvedServiceBinding["service"]["contract"],
+) => left.name === right.name && left.version === right.version && left.digest === right.digest;
+const sameBinding = (
+  left: ResolvedServiceBinding | undefined,
+  right: ResolvedServiceBinding | undefined,
+) =>
+  left === right ||
+  (left !== undefined &&
+    right !== undefined &&
+    left.consumer === right.consumer &&
+    left.dependency.id === right.dependency.id &&
+    left.dependency.optional === right.dependency.optional &&
+    sameContract(left.dependency.contract, right.dependency.contract) &&
+    left.provider === right.provider &&
+    left.service.id === right.service.id &&
+    sameContract(left.service.contract, right.service.contract));
+const sameDescriptor = (
+  left: ValidatedServiceGraph["plugins"][number] | undefined,
+  right: ValidatedServiceGraph["plugins"][number] | undefined,
+) => {
+  if (left === right) return true;
+  if (!left || !right || left.id !== right.id) return false;
+  if (
+    left.provides.length !== right.provides.length ||
+    left.requires.length !== right.requires.length
+  )
+    return false;
+  const rightProvided = new Map(right.provides.map((service) => [service.id, service]));
+  for (const service of left.provides) {
+    const candidate = rightProvided.get(service.id);
+    if (!candidate || !sameContract(service.contract, candidate.contract)) return false;
+  }
+  const rightRequired = new Map(right.requires.map((dependency) => [dependency.id, dependency]));
+  for (const dependency of left.requires) {
+    const candidate = rightRequired.get(dependency.id);
+    if (
+      !candidate ||
+      dependency.optional !== candidate.optional ||
+      !sameContract(dependency.contract, candidate.contract)
+    )
+      return false;
+  }
+  return true;
+};
 
 interface JsonBudget {
   nodes: number;
@@ -227,6 +276,7 @@ interface PendingCall {
   readonly id: string;
   readonly caller: ServiceParty;
   readonly provider: ServiceParty;
+  readonly dependency: string;
   readonly service: string;
   readonly method: string;
   readonly params: Schema.Json;
@@ -251,15 +301,13 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
   let stateBytes = 0;
   let callSequence = 0;
 
-  const bindings = new Map<string, ResolvedServiceBinding>(
-    options.graph.bindings.map((binding) => [
-      bindingKey(binding.consumer, binding.dependency.id),
-      binding,
-    ]),
+  let graph = options.graph;
+  let bindings = new Map<string, ResolvedServiceBinding>(
+    graph.bindings.map((binding) => [bindingKey(binding.consumer, binding.dependency.id), binding]),
   );
-  const descriptors = new Map(options.graph.plugins.map((plugin) => [plugin.id, plugin]));
-  const provided = new Set<string>();
-  for (const plugin of options.graph.plugins)
+  let descriptors = new Map(graph.plugins.map((plugin) => [plugin.id, plugin]));
+  let provided = new Set<string>();
+  for (const plugin of graph.plugins)
     for (const service of plugin.provides) provided.add(serviceKey(plugin.id, service.id));
 
   const currentRecord = (party: ServiceParty) => {
@@ -347,7 +395,7 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
     });
   };
   const notifyService = (provider: string, service: string, fallbackGeneration: number) => {
-    for (const binding of options.graph.bindings) {
+    for (const binding of graph.bindings) {
       if (binding.provider !== provider || binding.service.id !== service) continue;
       const consumer = parties.get(binding.consumer);
       if (!consumer?.subscriptions.has(binding.dependency.id)) continue;
@@ -385,7 +433,7 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
       const id = remaining.pop();
       if (id === undefined || removed.has(id) || !parties.has(id)) continue;
       removed.add(id);
-      for (const binding of options.graph.bindings)
+      for (const binding of graph.bindings)
         if (binding.provider === id && !binding.dependency.optional)
           remaining.push(binding.consumer);
     }
@@ -412,6 +460,93 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
         notifyService(record.party.id, service.id, record.party.generation);
   });
 
+  const reconfigure = Effect.fn("ServiceBroker.reconfigure")(function* (
+    candidate: ValidatedServiceGraph,
+  ) {
+    yield* permit.withPermit(
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          const nextDescriptors = new Map(candidate.plugins.map((plugin) => [plugin.id, plugin]));
+          const nextBindings = new Map<string, ResolvedServiceBinding>(
+            candidate.bindings.map((binding) => [
+              bindingKey(binding.consumer, binding.dependency.id),
+              binding,
+            ]),
+          );
+          const nextProvided = new Set<string>();
+          for (const plugin of candidate.plugins)
+            for (const service of plugin.provides)
+              nextProvided.add(serviceKey(plugin.id, service.id));
+
+          const changedOptional = new Map<
+            string,
+            {
+              readonly record: PartyRecord;
+              readonly dependency: string;
+              readonly previous: ResolvedServiceBinding | undefined;
+              readonly next: ResolvedServiceBinding | undefined;
+            }
+          >();
+          for (const record of parties.values()) {
+            const currentDescriptor = descriptors.get(record.party.id);
+            const nextDescriptor = nextDescriptors.get(record.party.id);
+            if (!sameDescriptor(currentDescriptor, nextDescriptor))
+              return yield* failed("Active service descriptor changed during reconfiguration");
+            for (const dependency of currentDescriptor?.requires ?? []) {
+              const key = bindingKey(record.party.id, dependency.id);
+              const previous = bindings.get(key);
+              const next = nextBindings.get(key);
+              if (sameBinding(previous, next)) continue;
+              if (!dependency.optional)
+                return yield* failed(
+                  "Active required service binding changed during reconfiguration",
+                );
+              changedOptional.set(key, {
+                record,
+                dependency: dependency.id,
+                previous,
+                next,
+              });
+            }
+          }
+
+          const affectedCalls = new Set<string>();
+          for (const [callId, call] of pending)
+            if (changedOptional.has(bindingKey(call.caller.id, call.dependency)))
+              affectedCalls.add(callId);
+
+          graph = candidate;
+          bindings = nextBindings;
+          descriptors = nextDescriptors;
+          provided = nextProvided;
+
+          for (const [key, state] of states) {
+            if (provided.has(key)) continue;
+            states.delete(key);
+            stateBytes -= state.bytes;
+          }
+          for (const callId of affectedCalls)
+            yield* failPending(callId, failed("Service binding changed"));
+          for (const change of changedOptional.values()) {
+            if (!change.record.subscriptions.has(change.dependency)) continue;
+            const notification = change.next
+              ? notificationFor(change.next, highestGeneration.get(change.next.provider) ?? 0)
+              : Object.freeze({
+                  dependency: change.dependency,
+                  provider: change.previous?.provider ?? "",
+                  service: change.previous?.service.id ?? "",
+                  providerGeneration: highestGeneration.get(change.previous?.provider ?? "") ?? 0,
+                  revision: 0,
+                  available: false,
+                });
+            change.record.notifications.set(change.dependency, notification);
+            signal(change.record);
+          }
+        }),
+      ),
+    );
+  });
+
   const activate = Effect.fn("ServiceBroker.activate")(function* (candidate: ServiceParty) {
     if (
       candidate.profileId !== options.profileId ||
@@ -428,7 +563,7 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
         yield* options.authority
           .authenticateProvider(candidate)
           .pipe(Effect.mapError(() => failed("Service authority denied")));
-        for (const binding of options.graph.bindings) {
+        for (const binding of graph.bindings) {
           if (binding.consumer !== candidate.id || binding.dependency.optional) continue;
           const provider = parties.get(binding.provider);
           if (!provider?.ready) return yield* failed("Required service provider is not ready");
@@ -484,7 +619,7 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
     yield* permit.withPermit(
       Effect.gen(function* () {
         const record = yield* authenticateRecord(owner);
-        for (const binding of options.graph.bindings) {
+        for (const binding of graph.bindings) {
           if (binding.consumer !== record.party.id || binding.dependency.optional) continue;
           const provider = parties.get(binding.provider);
           if (!provider?.ready) return yield* failed("Required service provider is not ready");
@@ -603,8 +738,10 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
         const consumer = yield* authenticateRecord(owner);
         const binding = findBinding(consumer, dependency);
         if (!binding) return yield* failed("Service dependency is not declared");
-        if (binding === "optional") return { available: false } as const;
-        const state = yield* snapshot(consumer, binding);
+        const state =
+          binding === "optional"
+            ? ({ available: false } as const)
+            : yield* snapshot(consumer, binding);
         if (
           !consumer.subscriptions.has(dependency) &&
           consumer.subscriptions.size >= MaxSubscriptions
@@ -651,6 +788,7 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
           id,
           caller: consumer.party,
           provider: provider.party,
+          dependency,
           service: binding.service.id,
           method,
           params,
@@ -796,8 +934,13 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
         provider.notifications.delete(dependency);
         if (provider.requests.length > 0 || provider.notifications.size > 0) signal(provider);
         const binding = bindings.get(bindingKey(provider.party.id, dependency));
-        if (!binding) return undefined;
         if (notification.available) {
+          if (
+            !binding ||
+            binding.provider !== notification.provider ||
+            binding.service.id !== notification.service
+          )
+            return undefined;
           const serviceProvider = parties.get(notification.provider);
           const state = states.get(serviceKey(notification.provider, notification.service));
           if (
@@ -808,6 +951,12 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
           )
             return undefined;
           yield* authorizeParties(provider.party, serviceProvider.party);
+        } else if (
+          binding &&
+          (binding.provider !== notification.provider ||
+            binding.service.id !== notification.service)
+        ) {
+          return undefined;
         }
         const event: ServiceEvent = Object.freeze({
           type: "service.state",
@@ -871,6 +1020,7 @@ export const createPluginServiceBroker = Effect.fn("ServiceBroker.create")(funct
   );
 
   return Object.freeze({
+    reconfigure,
     activate,
     ready,
     deactivate,

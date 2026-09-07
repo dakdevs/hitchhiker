@@ -1,0 +1,16 @@
+{
+  "id": "service-provider",
+  "name": "Counter service",
+  "version": "1.0.0",
+  "capabilities": [],
+  "provides": [
+    {
+      "id": "counter",
+      "contract": {
+        "name": "example.counter",
+        "version": "1.0.0",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ]
+}
