@@ -172,3 +172,9 @@ Final verification on September 6: all 232 native runtime/browser tests passed w
 (122 runtime, 110 browser), including installed composition, MCP fresh-process restore, thirty-page
 window close, activation interruption and gated persistence cancellation. This remains a framework
 composition checkpoint; the default-feature plugin extraction and generic services are still pending.
+
+The rebuilt developer bundle passes file/signature verification, but its composition restart test
+remains unverified: two clean packaged launches timed out before Native mounted. A process sample
+shows Chromium initialization waiting in macOS `SecItemCopyMatching`; the source-run native suite
+passes. The orphaned test engines were terminated. Investigate this packaged startup issue without
+disabling Keychain or weakening encryption. Source commit `adf8144` passed GitHub CI.
