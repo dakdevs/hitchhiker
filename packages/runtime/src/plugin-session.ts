@@ -2,9 +2,13 @@ import { Effect, Schedule, Schema, Stream } from "effect";
 import type { PluginDispatchOptions } from "./plugin-dispatch.ts";
 import { LivePluginManifest, createPluginDispatcher } from "./plugin-dispatch.ts";
 import { spawnPluginHost } from "./plugin.ts";
+import { makePluginDomSession } from "./plugin-dom.ts";
+import type { ScopedDomDriver } from "./scoped-dom.ts";
 
-export interface LivePluginOptions extends Omit<PluginDispatchOptions, "manifest"> {
+export interface LivePluginOptions extends Omit<PluginDispatchOptions, "manifest" | "dom"> {
   readonly manifest: unknown;
+  /** Shared trusted browser adapter. A finite reference session is created per plugin activation. */
+  readonly dom?: ScopedDomDriver;
   readonly executable: string;
   readonly code: string;
   readonly events: Stream.Stream<{ readonly event: string; readonly payload: unknown }, unknown>;
@@ -33,7 +37,19 @@ export const runLivePlugin = Effect.fn("runLivePlugin")(function* (options: Live
   });
   if (credential.principal !== manifest.id)
     return yield* Effect.fail("Plugin identity is not authorized");
-  const dispatch = createPluginDispatcher({ ...options, manifest });
+  const { dom: domDriver, ...dispatchOptions } = options;
+  const dom = yield* makePluginDomSession({
+    manifest,
+    profileId: options.profileId,
+    token: options.token,
+    grants: options.grants,
+    driver: domDriver,
+  });
+  const dispatch = createPluginDispatcher({
+    ...dispatchOptions,
+    manifest,
+    ...(dom === undefined ? {} : { dom }),
+  });
   const host = yield* spawnPluginHost({ executable: options.executable, call: dispatch });
   yield* Effect.addFinalizer(() =>
     (options.onStop ?? options.release).pipe(

@@ -1,7 +1,7 @@
 # @hitchhiker/plugin-sdk
 
 Public TypeScript helpers for isolated Hitchhiker plugins. Use `definePlugin({ activate, onEvent })`
-and bundle an entry point as an IIFE. The SDK turns typed `pages`, `devtools`, `configuration`, and `ui` calls
+and bundle an entry point as an IIFE. The SDK turns typed `pages`, `dom`, `devtools`, `configuration`, and `ui` calls
 into capability-checked broker requests; it grants no ambient filesystem, network, or Node access.
 
 ## UI publishing
@@ -111,3 +111,10 @@ owned windows. Explicit close can manage any inspector in the granted profile.
 Read the [complete DevTools reference](../../docs/DEVTOOLS.md) for exact coordinates, limits, grants,
 MCP equivalents, examples and verification boundaries. The [standalone plugin](../../apps/devtools-plugin/README.md)
 uses this public API. Default distribution integration, docking and frontend extensions remain open.
+
+## Page content
+
+`api.dom.snapshot`, `api.dom.click` and `api.dom.fill` expose bounded, origin-authorized content access.
+Declare `pages.read` for snapshots and `pages.write` for actions. References belong to one activation
+and expire or become stale after navigation; grant revocation is checked during operations. See the
+[DOM API reference](../../docs/PLUGIN-DOM.md) for signatures, examples, errors and limits.

@@ -86,6 +86,7 @@ const fakeApi = () => {
       },
       set: unexpected,
     },
+    dom: { snapshot: unexpected, click: unexpected, fill: unexpected },
     devtools: {
       status: async (pageId: string) => {
         calls.push(`status:${pageId}`);

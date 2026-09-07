@@ -699,3 +699,10 @@ while the unchanged 64-request capacity branch still reports actual saturation. 
 and all three V2 retention/rollback cases pass; captured output contains three clean shell closures
 and no queue-full diagnostic. This resolves the observed warning, not production Keychain startup
 or every release/shutdown acceptance requirement.
+
+## Public plugin DOM integration
+
+[PLUGIN-DOM-PLAN.md](PLUGIN-DOM-PLAN.md) adds SDK snapshot/click/fill through the same scoped service
+as MCP, with per-activation references and current origin/profile/principal grants. No new default
+permissions or raw CDP methods are introduced. Runtime, SDK and compiled Native verification are
+in progress; the [public reference](PLUGIN-DOM.md) records the exact API boundary.

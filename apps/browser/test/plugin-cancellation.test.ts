@@ -4,6 +4,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { CapabilityGrant } from "@hitchhiker/core";
 import type { GrantStoreApi } from "@hitchhiker/runtime";
 import { Deferred, Effect, Fiber } from "effect";
 import { createPluginArtifactStore } from "../src/plugin-artifacts.ts";
@@ -15,9 +16,16 @@ const manifest = {
   version: "1.0.0",
   capabilities: ["pages.list"],
 };
+const grant: CapabilityGrant = {
+  id: "grant",
+  principal: manifest.id,
+  profileId: "default",
+  capabilities: ["pages.list"],
+  origins: [],
+};
 const grants = {
-  authenticateGrant: () => Effect.succeed({ principal: manifest.id, grant: {} }),
-  authorizeGrant: () => Effect.succeed({ principal: manifest.id, grant: {} }),
+  authenticateGrant: () => Effect.succeed({ principal: manifest.id, grant }),
+  authorizeGrant: () => Effect.succeed({ principal: manifest.id, grant }),
 } as unknown as GrantStoreApi;
 const launch = (_artifact: unknown, _grant: string, ready: Effect.Effect<void>) =>
   ready.pipe(Effect.andThen(Effect.never));

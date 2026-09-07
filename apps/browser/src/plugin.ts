@@ -6,6 +6,7 @@ import {
   createPluginStorage,
   LivePluginManifest,
   type GrantStoreApi,
+  type ScopedDomDriver,
 } from "@hitchhiker/runtime";
 import { browserMcpApi } from "./mcp.ts";
 import type { BrowserController } from "./controller.ts";
@@ -21,6 +22,7 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
     readonly executable: string;
     readonly grants: GrantStoreApi;
     readonly controller: BrowserController;
+    readonly dom?: ScopedDomDriver;
     readonly onRecoveryFailure?: Effect.Effect<void>;
     readonly composition?: BrowserComposition;
     readonly management?: PluginManagement;
@@ -79,6 +81,7 @@ export const createInstalledPluginLauncher = Effect.fn("Browser.createInstalledP
             )
           : undefined;
         yield* runLivePlugin({
+          dom: options.dom,
           devtools,
           manifest: artifact.manifest,
           code: artifact.code,
@@ -181,6 +184,7 @@ export const runPluginDirectory = Effect.fn("Browser.runPluginDirectory")(functi
   readonly token: string;
   readonly grants: GrantStoreApi;
   readonly controller: BrowserController;
+  readonly dom?: ScopedDomDriver;
   readonly onRecoveryFailure?: Effect.Effect<void>;
 }) {
   const files = yield* readPluginPackage(options.directory);
@@ -230,6 +234,7 @@ export const runPluginDirectory = Effect.fn("Browser.runPluginDirectory")(functi
       )
     : undefined;
   yield* runLivePlugin({
+    dom: options.dom,
     devtools,
     manifest,
     code,

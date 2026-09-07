@@ -15,7 +15,7 @@ export const pluginGuide: readonly GuideSection[] = [
     title: "A browser assembled from plugins",
     paragraphs: [
       "Hitchhiker is being built as a Chromium host with a shared Native design framework. The target default browser is a composition of plugins: a tab model, vertical or horizontal presentation, optional pinning, navigation, and developer tools. Those pieces must use the same public APIs as third-party plugins.",
-      "Normal installed-plugin startup now restores pages and then composes the default tab model, pinning, layout, and presenter plugins. The built-in controller retains only generic browser state and a trusted loading/recovery surface in that mode. Native acceptance of startup and switching remains unverified, and developer tools, broad Chromium APIs, and extension UI still need feature extraction.",
+      "Normal installed-plugin startup now restores pages and then composes the default tab model, pinning, layout, and presenter plugins. The built-in controller retains only generic browser state and a trusted loading/recovery surface in that mode. Real Native startup and public presenter-switching tests pass with disposable test Keychains. DevTools now ships as a separate default plugin. Physical UI and production startup acceptance, broader Chromium APIs, and extension UI remain unfinished.",
     ],
   },
   {
@@ -37,7 +37,11 @@ export const pluginGuide: readonly GuideSection[] = [
           "Revisioned snapshots and coalesced invalidations with pages.list",
           "Implemented",
         ],
-        ["DOM inspection and interaction", "Scoped MCP snapshot, click and fill", "Planned"],
+        [
+          "DOM inspection and interaction",
+          "Scoped SDK and MCP snapshot, click and fill",
+          "Verified in developer and installed plugins with test Keychains",
+        ],
         ["CDP", "Explicitly authorized raw relay and private host adapter", "Planned"],
         [
           "Cookies, storage and network",
@@ -58,10 +62,28 @@ export const pluginGuide: readonly GuideSection[] = [
         [
           "DevTools interface",
           "Show, status and close verified with a disposable test Keychain",
-          "Standalone plugin; default integration pending",
+          "Separate default plugin and standalone example",
         ],
       ],
     },
+  },
+  {
+    id: "plugin-dom",
+    title: "Read and interact with page content",
+    paragraphs: [
+      "Plugins use api.dom.snapshot({pageId, maxDepth?, interactiveOnly?}), api.dom.click({pageId, ref}), and api.dom.fill({pageId, ref, value}). Declare pages.read for snapshots and pages.write for actions, and obtain a matching profile and origin grant. pages.list discovers page IDs but grants no content access. The same scoped service powers MCP; plugins receive no raw protocol or JavaScript evaluation interface.",
+      "Snapshots return pageId, snapshotId, nodes and truncated. Nodes contain role and optional parent index, name, value, states, ref or child-frame boundary. Website text is untrusted. Each activation owns its references: another plugin, replacement activation or MCP connection cannot reuse them. A newer snapshot replaces refs for that page; refs expire after 60 seconds and are invalidated by document changes or scope cleanup. The host rechecks the current document origin and grant during operations. Compiled developer and installed plugins pass real Chromium fill/click, stale-document, foreign-origin and revocation tests using disposable test Keychains.",
+      "Depth is 1–8, at most 512 nodes are returned, strings are truncated to 4 KiB, and serialized output is bounded. A session tracks at most eight pages and 4,096 refs. Fill values must fit within 16 KiB of UTF-8. Password values and descendant accessibility content are excluded. Password refs cannot be filled, but may be clicked or focused with pages.write. Child-frame traversal, selectors and arbitrary script execution are not exposed. Writes retain the browser's page-protection checks.",
+      "Click returns {clicked:true}; fill returns {filled:true}. PluginApiError.code distinguishes not_authorized, page_gone, stale_ref, covered, unsupported, limit and browser_error. Missing declarations, adapters or malformed arguments may return denied. Error messages are sanitized. Refresh a stale snapshot before retrying; a revoked plugin may stop before its error handler runs.",
+    ],
+    code: `// Requires declared and granted pages.read and pages.write.
+const snapshot = await api.dom.snapshot({ pageId, interactiveOnly: true });
+const field = snapshot.nodes.find(
+  (node) => node.role === "textbox" && node.name === "Name" && node.ref,
+);
+if (field?.ref) {
+  await api.dom.fill({ pageId, ref: field.ref, value: "Hitchhiker" });
+}`,
   },
   {
     id: "devtools-api",

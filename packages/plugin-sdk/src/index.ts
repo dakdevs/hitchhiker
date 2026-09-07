@@ -16,16 +16,38 @@ export type Json =
   | readonly Json[]
   | { readonly [key: string]: Json };
 
-export type PluginApiErrorCode = "conflict" | "denied" | "stale-snapshot";
+export type PluginApiErrorCode =
+  | "conflict"
+  | "denied"
+  | "stale-snapshot"
+  | "not_authorized"
+  | "page_gone"
+  | "stale_ref"
+  | "covered"
+  | "unsupported"
+  | "limit"
+  | "browser_error";
 const errorMessages: Readonly<Record<PluginApiErrorCode, string>> = Object.freeze({
   conflict: "Plugin storage revision changed",
   denied: "Plugin operation was denied or could not complete",
   "stale-snapshot": "Page snapshot changed; restart from offset zero",
+  not_authorized: "The plugin is not authorized for this DOM operation",
+  page_gone: "The page is no longer available",
+  stale_ref: "The DOM reference is stale; take a new snapshot",
+  covered: "The target is covered and cannot be interacted with",
+  unsupported: "The requested DOM operation is unsupported",
+  limit: "The DOM operation exceeded a host limit",
+  browser_error: "The browser could not complete the DOM operation",
 });
+const pluginApiErrorCodes: ReadonlySet<PluginApiErrorCode> = new Set(
+  Object.keys(errorMessages) as PluginApiErrorCode[],
+);
 export class PluginApiError extends Error {
   readonly name = "PluginApiError";
-  constructor(readonly code: PluginApiErrorCode) {
+  readonly code: PluginApiErrorCode;
+  constructor(code: PluginApiErrorCode) {
     super(errorMessages[code]);
+    this.code = code;
   }
 }
 export interface ServiceContract {
@@ -95,6 +117,35 @@ export interface DevToolsChangedEvent {
   readonly event: "devtools.changed";
   readonly payload: DevToolsStatus;
 }
+/** A portable accessibility-tree node. It never exposes browser document or backend handles. */
+export interface DomSnapshotNode {
+  readonly parent?: number;
+  readonly role: string;
+  readonly name?: string;
+  readonly value?: string;
+  readonly states?: readonly string[];
+  readonly ref?: string;
+  readonly frameBoundary?: "child-frame";
+}
+/** A bounded, temporary DOM snapshot for one page. References may expire or become stale. */
+export interface DomSnapshot {
+  readonly pageId: string;
+  readonly snapshotId: string;
+  readonly nodes: readonly DomSnapshotNode[];
+  readonly truncated: boolean;
+}
+export interface DomSnapshotRequest {
+  readonly pageId: string;
+  readonly maxDepth?: number;
+  readonly interactiveOnly?: boolean;
+}
+export interface DomClickRequest {
+  readonly pageId: string;
+  readonly ref: string;
+}
+export interface DomFillRequest extends DomClickRequest {
+  readonly value: string;
+}
 
 export interface PluginApi {
   readonly storage: {
@@ -121,6 +172,11 @@ export interface PluginApi {
   readonly configuration: {
     get(): Promise<BrowserConfiguration>;
     set(configuration: BrowserConfiguration): Promise<void>;
+  };
+  readonly dom: {
+    snapshot(request: DomSnapshotRequest): Promise<DomSnapshot>;
+    click(request: DomClickRequest): Promise<{ readonly clicked: true }>;
+    fill(request: DomFillRequest): Promise<{ readonly filled: true }>;
   };
   readonly devtools: {
     status(pageId: string): Promise<DevToolsStatus>;
@@ -162,6 +218,8 @@ export interface Plugin {
 interface HostBridge {
   readonly call: <A>(method: string, params: object) => Promise<A>;
 }
+const isPluginApiErrorCode = (value: unknown): value is PluginApiErrorCode =>
+  typeof value === "string" && pluginApiErrorCodes.has(value as PluginApiErrorCode);
 const call = async <A>(host: HostBridge, method: string, params: object): Promise<A> => {
   try {
     return await host.call<A>(method, params);
@@ -171,7 +229,7 @@ const call = async <A>(host: HostBridge, method: string, params: object): Promis
         ? Object.getOwnPropertyDescriptor(error, "code")
         : undefined;
     const code = descriptor && "value" in descriptor ? descriptor.value : undefined;
-    throw new PluginApiError(code === "conflict" || code === "stale-snapshot" ? code : "denied");
+    throw new PluginApiError(isPluginApiErrorCode(code) ? code : "denied");
   }
 };
 const api = (host: HostBridge): PluginApi =>
@@ -208,6 +266,18 @@ const api = (host: HostBridge): PluginApi =>
       get: () => call<BrowserConfiguration>(host, "configuration.get", {}),
       set: (configuration: BrowserConfiguration) =>
         call<void>(host, "configuration.set", { configuration }),
+    }),
+    dom: Object.freeze({
+      snapshot: ({ pageId, maxDepth, interactiveOnly }: DomSnapshotRequest) =>
+        call<DomSnapshot>(host, "dom.snapshot", {
+          pageId,
+          ...(maxDepth === undefined ? {} : { maxDepth }),
+          ...(interactiveOnly === undefined ? {} : { interactiveOnly }),
+        }),
+      click: ({ pageId, ref }: DomClickRequest) =>
+        call<{ readonly clicked: true }>(host, "dom.click", { pageId, ref }),
+      fill: ({ pageId, ref, value }: DomFillRequest) =>
+        call<{ readonly filled: true }>(host, "dom.fill", { pageId, ref, value }),
     }),
     devtools: Object.freeze({
       status: (pageId: string) => call<DevToolsStatus>(host, "devtools.status", { pageId }),

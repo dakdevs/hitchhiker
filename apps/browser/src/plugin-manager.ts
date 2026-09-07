@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import type { Capability } from "@hitchhiker/core";
+import type { Capability, CapabilityGrant } from "@hitchhiker/core";
 import {
   createPluginStorage,
   createPluginServiceBroker,
@@ -61,6 +61,12 @@ const capabilities = new Set<Capability>([
   "devtools.manage",
   "cdp.connect",
 ]);
+/** Admission validates declared authority without pretending an origin-scoped page operation exists. */
+const grantContainsDeclaredCapability = (grant: CapabilityGrant, capability: Capability) =>
+  capability === "cdp.connect"
+    ? grant.capabilities.includes("cdp.connect")
+    : grant.capabilities.includes("browser.full-control") ||
+      grant.capabilities.includes(capability);
 
 interface Revision {
   readonly hash: string;
@@ -513,11 +519,8 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     for (const capability of artifact.manifest.capabilities) {
       if (!capabilities.has(capability))
         return yield* failure("Plugin manifest capability is invalid");
-      const authorized = yield* options.grants
-        .authorizeGrant(grantId, { profileId, capability })
-        .pipe(Effect.mapError(() => failure("Plugin grant does not allow declared capabilities")));
-      if (authorized.principal !== artifact.manifest.id)
-        return yield* failure("Plugin grant principal does not match manifest");
+      if (!grantContainsDeclaredCapability(authenticated.grant, capability))
+        return yield* failure("Plugin grant does not allow declared capabilities");
     }
   });
   const artifactFor = Effect.fn("PluginManager.artifactFor")(function* (

@@ -30,15 +30,36 @@ export class PluginHostError extends Schema.TaggedError<PluginHostError>()("Plug
   message: Schema.String,
 }) {}
 const fail = (code: string, message: string) => new PluginHostError({ code, message });
+const publicPluginCallFailures: Readonly<
+  Record<PluginCallError["code"], { readonly code: string; readonly message: string }>
+> = {
+  conflict: { code: "conflict", message: "Plugin storage revision changed" },
+  denied: { code: "denied", message: "Operation was denied or could not complete" },
+  "stale-snapshot": {
+    code: "stale-snapshot",
+    message: "Page snapshot changed; restart from offset zero",
+  },
+  not_authorized: {
+    code: "not_authorized",
+    message: "DOM access is not authorized for this page.",
+  },
+  page_gone: { code: "page_gone", message: "The target page is no longer available." },
+  stale_ref: { code: "stale_ref", message: "The DOM reference is stale; take a new snapshot." },
+  covered: { code: "covered", message: "The target element cannot be safely activated." },
+  unsupported: {
+    code: "unsupported",
+    message: "The target element does not support this operation.",
+  },
+  limit: { code: "limit", message: "The DOM operation exceeds a supported limit." },
+  browser_error: {
+    code: "browser_error",
+    message: "The browser could not complete the DOM operation.",
+  },
+};
 const publicCallFailure = (error: unknown) => {
   if (error instanceof PluginCallError) {
-    if (error.code === "conflict")
-      return { code: "conflict", message: "Plugin storage revision changed" };
-    if (error.code === "stale-snapshot")
-      return {
-        code: "stale-snapshot",
-        message: "Page snapshot changed; restart from offset zero",
-      };
+    const failure = publicPluginCallFailures[error.code];
+    if (failure) return failure;
   }
   return {
     code: "denied",

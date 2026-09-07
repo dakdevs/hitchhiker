@@ -116,6 +116,68 @@ test("isolated transport preserves only safe public call errors", async () => {
   }
 });
 
+for (const [code, message] of [
+  ["not_authorized", "DOM access is not authorized for this page."],
+  ["stale_ref", "The DOM reference is stale; take a new snapshot."],
+] as const)
+  test(`isolated transport preserves the safe ${code} DOM error`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-dom-error-"));
+    const executable = join(dir, "fixture.cjs");
+    await writeFile(executable, script);
+    await chmod(executable, 0o700);
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const seen = yield* Deferred.make<unknown>();
+          const host = yield* spawnPluginHost({
+            executable,
+            call: (method, params) =>
+              method === "seen"
+                ? Deferred.succeed(seen, params).pipe(Effect.as(null))
+                : Effect.fail(new PluginCallError({ code, message: "untrusted DOM detail" })),
+          });
+          yield* host.activate("compiled");
+          assert.deepEqual(yield* Deferred.await(seen).pipe(Effect.timeout(3000)), {
+            callId: 1,
+            error: { code, message },
+          });
+          yield* host.stop;
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+test("isolated transport rejects untrusted objects that imitate DOM errors", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-dom-imposter-"));
+  const executable = join(dir, "fixture.cjs");
+  await writeFile(executable, script);
+  await chmod(executable, 0o700);
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const seen = yield* Deferred.make<unknown>();
+        const host = yield* spawnPluginHost({
+          executable,
+          call: (method, params) =>
+            method === "seen"
+              ? Deferred.succeed(seen, params).pipe(Effect.as(null))
+              : Effect.fail({ code: "stale_ref", message: "untrusted DOM detail" }),
+        });
+        yield* host.activate("compiled");
+        assert.deepEqual(yield* Deferred.await(seen).pipe(Effect.timeout(3000)), {
+          callId: 1,
+          error: { code: "denied", message: "Operation was denied or could not complete" },
+        });
+        yield* host.stop;
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 for (const event of ["plugin.resource", "plugin.crash"] as const)
   test(`isolated transport remembers ${event} during activation while the broker stays alive`, async () => {
     const dir = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-terminal-"));

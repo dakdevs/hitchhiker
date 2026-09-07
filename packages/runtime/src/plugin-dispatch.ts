@@ -12,6 +12,7 @@ import {
   type DevToolsApi,
 } from "./devtools.ts";
 import { PluginStorageError, type PluginStorageAdapter } from "./plugin-storage.ts";
+import { ScopedDomError, type ScopedDomSession } from "./scoped-dom.ts";
 import {
   PluginManagementIdSchema,
   PluginManagementRevisionSchema,
@@ -53,7 +54,18 @@ export const LivePluginManifest = Schema.Struct({
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type LivePluginManifest = typeof LivePluginManifest.Type;
 export class PluginCallError extends Schema.TaggedError<PluginCallError>()("PluginCallError", {
-  code: Schema.Literals(["conflict", "denied", "stale-snapshot"]),
+  code: Schema.Literals([
+    "conflict",
+    "denied",
+    "stale-snapshot",
+    "not_authorized",
+    "page_gone",
+    "stale_ref",
+    "covered",
+    "unsupported",
+    "limit",
+    "browser_error",
+  ]),
   message: Schema.String,
 }) {}
 const denied = () =>
@@ -72,7 +84,23 @@ const pageWatchError = (error: unknown) =>
         message: "Page snapshot changed; restart from offset zero",
       })
     : denied();
+const domError = (error: unknown) => {
+  if (!(error instanceof ScopedDomError)) return denied();
+  const message: Record<ScopedDomError["code"], string> = {
+    not_authorized: "DOM access is not authorized for this page.",
+    page_gone: "The target page is no longer available.",
+    stale_ref: "The DOM reference is stale; take a new snapshot.",
+    covered: "The target element cannot be safely activated.",
+    unsupported: "The target element does not support this operation.",
+    limit: "The DOM operation exceeds a supported limit.",
+    browser_error: "The browser could not complete the DOM operation.",
+  };
+  return new PluginCallError({ code: error.code, message: message[error.code] });
+};
 const PageId = Schema.String.check(Schema.isPattern(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/));
+/** Kept byte-for-byte compatible with the MCP DOM request boundary. */
+const DomPageId = Schema.String.check(Schema.isMaxLength(64));
+const DomRef = Schema.String.check(Schema.isMaxLength(64));
 const Url = Schema.String.check(Schema.isMaxLength(8192));
 const ContributionId = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,62}$/));
 /** Plugin callers may supply only portable tree data; composition identity and placement are host-owned. */
@@ -103,6 +131,8 @@ export interface PluginDispatchOptions {
   readonly management?: PluginManagementApi;
   /** Trusted profile-wide DevTools frontend adapter; absent adapters fail closed. */
   readonly devtools?: DevToolsApi;
+  /** Activation-scoped DOM reference namespace. It is never a raw browser protocol bridge. */
+  readonly dom?: ScopedDomSession;
   /** Trusted owner-bound broker adapter; service callers never select identities or grants. */
   readonly services?: {
     readonly publish: (
@@ -136,12 +166,17 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
     method: string,
     params: unknown,
   ): Effect.fn.Return<Schema.Json, PluginCallError> {
-    const authorize = Effect.fn("Plugin.authorize")(function* (capability: Capability) {
+    const authorizeDeclared = Effect.fn("Plugin.authorizeDeclared")(function* (
+      capability: Capability,
+    ) {
       if (
         !options.manifest.capabilities.includes(capability) &&
         !options.manifest.capabilities.includes("browser.full-control")
       )
         return yield* denied();
+    });
+    const authorize = Effect.fn("Plugin.authorize")(function* (capability: Capability) {
+      yield* authorizeDeclared(capability);
       const grant = yield* options.grants
         .authorize(options.token, { profileId: options.profileId, capability })
         .pipe(Effect.mapError(denied));
@@ -181,6 +216,49 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
         return yield* options.pageWatch(request).pipe(
           Effect.mapError(pageWatchError),
           Effect.flatMap((snapshot) => decode(Schema.Json, snapshot)),
+        );
+      }
+      case "dom.snapshot": {
+        // Origin-bound grants are checked inside the scoped session after the trusted driver
+        // identifies the current document. The declaration check fails closed before capture.
+        yield* authorizeDeclared("pages.read");
+        if (!options.dom) return yield* denied();
+        const input = yield* decode(
+          Schema.Struct({
+            pageId: DomPageId,
+            interactiveOnly: Schema.optional(Schema.Boolean),
+            maxDepth: Schema.optional(Schema.Int),
+          }),
+          params,
+        );
+        return yield* options.dom.snapshot(input).pipe(
+          Effect.mapError(domError),
+          Effect.flatMap((snapshot) => decode(Schema.Json, snapshot)),
+        );
+      }
+      case "dom.click": {
+        yield* authorizeDeclared("pages.write");
+        if (!options.dom) return yield* denied();
+        const input = yield* decode(Schema.Struct({ pageId: DomPageId, ref: DomRef }), params);
+        return yield* options.dom.click(input).pipe(
+          Effect.mapError(domError),
+          Effect.flatMap((result) => decode(Schema.Json, result)),
+        );
+      }
+      case "dom.fill": {
+        yield* authorizeDeclared("pages.write");
+        if (!options.dom) return yield* denied();
+        const input = yield* decode(
+          Schema.Struct({
+            pageId: DomPageId,
+            ref: DomRef,
+            value: Schema.String.check(Schema.isMaxLength(16_384)),
+          }),
+          params,
+        );
+        return yield* options.dom.fill(input).pipe(
+          Effect.mapError(domError),
+          Effect.flatMap((result) => decode(Schema.Json, result)),
         );
       }
       case "pages.back":

@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { CapabilityGrant } from "@hitchhiker/core";
 import type { GrantStoreApi } from "@hitchhiker/runtime";
 import { Deferred, Effect, Exit, Fiber } from "effect";
 import { createPluginArtifactStore } from "../src/plugin-artifacts.ts";
@@ -15,20 +16,29 @@ const baseManifest = {
   version: "1.0.0",
   capabilities: ["pages.list"],
 };
+const fakeGrant = (id: string, principal: string): CapabilityGrant => ({
+  id,
+  principal,
+  profileId: "default",
+  capabilities: ["browser.full-control"],
+  origins: [],
+});
 const grants = {
-  authenticateGrant: () => Effect.succeed({ principal: "manager-plugin", grant: {} }),
-  authorizeGrant: () => Effect.succeed({ principal: "manager-plugin", grant: {} }),
+  authenticateGrant: () =>
+    Effect.succeed({ principal: "manager-plugin", grant: fakeGrant("grant-1", "manager-plugin") }),
+  authorizeGrant: () =>
+    Effect.succeed({ principal: "manager-plugin", grant: fakeGrant("grant-1", "manager-plugin") }),
 } as unknown as GrantStoreApi;
 const compositionGrants = (principals: Readonly<Record<string, string>>) =>
   ({
     authenticateGrant: (id: string) =>
       principals[id] === undefined
         ? Effect.fail(new Error("missing grant"))
-        : Effect.succeed({ principal: principals[id], grant: {} }),
+        : Effect.succeed({ principal: principals[id], grant: fakeGrant(id, principals[id]) }),
     authorizeGrant: (id: string) =>
       principals[id] === undefined
         ? Effect.fail(new Error("missing grant"))
-        : Effect.succeed({ principal: principals[id], grant: {} }),
+        : Effect.succeed({ principal: principals[id], grant: fakeGrant(id, principals[id]) }),
   }) as unknown as GrantStoreApi;
 const uiManifest = (id: string) => ({
   ...baseManifest,
@@ -656,11 +666,17 @@ test("revoked durable grants deny a restart and safe mode never reports a runnin
       authenticateGrant: () =>
         revoked
           ? Effect.fail("revoked")
-          : Effect.succeed({ principal: "manager-plugin", grant: {} }),
+          : Effect.succeed({
+              principal: "manager-plugin",
+              grant: fakeGrant("grant-1", "manager-plugin"),
+            }),
       authorizeGrant: () =>
         revoked
           ? Effect.fail("revoked")
-          : Effect.succeed({ principal: "manager-plugin", grant: {} }),
+          : Effect.succeed({
+              principal: "manager-plugin",
+              grant: fakeGrant("grant-1", "manager-plugin"),
+            }),
     } as unknown as GrantStoreApi;
     await Effect.runPromise(
       Effect.scoped(

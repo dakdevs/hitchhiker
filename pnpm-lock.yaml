@@ -51,9 +51,15 @@ importers:
         specifier: 4.0.0-beta.107
         version: 4.0.0-beta.107
     devDependencies:
+      '@hitchhiker/plugin-sdk':
+        specifier: workspace:0.1.0
+        version: link:../../packages/plugin-sdk
       '@types/node':
         specifier: 24.10.1
         version: 24.10.1
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
       typescript:
         specifier: 7.0.2
         version: 7.0.2

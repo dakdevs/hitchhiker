@@ -19,7 +19,9 @@
     "effect": "4.0.0-beta.107"
   },
   "devDependencies": {
+    "@hitchhiker/plugin-sdk": "workspace:0.1.0",
     "@types/node": "24.10.1",
+    "esbuild": "0.28.2",
     "typescript": "7.0.2"
   }
 }

@@ -137,6 +137,7 @@ const program = Effect.gen(function* () {
       profileLease,
     });
     yield* controller.start;
+    const dom = yield* makeBrowserDomDriver({ protectWrite: controller.protectDomWrite });
     const mcp = process.argv.includes("--mcp");
     const grants = yield* createGrantStore({
       directory: join(profileLease.profileRoot, "hitchhiker-grants"),
@@ -195,6 +196,7 @@ const program = Effect.gen(function* () {
         executable: pluginExecutable,
         grants,
         controller,
+        dom,
         onRecoveryFailure: recoveryFailure,
         composition,
         management,
@@ -311,6 +313,7 @@ const program = Effect.gen(function* () {
         token,
         grants,
         controller,
+        dom,
         onRecoveryFailure: recoveryFailure,
       }).pipe(
         Effect.catchCause(() => Effect.logError("Plugin stopped.")),
@@ -335,7 +338,6 @@ const program = Effect.gen(function* () {
     if (mcp) {
       const token = process.env.HITCHHIKER_MCP_TOKEN;
       if (!token) return yield* Effect.die("--mcp requires a pre-issued HITCHHIKER_MCP_TOKEN");
-      const dom = yield* makeBrowserDomDriver({ protectWrite: controller.protectDomWrite });
       const devtools = yield* controller.devtools.forOwner(
         grants
           .authorize(token, {
