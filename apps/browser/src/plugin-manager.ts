@@ -146,6 +146,12 @@ export interface PluginManager {
     expectedRevision: number,
     candidate: InstalledPluginPlanInput,
   ) => Effect.Effect<InstalledPluginPlan, PluginManagerError>;
+  /** Replaces an enabled source everywhere it owns the active plan. Trusted management only. */
+  readonly replace: (
+    sourceId: string,
+    targetId: string,
+    expectedRevision: number,
+  ) => Effect.Effect<InstalledPluginPlan, PluginManagerError>;
   /** Replaces the authenticated caller everywhere it owns the active plan. */
   readonly replaceSelf: (
     callerId: string,
@@ -1421,27 +1427,27 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         return yield* transition(registry, plugins, candidate);
       }),
     );
-  const replaceSelf = (callerId: string, targetId: string, expectedRevision: number) =>
+  const replace = (sourceId: string, targetId: string, expectedRevision: number) =>
     withMutationLock(
       Effect.gen(function* () {
         const registry = yield* loadedPlan();
         if (registry.activePlan.revision !== expectedRevision)
           return yield* failure("Plugin plan revision is stale");
-        const caller = registry.plugins.find((plugin) => plugin.id === callerId);
-        if (!caller || !caller.enabled || !running.has(callerId))
-          return yield* failure("Caller plugin is not enabled and running");
+        const source = registry.plugins.find((plugin) => plugin.id === sourceId);
+        if (!source || !source.enabled || source.removing || !running.has(sourceId))
+          return yield* failure("Source plugin is not enabled and running");
         const target = registry.plugins.find((plugin) => plugin.id === targetId);
-        if (callerId === targetId || !target || target.enabled || target.removing)
+        if (sourceId === targetId || !target || target.enabled || target.removing)
           return yield* failure("Replacement target must be a distinct disabled installed plugin");
         const active = registry.activePlan;
         const candidate = yield* nextPlan(registry, {
-          enabled: active.enabled.map((id) => (id === callerId ? targetId : id)),
+          enabled: active.enabled.map((id) => (id === sourceId ? targetId : id)),
           ...(active.composition === undefined
             ? {}
             : {
                 composition: {
                   layout:
-                    active.composition.layout === callerId ? targetId : active.composition.layout,
+                    active.composition.layout === sourceId ? targetId : active.composition.layout,
                   slots: active.composition.slots.map((slot) => ({
                     ...slot,
                     ...(slot.route === undefined
@@ -1451,7 +1457,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
                             fallback: {
                               ...slot.route.fallback,
                               pluginId:
-                                slot.route.fallback.pluginId === callerId
+                                slot.route.fallback.pluginId === sourceId
                                   ? targetId
                                   : slot.route.fallback.pluginId,
                             },
@@ -1460,15 +1466,15 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
                     contributions: slot.contributions.map((contribution) => ({
                       ...contribution,
                       pluginId:
-                        contribution.pluginId === callerId ? targetId : contribution.pluginId,
+                        contribution.pluginId === sourceId ? targetId : contribution.pluginId,
                     })),
                   })),
                 },
               }),
           serviceBindings: active.serviceBindings.map((binding) => ({
             ...binding,
-            consumer: binding.consumer === callerId ? targetId : binding.consumer,
-            provider: binding.provider === callerId ? targetId : binding.provider,
+            consumer: binding.consumer === sourceId ? targetId : binding.consumer,
+            provider: binding.provider === sourceId ? targetId : binding.provider,
           })),
         });
         const plugins = registry.plugins.map((plugin) =>
@@ -1477,6 +1483,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         return yield* transition(registry, plugins, candidate);
       }),
     );
+  const replaceSelf = replace;
   const installPlan = (
     hash: string,
     grantId: string,
@@ -1810,6 +1817,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
       ),
     plan,
     applyPlan,
+    replace,
     replaceSelf,
     install: (hash: string, grantId: string, config?: { readonly staged?: boolean }) =>
       choose(install(hash, grantId), installPlan(hash, grantId, config)),

@@ -242,6 +242,11 @@ export interface PluginApi {
     disable(id: string): Promise<PluginManagementSnapshot>;
     rollback(id: string): Promise<PluginManagementSnapshot>;
     uninstall(id: string): Promise<PluginManagementSnapshot>;
+    replace(
+      sourceId: string,
+      targetId: string,
+      expectedRevision: number,
+    ): Promise<PluginManagementSnapshot>;
     replaceSelf(targetId: string, expectedRevision: number): Promise<PluginManagementSnapshot>;
   };
   readonly extensions: {
@@ -374,6 +379,12 @@ const api = (host: HostBridge): PluginApi =>
       disable: (id: string) => call<PluginManagementSnapshot>(host, "plugins.disable", { id }),
       rollback: (id: string) => call<PluginManagementSnapshot>(host, "plugins.rollback", { id }),
       uninstall: (id: string) => call<PluginManagementSnapshot>(host, "plugins.uninstall", { id }),
+      replace: (sourceId: string, targetId: string, expectedRevision: number) =>
+        call<PluginManagementSnapshot>(host, "plugins.replace", {
+          sourceId,
+          targetId,
+          expectedRevision,
+        }),
       replaceSelf: (targetId: string, expectedRevision: number) =>
         call<PluginManagementSnapshot>(host, "plugins.replaceSelf", {
           targetId,

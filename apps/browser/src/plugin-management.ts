@@ -9,7 +9,7 @@ export class PluginManagementError extends Schema.TaggedError<PluginManagementEr
 
 type ManagementBackend = Pick<
   PluginManager,
-  "managementSnapshot" | "enable" | "disable" | "rollback" | "uninstall" | "replaceSelf"
+  "managementSnapshot" | "enable" | "disable" | "rollback" | "uninstall" | "replaceSelf" | "replace"
 >;
 
 /** Installed callers receive an identity-bound port, never the manager or its staging authority. */
@@ -73,6 +73,8 @@ export const createPluginManagement = Effect.fn("PluginManagement.create")(funct
     disable: (id) => mutate(isActive, (manager) => manager.disable(id)),
     rollback: (id) => mutate(isActive, (manager) => manager.rollback(id)),
     uninstall: (id) => mutate(isActive, (manager) => manager.uninstall(id)),
+    replace: (sourceId, targetId, expectedRevision) =>
+      mutate(isActive, (manager) => manager.replace(sourceId, targetId, expectedRevision)),
     replaceSelf: (targetId, expectedRevision) =>
       mutate(isActive, (manager) => manager.replaceSelf(callerId, targetId, expectedRevision)),
   });

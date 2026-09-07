@@ -452,6 +452,22 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
           Effect.flatMap((snapshot) => decode(PluginManagementSnapshotSchema, snapshot)),
         );
       }
+      case "plugins.replace": {
+        yield* authorize("plugins.manage");
+        const { sourceId, targetId, expectedRevision } = yield* decode(
+          Schema.Struct({
+            sourceId: PluginManagementIdSchema,
+            targetId: PluginManagementIdSchema,
+            expectedRevision: PluginManagementRevisionSchema,
+          }),
+          params,
+        );
+        if (!options.management) return yield* denied();
+        return yield* options.management.replace(sourceId, targetId, expectedRevision).pipe(
+          Effect.mapError(denied),
+          Effect.flatMap((snapshot) => decode(PluginManagementSnapshotSchema, snapshot)),
+        );
+      }
       case "extensions.list": {
         yield* authorize("extensions.read");
         yield* decode(Schema.Record(Schema.String, Schema.Never), params);

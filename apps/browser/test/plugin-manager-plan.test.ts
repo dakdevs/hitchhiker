@@ -845,3 +845,77 @@ test("V1 migration validates before writing and a safe-mode writer cannot race i
     );
   });
 });
+
+test("independent manager replaces a presenter, rejects stale or revoked candidates, and rolls back failure", async () => {
+  await withProfile((root) =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const f = yield* fixture(root);
+        for (const id of ["layout-plugin", "source-plugin", "target-plugin", "bad-plugin"])
+          yield* f.stage(id, true);
+        yield* f.stage("settings-plugin");
+        const initial = yield* f.manager.applyPlan((yield* f.manager.plan()).revision, {
+          enabled: ["source-plugin", "layout-plugin", "settings-plugin"],
+          composition: {
+            layout: "layout-plugin",
+            slots: [
+              {
+                key: "area",
+                route: { fallback: { pluginId: "source-plugin", id: "tabs" } },
+                contributions: [{ pluginId: "source-plugin", id: "tabs" }],
+              },
+            ],
+          },
+          serviceBindings: [],
+        });
+        const port = yield* createPluginManagement();
+        yield* port.bind(f.manager);
+        const settingsGeneration = f.active.get("settings-plugin");
+        const layoutGeneration = f.active.get("layout-plugin");
+        const api = port.forPlugin(
+          "settings-plugin",
+          () => f.active.get("settings-plugin") === settingsGeneration,
+        );
+        const before = yield* Effect.promise(() => readFile(path(root), "utf8"));
+        for (const args of [
+          ["source-plugin", "target-plugin", initial.revision - 1],
+          ["target-plugin", "source-plugin", initial.revision],
+          ["source-plugin", "source-plugin", initial.revision],
+          ["source-plugin", "missing-plugin", initial.revision],
+        ] as const)
+          assert(Exit.isFailure(yield* Effect.exit(api.replace(args[0], args[1], args[2]))));
+        f.denied.add("target-plugin");
+        assert(
+          Exit.isFailure(
+            yield* Effect.exit(api.replace("source-plugin", "target-plugin", initial.revision)),
+          ),
+        );
+        f.denied.clear();
+        assert.equal(yield* Effect.promise(() => readFile(path(root), "utf8")), before);
+        f.failures.add("bad-plugin");
+        assert(
+          Exit.isFailure(
+            yield* Effect.exit(api.replace("source-plugin", "bad-plugin", initial.revision)),
+          ),
+        );
+        assert(
+          f.launches.has("bad-plugin"),
+          "rollback test must reach failing candidate activation",
+        );
+        assert.deepEqual(yield* f.manager.plan(), initial);
+        assert(f.active.has("source-plugin"));
+        assert(!f.active.has("bad-plugin"));
+        const result = yield* api.replace("source-plugin", "target-plugin", initial.revision);
+        assert.equal(result.revision, initial.revision + 1);
+        const plan = yield* f.manager.plan();
+        assert.deepEqual(plan.enabled, ["target-plugin", "layout-plugin", "settings-plugin"]);
+        assert.equal(plan.composition?.slots[0]?.route?.fallback.pluginId, "target-plugin");
+        assert.equal(plan.composition?.slots[0]?.contributions[0]?.pluginId, "target-plugin");
+        assert.equal(f.active.get("settings-plugin"), settingsGeneration);
+        assert.equal(f.active.get("layout-plugin"), layoutGeneration);
+        assert(!f.active.has("source-plugin"));
+        assert.equal(f.peak(), 3);
+      }).pipe(Effect.scoped),
+    ),
+  );
+});

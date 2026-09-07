@@ -138,6 +138,7 @@ const fakeApi = () => {
       disable: unexpected,
       rollback: unexpected,
       uninstall: unexpected,
+      replace: unexpected,
       replaceSelf: unexpected,
     },
   };

@@ -204,6 +204,9 @@ const fakeApi = () => {
         pluginCalls.push({ method: "uninstall", id });
         return management;
       },
+      replace: async () => {
+        throw new Error("Unexpected management call");
+      },
       replaceSelf: async (id, revision) => {
         pluginCalls.push({ method: "replaceSelf", id, revision });
         return management;

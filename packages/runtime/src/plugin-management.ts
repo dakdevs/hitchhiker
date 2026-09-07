@@ -57,6 +57,11 @@ export interface PluginManagementApi {
   readonly disable: (id: string) => Effect.Effect<PluginManagementSnapshot, unknown>;
   readonly rollback: (id: string) => Effect.Effect<PluginManagementSnapshot, unknown>;
   readonly uninstall: (id: string) => Effect.Effect<PluginManagementSnapshot, unknown>;
+  readonly replace: (
+    sourceId: string,
+    targetId: string,
+    expectedRevision: number,
+  ) => Effect.Effect<PluginManagementSnapshot, unknown>;
   readonly replaceSelf: (
     targetId: string,
     expectedRevision: number,

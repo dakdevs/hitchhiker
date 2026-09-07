@@ -69,3 +69,20 @@ acquire these new event consumers. Fresh bundles include them; older plugins saf
 event. No automatic artifact replacement, new grant, worker-cap change or cohort migration occurs
 in this prerequisite checkpoint. Full portable checks pass 495 tests with 44 Native-gated skips;
 the separate Native startup regression passes without skips.
+
+Generic replacement is implemented: share the existing transactional replacement path,
+retain `replaceSelf`, and admit cross-owner source selection only through the installed management
+port and `plugins.manage`. Verify a different caller remains running, stale revisions and bad targets
+leave the plan unchanged, and failed activation restores the source. No cohort changes in this step.
+
+The independent-manager transaction regression reaches failed target activation and verifies rollback,
+stale revision and revoked-target denial, unchanged unrelated generations, and fallback ownership
+substitution. The Native compiled-SDK fixture swaps the browser layout/content provider from a
+separate management worker, confirms its public call returns and its generation remains unchanged,
+retains live document state, and exercises management route disable/re-enable/removal and clean exit.
+This uses a disposable mock-Keychain profile. Both management artifacts, lifecycle notifications,
+and the eight-worker V4 cohort remain outstanding.
+
+Generic replacement passes the full repository check: 497 portable tests pass, with 45 Native-gated
+skips in that run. The separate Native replacement fixture passes without skips and closes cleanly.
+The API leaves the six-worker ceiling and current cohort unchanged.

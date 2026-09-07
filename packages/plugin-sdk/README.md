@@ -164,3 +164,13 @@ invalidation covers changes during activation. Declare `configuration.read` and 
 to notifications. Read `api.configuration.get()` for the current value. Notifications carry no snapshot,
 may coalesce, and do not require polling. Rendering failure after a durable write does not undo the
 configuration change.
+
+An independent management plugin can call
+`api.plugins.replace(sourceId, targetId, expectedRevision)` with a live `plugins.manage` grant.
+Read `api.plugins.snapshot()` under `plugins.read` to obtain the current revision. The source must
+be enabled and running; the target must be distinct, installed and disabled. Replacement rewrites
+composition ownership, route fallback and service bindings in one validated plan transaction,
+retaining unrelated activations. A failed candidate restores the prior plan. Existing target grants
+must already authorize its manifest; replacement does not issue grants. A stale revision requires
+a fresh snapshot before retrying. `replaceSelf` retains its existing caller-bound behavior.
+These methods are available to installed plugins, not developer directory launches.

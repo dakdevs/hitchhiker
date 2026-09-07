@@ -10,6 +10,7 @@ const backend = (overrides: Partial<Backend> = {}): Backend => ({
   disable: () => Effect.void,
   rollback: () => Effect.void,
   uninstall: () => Effect.void,
+  replace: () => Effect.succeed({ revision: 2, enabled: [], serviceBindings: [] }),
   replaceSelf: () => Effect.succeed({ revision: 2, enabled: [], serviceBindings: [] }),
   ...overrides,
 });
@@ -178,6 +179,45 @@ test("startup admission allows reads but holds management mutations until bootst
       assert.equal(calls, 0);
       yield* port.enableMutations();
       yield* api.enable("target");
+      assert.equal(calls, 1);
+    }),
+  ));
+
+test("a separate management owner replaces a source and admitted work survives its cancellation", () =>
+  run(
+    Effect.gen(function* () {
+      const port = yield* createPluginManagement({ startPaused: true });
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const finished = yield* Deferred.make<void>();
+      let active = true;
+      let calls = 0;
+      yield* port.bind(
+        backend({
+          replace: (source, target, revision) =>
+            Effect.gen(function* () {
+              calls++;
+              assert.deepEqual([source, target, revision], ["sidebar", "top", 2]);
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+              yield* Deferred.succeed(finished, undefined);
+              return { revision: 3, enabled: ["top", "settings"], serviceBindings: [] };
+            }),
+        }),
+      );
+      const api = port.forPlugin("settings", () => active);
+      assert(Exit.isFailure(yield* Effect.exit(api.replace("sidebar", "top", 2))));
+      yield* port.enableMutations();
+      active = false;
+      assert(Exit.isFailure(yield* Effect.exit(api.replace("sidebar", "top", 2))));
+      assert.equal(calls, 0);
+      active = true;
+      const caller = yield* api.replace("sidebar", "top", 2).pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      active = false;
+      yield* Fiber.interrupt(caller);
+      yield* Deferred.succeed(release, undefined);
+      yield* Deferred.await(finished);
       assert.equal(calls, 1);
     }),
   ));

@@ -142,6 +142,9 @@ const fixture = (initial: readonly string[] = ["first", "second"]) => {
       disable: async () => ({ revision: 1, plugins: [] }),
       rollback: async () => ({ revision: 1, plugins: [] }),
       uninstall: async () => ({ revision: 1, plugins: [] }),
+      replace: async () => {
+        throw new Error("Unexpected management call");
+      },
       replaceSelf: async () => ({ revision: 1, plugins: [] }),
     },
     ui: {

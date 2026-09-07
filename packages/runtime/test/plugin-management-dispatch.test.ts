@@ -92,6 +92,8 @@ test("plugin management separates read, manage, and install authority", async ()
     disable: (id) => Effect.sync(() => (calls.push(`disable:${id}`), snapshot)),
     rollback: (id) => Effect.sync(() => (calls.push(`rollback:${id}`), snapshot)),
     uninstall: (id) => Effect.sync(() => (calls.push(`uninstall:${id}`), snapshot)),
+    replace: (sourceId, targetId, revision) =>
+      Effect.sync(() => (calls.push(`replace:${sourceId}:${targetId}:${revision}`), snapshot)),
     replaceSelf: (id, revision) =>
       Effect.sync(() => (calls.push(`replace:${id}:${revision}`), snapshot)),
   };
@@ -99,6 +101,16 @@ test("plugin management separates read, manage, and install authority", async ()
     Effect.gen(function* () {
       assert.deepEqual(yield* dispatch("plugins.snapshot", {}), snapshot);
       assert.equal(yield* failure(dispatch("plugins.enable", { id: "presenter" })), true);
+      assert.equal(
+        yield* failure(
+          dispatch("plugins.replace", {
+            sourceId: "presenter",
+            targetId: "replacement",
+            expectedRevision: 4,
+          }),
+        ),
+        true,
+      );
       yield* grants.revoke(grantId);
       assert.equal(yield* failure(dispatch("plugins.snapshot", {})), true);
       assert.deepEqual(calls, ["snapshot"]);
@@ -110,13 +122,34 @@ test("plugin management separates read, manage, and install authority", async ()
       assert.equal(yield* failure(dispatch("plugins.enable", { id: "presenter" })), true);
     }),
   );
-  await withDispatcher(["plugins.manage"], management, (dispatch) =>
+  await withDispatcher(["plugins.manage"], management, (dispatch, grants, grantId) =>
     Effect.gen(function* () {
       assert.deepEqual(yield* dispatch("plugins.enable", { id: "presenter" }), snapshot);
+      assert.deepEqual(
+        yield* dispatch("plugins.replace", {
+          sourceId: "presenter",
+          targetId: "replacement",
+          expectedRevision: 4,
+        }),
+        snapshot,
+      );
       assert.deepEqual(
         yield* dispatch("plugins.replaceSelf", { targetId: "presenter", expectedRevision: 4 }),
         snapshot,
       );
+      const callsBeforeRevokedReplace = calls.length;
+      yield* grants.revoke(grantId);
+      assert.equal(
+        yield* failure(
+          dispatch("plugins.replace", {
+            sourceId: "presenter",
+            targetId: "replacement",
+            expectedRevision: 4,
+          }),
+        ),
+        true,
+      );
+      assert.equal(calls.length, callsBeforeRevokedReplace);
     }),
   );
 });
@@ -144,11 +177,22 @@ test("management requests and responses are bounded, exact, and fail closed with
     disable: () => Effect.succeed(snapshot),
     rollback: () => Effect.succeed(snapshot),
     uninstall: () => Effect.succeed(snapshot),
+    replace: () => Effect.succeed({ ...snapshot, credential: "secret" }),
     replaceSelf: () => Effect.succeed(snapshot),
   } satisfies PluginManagementApi;
-  await withDispatcher(["plugins.read"], unsafe, (dispatch) =>
+  await withDispatcher(["plugins.read", "plugins.manage"], unsafe, (dispatch) =>
     Effect.gen(function* () {
       assert.equal(yield* failure(dispatch("plugins.snapshot", {})), true);
+      assert.equal(
+        yield* failure(
+          dispatch("plugins.replace", {
+            sourceId: "presenter",
+            targetId: "replacement",
+            expectedRevision: 4,
+          }),
+        ),
+        true,
+      );
     }),
   );
 });
@@ -181,6 +225,7 @@ test("malformed management commands never reach an available authorized port", a
     disable: invoke,
     rollback: invoke,
     uninstall: invoke,
+    replace: invoke,
     replaceSelf: invoke,
   };
   await withDispatcher(["plugins.read", "plugins.manage"], management, (dispatch) =>
@@ -199,6 +244,20 @@ test("malformed management commands never reach an available authorized port", a
         ])
           assert.equal(yield* failure(dispatch(method, params)), true);
       }
+      for (const params of [
+        { sourceId: "presenter", targetId: "replacement", expectedRevision: -1 },
+        {
+          sourceId: "presenter",
+          targetId: "replacement",
+          expectedRevision: Number.MAX_SAFE_INTEGER + 1,
+        },
+        { sourceId: "presenter", targetId: "replacement", expectedRevision: 4, callerId: "spoof" },
+        { sourceId: "presenter", targetId: "replacement", expectedRevision: 4, caller: "spoof" },
+        { sourceId: "presenter\\n", targetId: "replacement", expectedRevision: 4 },
+        { sourceId: "presenter", targetId: "../replacement", expectedRevision: 4 },
+        { sourceId: "presenter", expectedRevision: 4 },
+      ])
+        assert.equal(yield* failure(dispatch("plugins.replace", params)), true);
       for (const params of [
         { targetId: "presenter", expectedRevision: -1 },
         { targetId: "presenter", expectedRevision: Number.MAX_SAFE_INTEGER + 1 },

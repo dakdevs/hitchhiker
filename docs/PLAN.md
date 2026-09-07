@@ -823,3 +823,9 @@ Whole-browser resource acceptance and abrupt-worker recovery remain open.
 Independent Settings and plugin management extraction follows the
 [management extraction plan](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md). Configuration invalidations are
 the first prerequisite; the new generic replacement API, separate artifacts and V4 cohort remain.
+
+The public `plugins.replace` prerequisite now supports an independent manager replacing another
+plugin through the existing validated transaction. Portable rollback/authority checks and a real Native
+compiled-SDK replacement/retained-page fixture pass; see the
+[extraction checkpoint](DEFAULT-MANAGEMENT-EXTRACTION-PLAN.md). The separate default artifacts and
+V4 cohort remain to be implemented.
