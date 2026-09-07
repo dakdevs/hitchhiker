@@ -844,3 +844,9 @@ picker, but computer-use timeouts and unsuccessful path entry prevented selectio
 for the review control (`work/v4-native-extensions.log`); this run provides no fresh V4 installation
 acceptance. The previous extension fixture evidence remains separate. Next protocol work must first
 prove the [owned CDP session prerequisite](DEVTOOLS-PLAN.md#plugin-protocol-session-prerequisite).
+
+The new Native CDP fixture now proves separate flattened pipe sessions on one page, independent
+Runtime subscriptions alongside the private host observer, intercepted-fetch release on detach,
+and renderer timer resumption after debugger detach. The next step is the engine-owned session
+lane described in the [feasibility checkpoint](DEVTOOLS-PLAN.md#remote-debugging-pipe-feasibility-checkpoint),
+followed by owner/grant enforcement and SDK/MCP integration. No public CDP API is shipped yet.

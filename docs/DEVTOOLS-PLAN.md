@@ -10,6 +10,11 @@ disrupt the host, and a stopped plugin could leave a page paused.
 Before committing a public signature, a Native feasibility fixture must prove separate protocol
 sessions on the pinned CEF build. Investigate flattened `Target.attachToTarget` sessions through
 `SendDevToolsMessage`; an observer registration alone does not establish session isolation.
+The existing engine also starts Chromium's remote debugging pipe and already has private flattened
+session test helpers. A new `native-cdp-sessions.test.ts` fixture investigates that backend first,
+with two sessions on one page and the trusted host observer active. It currently claims the exclusive
+raw connection with extension management disabled; this is backend feasibility, not a public broker
+or evidence of coexistence with extension management.
 Verify command results and events route to the owning session, and detaching one session leaves
 another session and the trusted DOM driver usable. If CEF cannot provide this, evaluate a separate
 trusted DevTools client backend. Do not fall back to sharing the internal connection.
@@ -27,6 +32,30 @@ Primary references: [CEF browser API](https://github.com/chromiumembedded/cef/bl
 [Fetch request lifecycle](https://chromedevtools.github.io/devtools-protocol/tot/Fetch/), and
 [Debugger lifecycle](https://chromedevtools.github.io/devtools-protocol/v8/Debugger/).
 These evolving references must be checked against the pinned Chromium protocol during implementation.
+
+### Remote debugging pipe feasibility checkpoint
+
+The pinned Native build passes `native-cdp-sessions.test.ts` with a disposable test Keychain.
+Two flattened sessions attach to the same page while the private CEF observer remains active.
+Disabling Runtime in the first stops its console events while the second and the host continue
+receiving them. Detachment preserves the document and host inspection. A session intercepts a
+specific local fetch; its promise remains pending until detachment and then returns HTTP 200.
+A debugger session produces a pause event; after detachment, a renderer timer advances again.
+The latter checks normal JavaScript task execution, not merely successful DevTools evaluation.
+
+This proves a backend path through the existing pipe; it does not require a CEF patch or prove
+that `SendDevToolsMessage` supports flattened envelopes. The fixture uses exclusive raw ownership
+and disables extension management. It does not prove public authority enforcement, cross-page
+ownership, extension coexistence, or abrupt transport failure recovery.
+
+Next implement an engine-owned session lane while retaining management ownership of the pipe.
+Reserve a disjoint request-ID range and route trusted extension replies before session replies.
+Keep extension mutation uncertainty/restart semantics intact. The broker must allocate and retain
+actual target/session IDs privately, route only owned events, and reject public Target and Extensions
+commands. Public sessions must be drained before handing the transport to the exclusive raw relay.
+Test active session traffic alongside extension install/removal and reject cross-page and extension
+worker access before wiring the public SDK and MCP. Observed detach cleanup is useful evidence,
+but does not replace deadlines, grant revocation cleanup or recovery when detach itself fails.
 
 ## Original integration scope
 
