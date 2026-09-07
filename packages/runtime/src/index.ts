@@ -1,5 +1,5 @@
 export { EngineConnection, EngineError } from "./engine.ts";
-export { createPluginStorage } from "./plugin-storage.ts";
+export { createPluginStorage, PluginStorageError } from "./plugin-storage.ts";
 export type { PluginStorageAdapter } from "./plugin-storage.ts";
 export type { EngineOptions, EngineEvent, JsonObject, RawCdpConnection } from "./engine.ts";
 export { NativeSurface } from "./surface.ts";
@@ -7,6 +7,7 @@ export type { SurfaceEvent } from "./surface.ts";
 export { GrantStore, GrantStoreError, create as createGrantStore } from "./grants.ts";
 export type {
   GrantStoreApi,
+  ManagedGrantStoreApi,
   GrantIssue,
   GrantAuthentication,
   GrantAuthorization,

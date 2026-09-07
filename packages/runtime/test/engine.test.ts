@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Deferred, Effect, Fiber, Schema, Scope, Stream } from "effect";
+import { TestClock } from "effect/testing";
 import { EngineConnection } from "../src/engine.ts";
 import { FrameDecoder } from "../src/framing.ts";
 
@@ -163,8 +164,17 @@ test("malformed and timed-out extension results poison raw handoff and drain lat
 test("engine shutdown fails a pending extension command without handing off the pipe", async () => {
   await withExtensionEngine((engine, artifacts) =>
     Effect.gen(function* () {
-      const pending = yield* engine.loadUnpacked(artifacts.d).pipe(Effect.flip, Effect.forkScoped);
-      yield* Effect.sleep(25);
+      const received = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "extension.received"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      const pending = yield* engine
+        .loadUnpacked(artifacts.d)
+        .pipe(Effect.provide(TestClock.layer()), Effect.flip, Effect.forkScoped);
+      yield* Fiber.join(received);
       yield* engine.request("close-cdp");
       assert.equal((yield* Fiber.join(pending)).code, "cdp-read-closed");
       assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "cdp-read-closed");
@@ -175,8 +185,17 @@ test("engine shutdown fails a pending extension command without handing off the 
 test("interrupting a sent extension request prevents raw handoff until restart", async () => {
   await withExtensionEngine((engine, artifacts) =>
     Effect.gen(function* () {
-      const pending = yield* engine.loadUnpacked(artifacts.d).pipe(Effect.forkScoped);
-      yield* Effect.sleep(25);
+      const received = yield* engine.events.pipe(
+        Stream.filter((event) => event.event === "extension.received"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+      const pending = yield* engine
+        .loadUnpacked(artifacts.d)
+        .pipe(Effect.provide(TestClock.layer()), Effect.forkScoped);
+      yield* Fiber.join(received);
       yield* Fiber.interrupt(pending);
       assert.equal((yield* engine.claimRawCdp.pipe(Effect.flip)).code, "extension-uncertain");
     }),
@@ -604,7 +623,10 @@ test("interrupting an enqueued Native commit terminates the uncertain connection
         Effect.forkScoped,
       );
       yield* Effect.yieldNow;
-      const pending = yield* engine.request("ui.commit", { revision: 1 }).pipe(Effect.forkScoped);
+      // This case exercises interruption after dispatch; the separate test above owns timeout.
+      const pending = yield* engine
+        .request("ui.commit", { revision: 1 })
+        .pipe(Effect.provide(TestClock.layer()), Effect.forkScoped);
       yield* Fiber.join(received);
       yield* Fiber.interrupt(pending);
       assert.equal((yield* engine.request("echo").pipe(Effect.flip)).code, "commit-interrupted");

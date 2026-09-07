@@ -316,3 +316,9 @@ The diagnostic checkpoint passes `pnpm check`: 318 portable tests passed, 29 nat
 were skipped, and dependency validation, typecheck, lint, formatting and builds passed. Evidence:
 `work/plugin-timeout-diagnostics-check.log`. The native diagnostic fixture is terminal with a failed
 60-second test deadline and no surviving owned processes; this is not a native acceptance pass.
+
+Exact trusted staged-install retry is now idempotent for the same disabled, non-removing artifact
+hash and grant ID, with artifact metadata revalidation. It does not change the plan revision or
+restart workers. Any mismatch or enabled identity fails. This closes the install/checkpoint crash
+gap for the planned bundled-default bootstrap; it does not make newly delegated MCP staging calls
+with different grant IDs interchangeable.

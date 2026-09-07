@@ -558,3 +558,10 @@ startup recovery have portable behavioral coverage. The final portable check pas
 tests and 29 native-gated skips, plus all builds. The real native sidebar-switch fixture failed during
 initial model activation, before any switch assertion. Default bootstrap and the complete feature-plugin
 cutover remain unfinished. See [LIVE-PLUGIN-PLAN.md](LIVE-PLUGIN-PLAN.md) for contracts and evidence.
+
+Default bootstrap prerequisites now include owner-bound revision-zero tab/pin migration, idempotent
+trusted managed grants, and exact disabled staged-install retry. The combined portable check passes
+328 tests and all builds, with 29 native-gated skips. The normal application startup is not yet cut
+over. [DEFAULT-BOOTSTRAP-PLAN.md](DEFAULT-BOOTSTRAP-PLAN.md) defines permanent completion/abandonment
+markers, crash-gap recovery, page-restoration readiness, packaging and management-route prerequisites.
+Native startup/clean-shutdown acceptance remains unresolved.

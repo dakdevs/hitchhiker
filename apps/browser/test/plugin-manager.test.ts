@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -814,6 +814,54 @@ test("safe-mode recovery bypasses malformed, excess-field and oversized registry
           }
         }),
       ),
+    );
+  });
+});
+
+test("exact staged retries preserve the plan and reject changed grants, artifacts or enabled identities", async () => {
+  await withProfile(async (profileRoot) => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const artifacts = yield* createPluginArtifactStore(profileRoot);
+        const first = yield* artifacts.stage({ manifest: baseManifest, code: "first" });
+        const replacement = yield* artifacts.stage({ manifest: baseManifest, code: "replacement" });
+        let launches = 0;
+        const manager = yield* createPluginManager({
+          profileRoot,
+          grants,
+          launch: (_artifact, _grant, ready) =>
+            Effect.sync(() => {
+              launches++;
+            }).pipe(Effect.andThen(ready), Effect.andThen(Effect.never)),
+        });
+        yield* manager.install(first.hash, "first-grant", { staged: true });
+        const plan = yield* manager.plan();
+        const path = join(profileRoot, "hitchhiker-plugins", "plugins.json");
+        const bytes = yield* Effect.promise(() => readFile(path, "utf8"));
+        yield* manager.install(first.hash, "first-grant", { staged: true });
+        assert.deepEqual(yield* manager.plan(), plan);
+        assert.equal(yield* Effect.promise(() => readFile(path, "utf8")), bytes);
+        assert.equal(launches, 0);
+        for (const [hash, grant] of [
+          [replacement.hash, "first-grant"],
+          [first.hash, "another-grant"],
+        ])
+          assert.match(
+            (yield* manager.install(hash, grant, { staged: true }).pipe(Effect.flip)).message,
+            /conflicts/,
+          );
+        assert.equal(yield* Effect.promise(() => readFile(path, "utf8")), bytes);
+        yield* manager.enable(baseManifest.id);
+        const enabled = yield* manager.plan();
+        assert.equal(launches, 1);
+        assert.match(
+          (yield* manager.install(first.hash, "first-grant", { staged: true }).pipe(Effect.flip))
+            .message,
+          /conflicts/,
+        );
+        assert.deepEqual(yield* manager.plan(), enabled);
+        assert.equal(launches, 1);
+      }).pipe(Effect.scoped),
     );
   });
 });

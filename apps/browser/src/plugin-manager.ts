@@ -1374,8 +1374,18 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
         yield* authorize(artifact, grantId);
         const registry = yield* loadedPlan();
         const old = registry.plugins.find((plugin) => plugin.id === artifact.manifest.id);
-        if (old && installOptions?.staged)
-          return yield* failure("Staged installation requires a new plugin identity");
+        if (old && installOptions?.staged) {
+          if (
+            !old.enabled &&
+            !old.removing &&
+            old.revision.hash === artifact.hash &&
+            old.revision.grantId === grantId
+          ) {
+            yield* artifactFor(old, old.revision);
+            return;
+          }
+          return yield* failure("Staged installation conflicts with the installed plugin identity");
+        }
         if (!old && registry.plugins.length >= MaxPlugins)
           return yield* failure("At most sixteen plugins may be installed");
         const revision: Revision = {

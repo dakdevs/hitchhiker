@@ -99,6 +99,14 @@ export interface GrantStoreApi {
   readonly revocations: Stream.Stream<GrantRevocation>;
 }
 
+/** Trusted distribution startup only. Deliberately absent from the wire-facing service API. */
+export interface ManagedGrantStoreApi extends GrantStoreApi {
+  readonly ensureManaged: (
+    key: string,
+    input: GrantIssue,
+  ) => Effect.Effect<CapabilityGrant, GrantStoreError>;
+}
+
 export class GrantStore extends Context.Service<GrantStore, GrantStoreApi>()(
   "@hitchhiker/runtime/GrantStore",
 ) {}
@@ -108,6 +116,7 @@ interface StoredGrant {
   readonly issuedAt: number;
   readonly tokenHash: string;
   readonly parentId?: string;
+  readonly managedKey?: string;
 }
 
 interface StoredState {
@@ -120,11 +129,17 @@ interface RevocationMutation {
   readonly changed: boolean;
 }
 
+const ManagedKey = Schema.String.check(
+  Schema.isPattern(/^[a-z][a-z0-9._/-]{0,127}$/),
+  Schema.isTrimmed(),
+);
+const decodeManagedKey = Schema.decodeUnknownEffect(ManagedKey);
 const PersistedGrant = Schema.Struct({
   grant: Schema.Unknown,
   issuedAt: Schema.Int,
   tokenHash: Schema.String,
   parentId: Schema.optional(Schema.String),
+  managedKey: Schema.optional(ManagedKey),
 });
 const PersistedState = Schema.Struct({
   version: Schema.Literal(1),
@@ -156,12 +171,17 @@ const parseStoredState = (value: unknown): StoredState | undefined => {
   if (Option.isNone(decoded) || decoded.value.grants.length > MaxGrants) return undefined;
   const grantIds = new Set<string>();
   const tokenHashes = new Set<string>();
+  const managedKeys = new Set<string>();
   const grants: StoredGrant[] = [];
   for (const record of decoded.value.grants) {
     if (record.issuedAt < 0 || !/^[a-f0-9]{64}$/.test(record.tokenHash)) return undefined;
     const grant = parseGrant(record.grant);
     if (!grant.ok || grantIds.has(grant.value.id) || tokenHashes.has(record.tokenHash))
       return undefined;
+    if (record.managedKey !== undefined) {
+      if (record.parentId !== undefined || managedKeys.has(record.managedKey)) return undefined;
+      managedKeys.add(record.managedKey);
+    }
     grantIds.add(grant.value.id);
     tokenHashes.add(record.tokenHash);
     grants.push(
@@ -170,6 +190,7 @@ const parseStoredState = (value: unknown): StoredState | undefined => {
         issuedAt: record.issuedAt,
         tokenHash: record.tokenHash,
         ...(record.parentId === undefined ? {} : { parentId: record.parentId }),
+        ...(record.managedKey === undefined ? {} : { managedKey: record.managedKey }),
       }),
     );
   }
@@ -187,7 +208,7 @@ export const create = Effect.fn("GrantStore.create")(function* ({
 }: {
   readonly directory: string;
 }): Effect.fn.Return<
-  GrantStoreApi,
+  ManagedGrantStoreApi,
   GrantStoreError,
   FileSystem.FileSystem | Crypto.Crypto | Scope.Scope
 > {
@@ -330,7 +351,7 @@ export const create = Effect.fn("GrantStore.create")(function* ({
           // The state is deliberately reread after the cross-process lock.
           const state = yield* load();
           const [result, next] = yield* operation(state);
-          yield* write(next);
+          if (next !== state) yield* write(next);
           return result;
         }),
       ),
@@ -413,6 +434,67 @@ export const create = Effect.fn("GrantStore.create")(function* ({
               grants: Object.freeze([...state.grants, stored]),
             }),
           ] as const),
+    );
+  });
+
+  const ensureManaged = Effect.fn("GrantStore.ensureManaged")(function* (
+    key: string,
+    input: GrantIssue,
+  ) {
+    const managedKey = yield* decodeManagedKey(key).pipe(
+      Effect.mapError(() => failure("invalid-grant", "Managed grant key is invalid")),
+    );
+    // Validate the full request before consulting the key; never broaden a prior grant.
+    const candidate = parseGrant({
+      id: "managed-validation",
+      principal: input.principal,
+      profileId: input.profileId,
+      capabilities: input.capabilities,
+      origins: input.origins,
+      ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+    });
+    if (!candidate.ok) return yield* failure("invalid-grant", candidate.errors.join(" "));
+    return yield* mutate<CapabilityGrant>((state) =>
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
+        const existing = state.grants.find((entry) => entry.managedKey === managedKey);
+        if (existing) {
+          const grant = existing.grant;
+          const request = candidate.value;
+          if (
+            grant.principal !== request.principal ||
+            grant.profileId !== request.profileId ||
+            grant.expiresAt !== request.expiresAt ||
+            !sameValues([...grant.capabilities].sort(), [...request.capabilities].sort()) ||
+            !sameValues([...grant.origins].sort(), [...request.origins].sort())
+          )
+            return yield* failure(
+              "managed-conflict",
+              "Managed grant key belongs to another request",
+            );
+          yield* validateStoredGrant(state, existing, request.profileId, now);
+          return [grant, state] as const;
+        }
+        if (!active(candidate.value, input.profileId, now))
+          return yield* failure("denied", "Managed grant request has expired");
+        if (state.grants.length >= MaxGrants)
+          return yield* failure("limit", "Grant store has reached its grant limit");
+        const grant = Object.freeze({
+          ...candidate.value,
+          id: `g${hex(yield* randomBytes(16))}`,
+        });
+        const entry: StoredGrant = Object.freeze({
+          grant,
+          issuedAt: now,
+          managedKey,
+          // No bearer escapes this operation; startup authenticates the returned ID in-process.
+          tokenHash: yield* hashToken(tokenText(yield* randomBytes(32))),
+        });
+        return [
+          grant,
+          Object.freeze({ version: 1 as const, grants: Object.freeze([...state.grants, entry]) }),
+        ] as const;
+      }),
     );
   });
 
@@ -593,6 +675,7 @@ export const create = Effect.fn("GrantStore.create")(function* ({
 
   return {
     issue,
+    ensureManaged,
     revoke,
     list,
     authenticate,

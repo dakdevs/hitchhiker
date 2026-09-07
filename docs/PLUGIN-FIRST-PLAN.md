@@ -410,3 +410,30 @@ underlying CEF/macOS cause. The sample also contains a Security/Keychain cleanup
 investigation rather than a Keychain bypass. The failed fixture host was explicitly killed after
 sampling; the test runner completed and no owned native/plugin host processes remained. Startup and
 shutdown reliability under load remains an open gate; no timing or isolation limit was relaxed.
+
+## Default state migration prerequisite
+
+See [DEFAULT-BOOTSTRAP-PLAN.md](DEFAULT-BOOTSTRAP-PLAN.md) for the accepted coordinator state machine,
+durable boundaries and remaining startup gates.
+
+Implement a distribution-owned adapter in `apps/browser/src/default-plugin-state-migration.ts`. It
+maps decoded legacy browser persistence and the complete current page inventory into the existing
+model/pins plugin JSON contracts; the generic manager and core gain no tab policy. Filter and dedupe
+legacy ordering/pins against current page IDs, append missing current pages in controller order,
+retain valid selection, otherwise select the first page or the new-page view when empty. Use
+`pagesRevision: 0` as a migration sentinel; activation reconciles the current revision.
+
+Seed owner-bound plugin storage only at revision zero with CAS. Preserve every nonzero revision
+without interpreting or rewriting its payload, including a concurrent winner. A partial migration
+must be safe to resume: retain the completed owner and seed only the still-empty owner. This helper
+is a prerequisite for the durable bundled-default bootstrap coordinator; it does not itself install
+defaults, promote a plan, retire legacy state or authorize launch. The complete bootstrap marker,
+management-screen routing and startup cutover remain required.
+
+The bootstrap coordinator also needs idempotent trusted grant issuance. Persist a bounded unique
+managed key beside the grant under the existing grant-store mutation lock. Repeating a key returns
+the same active grant only for the same principal/profile/capability/origin/expiry request; it must
+never adopt a matching unmanaged grant, renew revoked authority, or create an orphan grant after an
+interrupted caller. This constructor-only API returns grant metadata, not a bearer, and is not
+exposed through MCP or plugins. The permanent bootstrap completion marker must remain authoritative
+after users remove defaults; matching artifact IDs alone never authorize reinstallation.

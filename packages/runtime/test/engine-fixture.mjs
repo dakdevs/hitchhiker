@@ -72,8 +72,10 @@ new Socket({ fd: 3, readable: true, writable: false }).on("data", (chunk) => {
           error: { code: -32602, message: `Rejected ${message.params.path}`, data: "fixture" },
         });
       else if (behavior === "c") replyCdp({ id: message.id, result: { id: "invalid" } });
-      else if (behavior === "d") continue;
-      else if (behavior === "e")
+      else if (behavior === "d") {
+        send({ event: "extension.received", params: {} });
+        continue;
+      } else if (behavior === "e")
         setTimeout(() => replyCdp({ id: message.id, result: { id: extensionId } }), 250);
       else if (behavior === "f")
         setTimeout(() => replyCdp({ id: message.id, result: { id: extensionId } }), 50);
