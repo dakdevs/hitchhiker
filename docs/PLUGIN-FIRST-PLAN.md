@@ -244,3 +244,66 @@ without skips (146 runtime, 118 browser). The first concurrent repository check 
 two-second MCP child shutdown deadline; its focused suite and the full rerun passed without changing
 the deadline. The default-feature plugin extraction and complete Chromium/DevTools API coverage
 remain unfinished.
+
+## Chromium and DevTools documentation contract
+
+The public documentation must let authors determine exactly which Chromium operations they can
+use, observe and customize through Hitchhiker. For each operation, document its public SDK method,
+events and payloads, required grants and profile/origin scope, lifecycle behavior, limits, example,
+and verified support status. Distinguish the Hitchhiker SDK, Chrome extension APIs, CDP domains and
+native embedding APIs; an upstream Chromium feature is not automatically an exposed plugin API.
+
+DevTools must work in the default distribution through a replaceable plugin. Document opening and
+closing tools, target selection, presentation and available customization hooks, with separate
+coverage for protocol automation and DevTools frontend customization. Mark unavailable bridges as
+planned or unsupported rather than implying that CDP exposes every Chromium internal API.
+
+Security-related customization is part of this API inventory: permission decisions, origin-scoped
+access, network policies, profiles and debugging access. Identify configurable policies separately
+from the host's enforced isolation and grant boundaries. Plugins cannot grant themselves authority
+or bypass Chromium's sandbox. Privileged operations require explicit, revocable authority; CDP
+continues to require its separate grant. The same public contracts must serve bundled and third-party
+plugins. These are acceptance requirements; complete API coverage and the default DevTools plugin
+remain unfinished.
+
+## Plugin state prerequisites in progress
+
+Add `storage.local` with owner/profile-bound JSON reads and compare-and-set writes. Storage survives
+updates, disable and restart; uninstall deletes that owner's data only after its workers stop. Writes
+must finish atomic replacement before cancellation completes. The host profile lease remains the
+cross-process writer boundary; storage also serializes same-process instances.
+
+Add `pages.watch` with revisioned, bounded snapshot chunks and coalesced `pages.changed` notifications
+from the controller after reduction. Register the subscription and take the initial snapshot under
+the same controller lock. Snapshot data excludes usage timestamps so a presentation commit cannot
+create a watch/redraw feedback loop. Native page events remain available for compatibility but are
+not the authoritative model feed. Both primitives are implementation in progress.
+
+The state prerequisites are now wired through installed and developer launchers. Installed storage
+uses a manager-selected owner and survives worker replacement; uninstall removes it after workers
+stop and grants are revoked. Page subscriptions belong to a worker scope and publish only after
+controller reduction. History controls are available through the SDK and the MCP facade. Focused
+coverage includes CAS and grant revocation, manager update/restart/removal, snapshot pagination,
+concurrent subscription admission, and controller navigation flags. A real isolated SDK fixture
+passed page-change delivery and storage persistence across disable, update and a fresh browser
+process, followed by uninstall/reinstall. Full repository/native verification is pending for this
+checkpoint; default tab feature extraction remains the next architectural step.
+
+Review tightened two contracts before release: subscription reservations are scoped unique tokens,
+so failed/old scopes cannot erase a replacement owner's reservation; public PluginApiError codes
+separate conflict and stale-snapshot from denied. Storage conflicts require reread/reconciliation;
+stale page snapshots require restarting pagination. Neither permits automatic retry of a revoked
+operation. The isolated SDK fixture explicitly checks the conflict code.
+
+DevTools follow-up audit: the current host has private cdp.send/ExecuteDevToolsMethod but no
+ShowDevTools/CloseDevTools/HasDevTools RPC. The pinned CEF exposes those operations and
+OnBeforeDevToolsPopup plus BrowserView popup delegates. Stock window hosting and custom frontend
+presentation are separate integration tasks. Define the inspection permission contract before
+exposing them; navigation authority alone must not silently become unrestricted debugger authority.
+
+Native verification on September 6 passed all 283 tests with no skips (162 runtime, 121 browser).
+The initial parallel repository check exposed the existing MCP harness startup/shutdown timing
+coupling. The harness now waits for explicit stderr readiness and bounds initialization separately,
+then preserves the original two-/three-second operation shutdown deadlines. No product timeout was
+relaxed. `pnpm check` passed after that harness correction, including typechecking, lint, formatting, tests
+and production builds.

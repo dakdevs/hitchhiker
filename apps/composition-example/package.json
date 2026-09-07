@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild src/layout.ts src/left.ts src/right.ts src/service-provider.ts src/service-consumer.ts --bundle --format=iife --platform=browser --target=safari17 --outdir=dist",
+    "build": "esbuild src/layout.ts src/left.ts src/right.ts src/service-provider.ts src/service-consumer.ts src/page-state.ts --bundle --format=iife --platform=browser --target=safari17 --outdir=dist",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

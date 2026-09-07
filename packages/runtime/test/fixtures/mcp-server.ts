@@ -11,10 +11,15 @@ const configuration: BrowserConfiguration = {
   alwaysAwakeOrigins: [],
 };
 const capabilities: readonly Capability[] =
-  process.env.MCP_CAPABILITIES === "none" ? [] : ["pages.list"];
+  process.env.MCP_CAPABILITIES === "none"
+    ? []
+    : process.env.MCP_CAPABILITIES === "manage"
+      ? ["pages.manage"]
+      : ["pages.list"];
 const slowMs = Number(process.env.MCP_SLOW_MS ?? "0");
 const dispatchMarker = process.env.MCP_DISPATCH_MARKER;
 const finalizerMarker = process.env.MCP_FINALIZER_MARKER;
+const historyMarker = process.env.MCP_HISTORY_MARKER;
 let authorizations = 0;
 const grants: GrantStoreApi = {
   issue: () => Effect.die("fixture never issues grants"),
@@ -69,6 +74,14 @@ const program = runMcpStdio({
     open: () => Effect.succeed("page"),
     navigate: () => Effect.void,
     close: () => Effect.void,
+    ...(process.env.MCP_HISTORY === "yes"
+      ? {
+          history: (pageId: string, action: "back" | "forward" | "reload" | "stop") =>
+            Effect.sync(() => {
+              if (historyMarker) appendFileSync(historyMarker, `${pageId}:${action}\n`);
+            }),
+        }
+      : {}),
     configuration: Effect.succeed(configuration),
     configure: () => Effect.void,
     setTabPlacement: () => Effect.void,
@@ -82,3 +95,9 @@ const program = runMcpStdio({
 );
 
 NodeRuntime.runMain(program, { disableErrorReporting: true });
+
+// Tests use stderr only for an explicit post-bootstrap readiness signal. MCP
+// stdout stays exclusively JSON-RPC frames, while operation deadlines begin
+// after the fixture has entered the runtime event loop.
+if (process.env.MCP_READY === "yes")
+  setImmediate(() => process.stderr.write("HITCHHIKER_MCP_FIXTURE_READY\n"));

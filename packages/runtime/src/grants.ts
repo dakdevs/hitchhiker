@@ -141,6 +141,7 @@ const DelegationInput = Schema.Struct({
       "ui.compose",
       "configuration.write",
       "plugins.install",
+      "storage.local",
       "browser.full-control",
       "cdp.connect",
     ]),

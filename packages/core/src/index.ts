@@ -93,6 +93,22 @@ export interface BrowserViewport {
   readonly profileId: string;
   readonly pageId: string;
 }
+/** User-visible metadata. Usage timestamps are deliberately excluded from change notifications. */
+export interface ObservedPage extends Omit<BrowserPage, "lastUsedAt"> {
+  readonly loading: boolean;
+  readonly canGoBack: boolean;
+  readonly canGoForward: boolean;
+}
+export interface PageWatchRequest {
+  readonly offset?: number;
+  /** Required for continuation chunks; stale revisions reject instead of mixing snapshots. */
+  readonly revision?: number;
+}
+export interface PageWatchSnapshot {
+  readonly revision: number;
+  readonly pages: readonly ObservedPage[];
+  readonly nextOffset?: number;
+}
 export interface BrowserState {
   readonly pages: readonly BrowserPage[];
   readonly viewports: readonly BrowserViewport[];
@@ -276,6 +292,7 @@ export type Capability =
   | "ui.compose"
   | "configuration.write"
   | "plugins.install"
+  | "storage.local"
   | "browser.full-control"
   | "cdp.connect";
 export interface CapabilityGrant {
@@ -295,6 +312,7 @@ const capabilityNames: readonly Capability[] = [
   "ui.compose",
   "configuration.write",
   "plugins.install",
+  "storage.local",
   "browser.full-control",
   "cdp.connect",
 ];

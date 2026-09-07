@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { NodeServices } from "@effect/platform-node";
 import { Deferred, Effect, Exit } from "effect";
+import { PluginCallError } from "../src/plugin-dispatch.ts";
 import { spawnPluginHost } from "../src/plugin.ts";
 
 const script = `#!${process.execPath}
@@ -73,6 +74,40 @@ test("isolated transport sanitizes capability denials", async () => {
         const reply = JSON.stringify(yield* Deferred.await(seen).pipe(Effect.timeout(3000)));
         assert(reply.includes('"code":"denied"'));
         assert(!reply.includes("private credential"));
+        yield* host.stop;
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("isolated transport preserves only safe public call errors", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hitchhiker-plugin-public-error-"));
+  const executable = join(dir, "fixture.cjs");
+  await writeFile(executable, script);
+  await chmod(executable, 0o700);
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const seen = yield* Deferred.make<unknown>();
+        const host = yield* spawnPluginHost({
+          executable,
+          call: (method, params) =>
+            method === "seen"
+              ? Deferred.succeed(seen, params).pipe(Effect.as(null))
+              : Effect.fail(
+                  new PluginCallError({
+                    code: "conflict",
+                    message: "Plugin storage revision changed",
+                  }),
+                ),
+        });
+        yield* host.activate("compiled");
+        assert.deepEqual(yield* Deferred.await(seen).pipe(Effect.timeout(3000)), {
+          callId: 1,
+          error: { code: "conflict", message: "Plugin storage revision changed" },
+        });
         yield* host.stop;
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );

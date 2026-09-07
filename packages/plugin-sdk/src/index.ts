@@ -1,5 +1,12 @@
-import type { BrowserConfiguration, BrowserPage, Capability } from "@hitchhiker/core";
+import type {
+  BrowserConfiguration,
+  BrowserPage,
+  Capability,
+  PageWatchRequest,
+  PageWatchSnapshot,
+} from "@hitchhiker/core";
 import type { Surface } from "@hitchhiker/ui";
+export type { ObservedPage, PageWatchRequest, PageWatchSnapshot } from "@hitchhiker/core";
 
 export type Json =
   | null
@@ -8,6 +15,19 @@ export type Json =
   | string
   | readonly Json[]
   | { readonly [key: string]: Json };
+
+export type PluginApiErrorCode = "conflict" | "denied" | "stale-snapshot";
+const errorMessages: Readonly<Record<PluginApiErrorCode, string>> = Object.freeze({
+  conflict: "Plugin storage revision changed",
+  denied: "Plugin operation was denied or could not complete",
+  "stale-snapshot": "Page snapshot changed; restart from offset zero",
+});
+export class PluginApiError extends Error {
+  readonly name = "PluginApiError";
+  constructor(readonly code: PluginApiErrorCode) {
+    super(errorMessages[code]);
+  }
+}
 export interface ServiceContract {
   readonly name: string;
   readonly version: string;
@@ -44,6 +64,10 @@ export interface PluginManifest {
   readonly requires?: readonly (ServiceDeclaration & { readonly optional?: boolean })[];
 }
 export interface PluginApi {
+  readonly storage: {
+    read(): Promise<{ readonly revision: number; readonly value: Json }>;
+    write(expectedRevision: number, value: Json): Promise<{ readonly revision: number }>;
+  };
   readonly services: {
     publish(service: string, value: Json): Promise<{ readonly revision: number }>;
     get(dependency: string): Promise<ServiceSnapshot>;
@@ -52,9 +76,14 @@ export interface PluginApi {
   };
   readonly pages: {
     list(): Promise<readonly BrowserPage[]>;
+    watch(request?: PageWatchRequest): Promise<PageWatchSnapshot>;
     open(url: string): Promise<{ readonly pageId: string }>;
     navigate(pageId: string, url: string): Promise<void>;
     close(pageId: string): Promise<void>;
+    back(pageId: string): Promise<void>;
+    forward(pageId: string): Promise<void>;
+    reload(pageId: string): Promise<void>;
+    stop(pageId: string): Promise<void>;
   };
   readonly configuration: {
     get(): Promise<BrowserConfiguration>;
@@ -80,43 +109,70 @@ export interface Plugin {
   readonly activate: (api: PluginApi) => void | Promise<void>;
   /** Handlers run with this provider's own API authority. Caller identity is informational. */
   readonly services?: Readonly<Record<string, ServiceHandler>>;
+  /** Coalesced invalidation after pages.watch(); read a fresh snapshot to obtain current data. */
+  readonly onPagesChanged?: (revision: number) => void | Promise<void>;
   readonly onEvent?: (event: string, payload: unknown) => void | Promise<void>;
 }
 interface HostBridge {
   readonly call: <A>(method: string, params: object) => Promise<A>;
 }
+const call = async <A>(host: HostBridge, method: string, params: object): Promise<A> => {
+  try {
+    return await host.call<A>(method, params);
+  } catch (error) {
+    const descriptor =
+      typeof error === "object" && error !== null
+        ? Object.getOwnPropertyDescriptor(error, "code")
+        : undefined;
+    const code = descriptor && "value" in descriptor ? descriptor.value : undefined;
+    throw new PluginApiError(code === "conflict" || code === "stale-snapshot" ? code : "denied");
+  }
+};
 const api = (host: HostBridge): PluginApi =>
   Object.freeze({
+    storage: Object.freeze({
+      read: () =>
+        call<{ readonly revision: number; readonly value: Json }>(host, "storage.read", {}),
+      write: (expectedRevision: number, value: Json) =>
+        call<{ readonly revision: number }>(host, "storage.write", { expectedRevision, value }),
+    }),
     services: Object.freeze({
       publish: (service: string, value: Json) =>
-        host.call<{ readonly revision: number }>("services.publish", { service, value }),
-      get: (dependency: string) => host.call<ServiceSnapshot>("services.get", { dependency }),
+        call<{ readonly revision: number }>(host, "services.publish", { service, value }),
+      get: (dependency: string) => call<ServiceSnapshot>(host, "services.get", { dependency }),
       subscribe: (dependency: string) =>
-        host.call<ServiceSnapshot>("services.subscribe", { dependency }),
+        call<ServiceSnapshot>(host, "services.subscribe", { dependency }),
       call: (dependency: string, method: string, params: Json) =>
-        host.call<Json>("services.call", { dependency, method, params }),
+        call<Json>(host, "services.call", { dependency, method, params }),
     }),
     pages: Object.freeze({
-      list: () => host.call<readonly BrowserPage[]>("pages.list", {}),
-      open: (url: string) => host.call<{ readonly pageId: string }>("pages.open", { url }),
-      navigate: (pageId: string, url: string) => host.call<void>("pages.navigate", { pageId, url }),
-      close: (pageId: string) => host.call<void>("pages.close", { pageId }),
+      list: () => call<readonly BrowserPage[]>(host, "pages.list", {}),
+      watch: (request: PageWatchRequest = {}) =>
+        call<PageWatchSnapshot>(host, "pages.watch", request),
+      open: (url: string) => call<{ readonly pageId: string }>(host, "pages.open", { url }),
+      navigate: (pageId: string, url: string) =>
+        call<void>(host, "pages.navigate", { pageId, url }),
+      close: (pageId: string) => call<void>(host, "pages.close", { pageId }),
+      back: (pageId: string) => call<void>(host, "pages.back", { pageId }),
+      forward: (pageId: string) => call<void>(host, "pages.forward", { pageId }),
+      reload: (pageId: string) => call<void>(host, "pages.reload", { pageId }),
+      stop: (pageId: string) => call<void>(host, "pages.stop", { pageId }),
     }),
     configuration: Object.freeze({
-      get: () => host.call<BrowserConfiguration>("configuration.get", {}),
+      get: () => call<BrowserConfiguration>(host, "configuration.get", {}),
       set: (configuration: BrowserConfiguration) =>
-        host.call<void>("configuration.set", { configuration }),
+        call<void>(host, "configuration.set", { configuration }),
     }),
     ui: Object.freeze({
       publish: (surface: Omit<Surface, "identity">) =>
-        host.call<{ readonly revision: number }>("ui.publish", { surface }),
+        call<{ readonly revision: number }>(host, "ui.publish", { surface }),
       publishLayout: (surface: Omit<Surface, "identity">) =>
-        host.call<{ readonly revision: number }>("ui.publishLayout", { surface }),
+        call<{ readonly revision: number }>(host, "ui.publishLayout", { surface }),
       publishContribution: (id: string, surface: Omit<Surface, "identity">) =>
-        host.call<{ readonly revision: number }>("ui.publishContribution", { id, surface }),
+        call<{ readonly revision: number }>(host, "ui.publishContribution", { id, surface }),
       withdrawContribution: (id: string) =>
-        host.call<{ readonly revision: number }>("ui.withdrawContribution", { id }),
-      release: () => host.call<void>("ui.release", {}),
+        call<{ readonly revision: number }>(host, "ui.withdrawContribution", { id }),
+      release: () => call<void>(host, "ui.release", {}),
     }),
   });
 
@@ -131,6 +187,11 @@ export const definePlugin = (plugin: Plugin): void => {
         return plugin.activate(api(host));
       },
       onEvent: async (event: string, payload: unknown) => {
+        if (event === "pages.changed" && plugin.onPagesChanged) {
+          // The controller supplies this validated envelope after reducing page state.
+          const change = payload as { readonly revision: number };
+          await plugin.onPagesChanged(change.revision);
+        }
         if (event !== "service.request") return plugin.onEvent?.(event, payload);
         if (!bridge) throw new Error("Plugin has not activated");
         // This event comes from the trusted broker, which validates its complete envelope.

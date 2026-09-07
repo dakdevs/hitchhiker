@@ -1,4 +1,6 @@
 export { EngineConnection, EngineError } from "./engine.ts";
+export { createPluginStorage } from "./plugin-storage.ts";
+export type { PluginStorageAdapter } from "./plugin-storage.ts";
 export type { EngineOptions, EngineEvent, JsonObject, RawCdpConnection } from "./engine.ts";
 export { NativeSurface } from "./surface.ts";
 export type { SurfaceEvent } from "./surface.ts";
@@ -77,6 +79,12 @@ export type {
 } from "./service-contracts.ts";
 export { createServiceAuthority } from "./service-authority.ts";
 export type { ServiceParty, EffectiveAuthority } from "./service-authority.ts";
+export {
+  makePageObservations,
+  PageWatchRequestSchema,
+  PageChangedSchema,
+} from "./page-observations.ts";
+export type { PageWatchSubscription } from "./page-observations.ts";
 export { createPluginServiceBroker, ServiceBrokerError } from "./plugin-service-broker.ts";
 export type {
   PluginServiceBroker,

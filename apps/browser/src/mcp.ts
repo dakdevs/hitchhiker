@@ -10,6 +10,7 @@ export const browserMcpApi = (controller: BrowserController): McpBrowserApi => (
   open: controller.openPage,
   navigate: controller.navigatePage,
   close: controller.closePage,
+  history: controller.pageHistory,
   configuration: controller.configuration,
   configure: controller.configure,
   setTabPlacement: (placement) => controller.dispatch(`settings.tabs.${placement}`),

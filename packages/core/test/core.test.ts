@@ -223,6 +223,24 @@ test("grants enforce origin, expiry, revocation, full control, and separate CDP"
     grantAllows(full, { principal: "local", profileId: "main", capability: "cdp.connect", now: 1 }),
     false,
   );
+  const storage = value(
+    parseGrant({
+      id: "storage",
+      principal: "local",
+      profileId: "main",
+      capabilities: ["storage.local"],
+      origins: [],
+    }),
+  );
+  assert.equal(
+    grantAllows(storage, {
+      principal: "local",
+      profileId: "main",
+      capability: "storage.local",
+      now: 1,
+    }),
+    true,
+  );
   assert.equal(
     parseGrant({
       id: "many",

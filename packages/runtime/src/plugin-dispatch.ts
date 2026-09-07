@@ -3,6 +3,9 @@ import { Effect, Schema } from "effect";
 import type { GrantStoreApi } from "./grants.ts";
 import type { McpBrowserApi } from "./mcp.ts";
 import { ServiceProviderSchema, ServiceRequirementSchema } from "./service-contracts.ts";
+import { PageWatchRequestSchema, type PageWatchSubscription } from "./page-observations.ts";
+import { EngineError } from "./engine.ts";
+import { PluginStorageError, type PluginStorageAdapter } from "./plugin-storage.ts";
 
 export const LivePluginManifest = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{1,62}$/)),
@@ -23,6 +26,7 @@ export const LivePluginManifest = Schema.Struct({
       "pages.write",
       "ui.compose",
       "configuration.write",
+      "storage.local",
       "plugins.install",
       "browser.full-control",
       "cdp.connect",
@@ -33,10 +37,25 @@ export const LivePluginManifest = Schema.Struct({
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type LivePluginManifest = typeof LivePluginManifest.Type;
 export class PluginCallError extends Schema.TaggedError<PluginCallError>()("PluginCallError", {
+  code: Schema.Literals(["conflict", "denied", "stale-snapshot"]),
   message: Schema.String,
 }) {}
 const denied = () =>
-  new PluginCallError({ message: "Plugin operation is not authorized or supported" });
+  new PluginCallError({
+    code: "denied",
+    message: "Plugin operation is not authorized or supported",
+  });
+const storageError = (error: unknown) =>
+  error instanceof PluginStorageError && error.code === "conflict"
+    ? new PluginCallError({ code: "conflict", message: "Plugin storage revision changed" })
+    : denied();
+const pageWatchError = (error: unknown) =>
+  error instanceof EngineError && error.code === "page-watch-stale"
+    ? new PluginCallError({
+        code: "stale-snapshot",
+        message: "Page snapshot changed; restart from offset zero",
+      })
+    : denied();
 const PageId = Schema.String.check(Schema.isPattern(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/));
 const Url = Schema.String.check(Schema.isMaxLength(8192));
 const ContributionId = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]{0,62}$/));
@@ -62,6 +81,8 @@ export interface PluginDispatchOptions {
   readonly browser: McpBrowserApi;
   readonly publish: (surface: unknown) => Effect.Effect<number, unknown>;
   readonly release: Effect.Effect<void, unknown>;
+  readonly pageWatch?: PageWatchSubscription["watch"];
+  readonly storage?: PluginStorageAdapter;
   /** Trusted owner-bound broker adapter; service callers never select identities or grants. */
   readonly services?: {
     readonly publish: (
@@ -107,6 +128,52 @@ export const createPluginDispatcher = (options: PluginDispatchOptions) =>
       if (grant.principal !== options.manifest.id) return yield* denied();
     });
     switch (method) {
+      case "storage.read": {
+        yield* authorize("storage.local");
+        yield* decode(Schema.Record(Schema.String, Schema.Never), params);
+        if (!options.storage) return yield* denied();
+        return yield* options.storage.read().pipe(
+          Effect.mapError(storageError),
+          Effect.flatMap((snapshot) => decode(Schema.Json, snapshot)),
+        );
+      }
+      case "storage.write": {
+        yield* authorize("storage.local");
+        const { expectedRevision, value } = yield* decode(
+          Schema.Struct({
+            expectedRevision: Schema.Int.check(
+              Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+            ),
+            value: Schema.Json,
+          }),
+          params,
+        );
+        if (!options.storage) return yield* denied();
+        return yield* options.storage.write(expectedRevision, value).pipe(
+          Effect.mapError(storageError),
+          Effect.flatMap((result) => decode(Schema.Json, result)),
+        );
+      }
+      case "pages.watch": {
+        yield* authorize("pages.list");
+        const request = yield* decode(PageWatchRequestSchema, params);
+        if (!options.pageWatch) return yield* denied();
+        return yield* options.pageWatch(request).pipe(
+          Effect.mapError(pageWatchError),
+          Effect.flatMap((snapshot) => decode(Schema.Json, snapshot)),
+        );
+      }
+      case "pages.back":
+      case "pages.forward":
+      case "pages.reload":
+      case "pages.stop": {
+        yield* authorize("pages.manage");
+        const { pageId } = yield* decode(Schema.Struct({ pageId: PageId }), params);
+        if (!options.browser.history) return yield* denied();
+        const action = method.slice(6) as "back" | "forward" | "reload" | "stop";
+        yield* options.browser.history(pageId, action).pipe(Effect.mapError(denied));
+        return null;
+      }
       case "services.publish":
       case "services.get":
       case "services.subscribe":

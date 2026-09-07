@@ -2,6 +2,7 @@ import { isAbsolute } from "node:path";
 import { Deferred, Effect, PubSub, Queue, Schema, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { FrameDecoder } from "./framing.ts";
+import { PluginCallError } from "./plugin-dispatch.ts";
 
 const ObjectValue = Schema.Record(Schema.String, Schema.Json);
 const Identifier = Schema.Int.check(
@@ -29,6 +30,21 @@ export class PluginHostError extends Schema.TaggedError<PluginHostError>()("Plug
   message: Schema.String,
 }) {}
 const fail = (code: string, message: string) => new PluginHostError({ code, message });
+const publicCallFailure = (error: unknown) => {
+  if (error instanceof PluginCallError) {
+    if (error.code === "conflict")
+      return { code: "conflict", message: "Plugin storage revision changed" };
+    if (error.code === "stale-snapshot")
+      return {
+        code: "stale-snapshot",
+        message: "Page snapshot changed; restart from offset zero",
+      };
+  }
+  return {
+    code: "denied",
+    message: "Operation was denied or could not complete",
+  };
+};
 
 export interface PluginHostOptions {
   readonly executable: string;
@@ -124,10 +140,10 @@ export const spawnPluginHost = Effect.fn("spawnPluginHost")(function* (options: 
       options.call(call.method, call.params).pipe(
         Effect.timeoutOrElse({ duration: 4000, orElse: () => Effect.fail("timeout") }),
         Effect.matchEffect({
-          onFailure: () =>
+          onFailure: (error) =>
             request("resolve", {
               callId: call.callId,
-              error: { code: "denied", message: "Operation was denied or could not complete" },
+              error: publicCallFailure(error),
             }),
           onSuccess: (result) => request("resolve", { callId: call.callId, result }),
         }),

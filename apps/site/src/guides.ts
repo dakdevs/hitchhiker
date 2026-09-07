@@ -222,6 +222,28 @@ definePlugin({
 });`,
   },
   {
+    id: "plugin-storage-and-page-state",
+    title: "Store local state and observe pages",
+    paragraphs: [
+      "Declare storage.local to use api.storage. Storage belongs to the installed plugin identity within its browser profile; workers never select another owner or profile. read returns { revision, value }, initially { revision: 0, value: null }. write(expectedRevision, value) is compare-and-swap and rejects a stale revision with PluginApiError code conflict instead of overwriting a concurrent update. Reread and reconcile before retrying; other failures are not conflicts. Values are portable JSON limited to 128 KiB, depth 32, and 4,096 nodes. State survives worker restarts, updates, disable/enable, and browser restart; uninstall removes that plugin's stored value.",
+      "Declare pages.list to use api.pages.watch. A snapshot includes open-page metadata plus loading, canGoBack, and canGoForward. Each response contains at most 32 pages and 128 KiB. Continue with { offset: nextOffset, revision }; on PluginApiError code stale-snapshot, discard accumulated pages and restart from offset zero. Bound retries during continuous navigation; do not retry denied operations as snapshot conflicts. definePlugin({ onPagesChanged }) receives coalesced revision invalidations after watch has begun, so fetch a fresh snapshot instead of treating the callback as a page delta.",
+      "pages.back, pages.forward, pages.reload, and pages.stop require pages.manage and operate only on an existing page ID. MCP exposes the matching hitchhiker_page_back, hitchhiker_page_forward, hitchhiker_page_reload, and hitchhiker_page_stop tools when the browser history adapter is available; they also require pages.manage on the connection's current profile grant.",
+    ],
+    code: `import { definePlugin } from "@hitchhiker/plugin-sdk";
+
+definePlugin({
+  async activate(api) {
+    const saved = await api.storage.read();
+    await api.storage.write(saved.revision, { selectedPageId: null });
+    const first = await api.pages.watch();
+    if (first.pages[0]) await api.pages.reload(first.pages[0].id);
+  },
+  async onPagesChanged() {
+    // Call pages.watch() again; this notification is intentionally coalesced.
+  },
+});`,
+  },
+  {
     id: "plugin-api",
     title: "Plugin API reference",
     paragraphs: [
@@ -231,9 +253,23 @@ definePlugin({
       headings: ["Method", "Capability", "Result"],
       rows: [
         ["pages.list()", "pages.list", "BrowserPage[] with stable IDs and current lifecycle"],
+        [
+          "pages.watch({ offset?, revision? })",
+          "pages.list",
+          "PageWatchSnapshot; chunks of at most 32 pages and 128 KiB",
+        ],
         ["pages.open(url)", "pages.manage", "{ pageId }"],
         ["pages.navigate(pageId, url)", "pages.manage", "void; retains the page ID"],
         ["pages.close(pageId)", "pages.manage", "void; requests closure through Chromium"],
+        ["pages.back(pageId)", "pages.manage", "void; routes Chromium history back"],
+        ["pages.forward(pageId)", "pages.manage", "void; routes Chromium history forward"],
+        ["pages.reload(pageId)", "pages.manage", "void; reloads an existing page"],
+        ["pages.stop(pageId)", "pages.manage", "void; stops loading an existing page"],
+        [
+          "storage.read() / storage.write(expectedRevision, value)",
+          "storage.local",
+          "Revisioned owner-and-profile local JSON state",
+        ],
         ["configuration.get()", "configuration.write", "BrowserConfiguration"],
         ["configuration.set(configuration)", "configuration.write", "void; validated replacement"],
         [

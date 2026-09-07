@@ -29,6 +29,11 @@ export interface McpBrowserApi {
   readonly open: (url: string) => Effect.Effect<string, unknown>;
   readonly navigate: (id: string, url: string) => Effect.Effect<void, unknown>;
   readonly close: (id: string) => Effect.Effect<void, unknown>;
+  /** Optional trusted controller history operations. Omitted adapters expose no history tools. */
+  readonly history?: (
+    pageId: string,
+    action: "back" | "forward" | "reload" | "stop",
+  ) => Effect.Effect<void, unknown>;
   readonly configuration: Effect.Effect<BrowserConfiguration>;
   readonly configure: (configuration: BrowserConfiguration) => Effect.Effect<void, unknown>;
   readonly setTabPlacement: (placement: "sidebar" | "top") => Effect.Effect<void, unknown>;
@@ -137,6 +142,20 @@ const tools = Toolkit.make(
     success: Result,
     failure: McpActionError,
   }),
+);
+
+const historyActions = ["back", "forward", "reload", "stop"] as const;
+const historyTools = Toolkit.make(
+  ...historyActions.map((action) =>
+    Tool.make(`hitchhiker_page_${action}`, {
+      description: `${action === "back" ? "Go back in" : action === "forward" ? "Go forward in" : action === "reload" ? "Reload" : "Stop loading"} an existing page in this profile.`,
+      parameters: Schema.Struct({ pageId: PageId }).annotate({
+        parseOptions: { onExcessProperty: "error" },
+      }),
+      success: Result,
+      failure: McpActionError,
+    }),
+  ),
 );
 
 const PluginId = LivePluginManifest.fields.id;
@@ -280,6 +299,24 @@ export const registerBrowserMcp = Effect.fn("registerBrowserMcp")(function* (opt
       ),
   });
   yield* McpServer.registerToolkit(tools).pipe(Effect.provide(handlers));
+  const history = options.browser.history;
+  if (history !== undefined) {
+    const historyHandlers = historyTools.toLayer({
+      hitchhiker_page_back: ({ pageId }) =>
+        authorized("pages.manage", history(pageId, "back")).pipe(Effect.flatMap(() => json(null))),
+      hitchhiker_page_forward: ({ pageId }) =>
+        authorized("pages.manage", history(pageId, "forward")).pipe(
+          Effect.flatMap(() => json(null)),
+        ),
+      hitchhiker_page_reload: ({ pageId }) =>
+        authorized("pages.manage", history(pageId, "reload")).pipe(
+          Effect.flatMap(() => json(null)),
+        ),
+      hitchhiker_page_stop: ({ pageId }) =>
+        authorized("pages.manage", history(pageId, "stop")).pipe(Effect.flatMap(() => json(null))),
+    });
+    yield* McpServer.registerToolkit(historyTools).pipe(Effect.provide(historyHandlers));
+  }
   const customization = options.browser.customization;
   if (customization !== undefined) {
     const recipeHandlers = customizationTools.toLayer({

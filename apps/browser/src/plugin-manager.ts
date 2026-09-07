@@ -3,10 +3,12 @@ import { lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import type { Capability } from "@hitchhiker/core";
 import {
+  createPluginStorage,
   createPluginServiceBroker,
   createServiceAuthority,
   validateServiceGraph,
   type GrantStoreApi,
+  type PluginStorageAdapter,
   type PluginServiceBroker,
   type ServiceBinding,
   type ServiceGraph,
@@ -40,6 +42,7 @@ const capabilities = new Set<Capability>([
   "ui.compose",
   "configuration.write",
   "plugins.install",
+  "storage.local",
   "browser.full-control",
   "cdp.connect",
 ]);
@@ -91,6 +94,7 @@ export interface InstalledPluginActivation {
   readonly generation: number;
   readonly profileId: string;
   readonly services?: PluginServiceBroker;
+  readonly storage?: PluginStorageAdapter;
   /** Runs before the launcher removes this provider from the broker. */
   readonly onStopping: Effect.Effect<void>;
 }
@@ -122,6 +126,7 @@ const CapabilitySchema = Schema.Literals([
   "ui.compose",
   "configuration.write",
   "plugins.install",
+  "storage.local",
   "browser.full-control",
   "cdp.connect",
 ]);
@@ -189,6 +194,10 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     Effect.sync(() => {
       for (const record of running.values()) record.expectedStop = true;
     }).pipe(Effect.andThen(Scope.close(managerScope, exit))),
+  );
+  const pluginStorage = yield* createPluginStorage({ profileRoot: options.profileRoot }).pipe(
+    Effect.mapError((error) => failure(error.message)),
+    Effect.provideService(Scope.Scope, managerScope),
   );
   let serviceGraph = yield* validateServiceGraph([], []).pipe(Effect.orDie);
   const serviceAuthority = createServiceAuthority(options.grants);
@@ -446,6 +455,13 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
     )
       return yield* failure("Configured composition owner must declare ui.compose");
     yield* authorize(artifact, plugin.revision.grantId);
+    const storage = artifact.manifest.capabilities.some(
+      (capability) => capability === "storage.local" || capability === "browser.full-control",
+    )
+      ? yield* pluginStorage
+          .forOwner(plugin.id)
+          .pipe(Effect.mapError((error) => failure(error.message)))
+      : undefined;
     const ready = yield* Deferred.make<void, PluginManagerError>();
     if (nextActivationGeneration >= Number.MAX_SAFE_INTEGER)
       return yield* failure("Plugin activation generation limit reached");
@@ -458,6 +474,7 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
           (artifact.manifest.provides?.length ?? 0) + (artifact.manifest.requires?.length ?? 0) > 0
             ? serviceBroker
             : undefined,
+        ...(storage ? { storage } : {}),
         onStopping: Effect.sync(() => {
           if (latestGeneration.get(plugin.id) !== generation) return;
           for (const id of requiredDependentClosure(serviceGraph, new Set([plugin.id]))) {
@@ -931,6 +948,9 @@ export const createPluginManager = Effect.fn("PluginManager.create")(function* (
                 .revoke(grant.id)
                 .pipe(Effect.mapError(() => failure("Could not revoke removed plugin grants")));
             }
+            yield* pluginStorage
+              .remove(id)
+              .pipe(Effect.mapError((error) => failure(error.message)));
             yield* save({
               version: 1,
               plugins: registry.plugins.filter((entry) => entry.id !== id),

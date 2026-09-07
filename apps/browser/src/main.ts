@@ -246,6 +246,7 @@ const program = Effect.gen(function* () {
         );
       const developerPlugin = yield* runPluginDirectory({
         directory: pluginDirectory,
+        profileRoot: profileLease.profileRoot,
         executable: pluginExecutable,
         token,
         grants,

@@ -49,6 +49,7 @@ test(
             }).pipe(Effect.retry({ times: 100, schedule: Schedule.spaced(50) }));
           yield* wait("main-page");
           yield* runPluginDirectory({
+            profileRoot: profile,
             directory: fileURLToPath(new URL("../../canvas-plugin", import.meta.url)),
             executable: pluginHost!,
             token: issued.token,

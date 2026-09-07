@@ -11,6 +11,7 @@ const capabilityScopes = {
   "ui.compose": "originless",
   "configuration.write": "originless",
   "plugins.install": "originless",
+  "storage.local": "originless",
   "browser.full-control": "wildcard",
   "cdp.connect": "cdp",
 } as const satisfies Record<Capability, CapabilityScope>;

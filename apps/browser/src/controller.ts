@@ -1,4 +1,4 @@
-import type { BrowserPage, BrowserState } from "@hitchhiker/core";
+import type { BrowserPage, BrowserState, ObservedPage } from "@hitchhiker/core";
 import {
   defaultConfiguration,
   normalizeWebUrl,
@@ -22,11 +22,13 @@ import {
   EngineError,
   freezePage,
   NativeSurface,
+  makePageObservations,
   rememberPageResources,
   selectPageFreezes,
   type PageResourceKnowledge,
   type PortableSettings,
   type SurfaceEvent,
+  type PageWatchSubscription,
 } from "@hitchhiker/runtime";
 import {
   button,
@@ -111,6 +113,8 @@ type PageBrowserState = {
   readonly available: boolean;
   readonly committed: boolean;
   readonly loading: boolean;
+  readonly canGoBack?: boolean;
+  readonly canGoForward?: boolean;
 };
 type Screen = "browser" | "settings" | "plugins" | "extensions";
 
@@ -151,10 +155,17 @@ export interface BrowserController {
   readonly start: Effect.Effect<void, EngineError>;
   readonly dispatch: (action: string) => Effect.Effect<void, EngineError>;
   readonly snapshot: Effect.Effect<BrowserState>;
+  readonly observePages: (
+    owner: string,
+  ) => Effect.Effect<PageWatchSubscription, EngineError, Scope.Scope>;
   /** Trusted broker entrypoints; plugins and MCP never receive EngineConnection. */
   readonly openPage: (url: string) => Effect.Effect<string, EngineError>;
   readonly navigatePage: (pageId: string, url: string) => Effect.Effect<void, EngineError>;
   readonly closePage: (pageId: string) => Effect.Effect<void, EngineError>;
+  readonly pageHistory: (
+    pageId: string,
+    action: "back" | "forward" | "reload" | "stop",
+  ) => Effect.Effect<void, EngineError>;
   /** Records a conservative native-write lease before a scoped DOM mutation. */
   readonly protectDomWrite: (pageId: string) => Effect.Effect<void, EngineError>;
   readonly configure: (configuration: BrowserConfiguration) => Effect.Effect<void, EngineError>;
@@ -394,7 +405,7 @@ export const makeBrowserController = (
   Effect.gen(function* () {
     const engine = yield* EngineConnection;
     const surface = yield* NativeSurface;
-    const lock = yield* Semaphore.make(1);
+    const mutex = yield* Semaphore.make(1);
     let state: ControllerState = {
       browser: InitialBrowser,
       interfaceState: createDefaultInterface(ProfileId),
@@ -437,6 +448,29 @@ export const makeBrowserController = (
     let resourceSignalsAvailable = false;
     let pageBrowserGenerationAvailable = false;
     let pageBrowsers = new Map<string, PageBrowserState>();
+    const observations = yield* makePageObservations();
+    const observedPages = (): readonly ObservedPage[] =>
+      state.browser.pages
+        .filter((page) => page.lifecycle !== "closed")
+        .map((page) => ({
+          id: page.id,
+          profileId: page.profileId,
+          url: page.url,
+          title: page.title,
+          lifecycle: page.lifecycle,
+          protections: page.protections,
+          loading: pageBrowsers.get(page.id)?.loading ?? false,
+          canGoBack: pageBrowsers.get(page.id)?.canGoBack ?? false,
+          canGoForward: pageBrowsers.get(page.id)?.canGoForward ?? false,
+        }));
+    // Publish after each serialized reduction, including state retained on an operation failure.
+    // Usage timestamps are not observed, so a plugin redraw cannot feed back into another redraw.
+    const lock = {
+      withPermit: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        mutex.withPermit(
+          effect.pipe(Effect.ensuring(Effect.sync(() => observations.publish(observedPages())))),
+        ),
+    };
     const pluginEventHandlers = new Map<
       string,
       (event: SurfaceEvent) => Effect.Effect<void, EngineError>
@@ -977,6 +1011,28 @@ export const makeBrowserController = (
         }),
       );
     });
+    const pageHistory = Effect.fn("BrowserController.pageHistory")(function* (
+      id: string,
+      action: "back" | "forward" | "reload" | "stop",
+    ) {
+      yield* lock.withPermit(
+        Effect.gen(function* () {
+          const page = state.browser.pages.find(
+            (entry) => entry.id === id && entry.lifecycle !== "closed",
+          );
+          if (!page)
+            return yield* new EngineError({ code: "not-found", message: "Page is not open" });
+          if (page.lifecycle === "sleeping") {
+            yield* activatePage(engine, id);
+            state = {
+              ...state,
+              browser: replacePage(state.browser, id, { lifecycle: "loaded", lastUsedAt: now() }),
+            };
+          }
+          yield* engine.request(`pages.${action}`, { id });
+        }),
+      );
+    });
     const closeTrusted = Effect.fn("BrowserController.closeTrusted")(function* (id: string) {
       yield* lock.withPermit(
         Effect.suspend(() => {
@@ -1366,6 +1422,8 @@ export const makeBrowserController = (
                     pageBrowsers = new Map(pageBrowsers).set(id, {
                       ...browser,
                       loading: lifecycle.params.loading,
+                      canGoBack: lifecycle.params.canGoBack,
+                      canGoForward: lifecycle.params.canGoForward,
                     });
                     if (lifecycle.params.loading && page?.lifecycle === "sleeping") {
                       yield* activatePage(engine, id);
@@ -1561,9 +1619,25 @@ export const makeBrowserController = (
       start,
       dispatch,
       snapshot: Effect.sync(() => state.browser),
+      observePages: (owner) =>
+        mutex.withPermit(
+          Effect.gen(function* () {
+            const subscription = yield* observations.bind(owner);
+            return {
+              events: subscription.events,
+              watch: (request) =>
+                mutex.withPermit(
+                  Effect.sync(() => observations.publish(observedPages())).pipe(
+                    Effect.andThen(subscription.watch(request)),
+                  ),
+                ),
+            } satisfies PageWatchSubscription;
+          }),
+        ),
       openPage: openTrusted,
       navigatePage: navigateTrusted,
       closePage: closeTrusted,
+      pageHistory,
       protectDomWrite,
       configure,
       configuration: Effect.sync(() => state.configuration),
