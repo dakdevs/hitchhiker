@@ -47,6 +47,37 @@ broad browser, page JavaScript and storage access. It is not included in `browse
 Local source paths and native permission-review actions are not exposed through MCP or Hitchhiker
 plugins. Remote extension installation needs a separate capability and uploaded-package design.
 
+## Framework API availability
+
+The following describes the current implementation, not the final plugin architecture. Extension
+management still uses trusted controller UI; extracting that feature onto public plugin APIs remains
+unfinished. A Hitchhiker plugin cannot currently list, install, remove or observe Chrome extensions.
+The MCP tools for installing Hitchhiker plugins do not install Chrome extensions.
+
+| Operation                             | Available surface             | Authority and behavior                                                                                                           |
+| ------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| List managed installations            | Local extension controls      | Reads the profile registry; this is not enumeration of every extension Chromium may know about.                                  |
+| Stage an unpacked directory           | Local extension controls      | Copies bounded regular files into private profile storage; the source path is not a public plugin parameter.                     |
+| Review and install                    | Local extension controls      | Review is bound to the staged installation ID and digest. Required and optional permission groups are shown before confirmation. |
+| Remove                                | Local extension controls      | Uninstalls rather than temporarily disabling; recovery and possible data retention are described above.                          |
+| Restore after restart                 | Trusted startup service       | Reloads enabled installations before saved pages; safe mode skips this service.                                                  |
+| Observe installation changes          | No public plugin or MCP event | Do not depend on the registry file format or private native bridge as an API.                                                    |
+| Enable, disable, update or import CRX | Unavailable                   | Removing and reinstalling is not a supported equivalent for preserving all extension state.                                      |
+
+Chrome manifest permissions govern a Chrome extension's access inside Chromium. Hitchhiker manifest
+capabilities and user grants govern the Native framework. Neither permission system substitutes for
+the other. A future public extension-management API must preserve profile isolation, artifact review,
+recovery and the raw-CDP mutation boundary described above.
+
+Implementation references for contributors:
+
+- [Trusted control surface](../apps/browser/src/extension-controls.ts)
+- [Installation state and restart recovery](../apps/browser/src/extension-manager.ts)
+- [Package staging and integrity](../apps/browser/src/extension-artifacts.ts)
+
+For the wider API boundary, see the [Chromium capability inventory](CHROMIUM-CAPABILITY-AUDIT.md),
+[public DevTools controls](DEVTOOLS.md) and [scoped page-content operations](PLUGIN-DOM.md).
+
 ## Compatibility and limits
 
 The current engine is CEF 144 / Chromium 144. Content scripts, service workers and extension storage

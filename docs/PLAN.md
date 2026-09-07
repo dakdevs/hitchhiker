@@ -706,3 +706,14 @@ or every release/shutdown acceptance requirement.
 as MCP, with per-activation references and current origin/profile/principal grants. No new default
 permissions or raw CDP methods are introduced. Runtime, SDK and compiled Native verification are
 in progress; the [public reference](PLUGIN-DOM.md) records the exact API boundary.
+
+Published checkpoint `3b9dc09` completes that scoped DOM packet: 407 portable tests pass and two
+real Native fixtures cover developer and installed plugin use, navigation invalidation, origin denial
+and revocation. Exact-commit CI run `34116306804` passes. The DOM reference and plan retain the
+limits around child frames, passwords, in-flight revocation and native DevTools attachment.
+
+The next Chromium capability inventory pass maps Chrome-extension management. Local staged review,
+install/remove and recovery exist, but no public SDK/MCP management port exists. The
+[extension reference](EXTENSIONS.md#framework-api-availability) now distinguishes those trusted
+operations from public APIs. Public installation needs a separate artifact-transfer and review
+contract; exposing the private local-directory or confirmation methods is not that contract.

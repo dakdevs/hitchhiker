@@ -38,6 +38,19 @@ as such. Examples must run against the packaged app and exercise public APIs.
 The target architecture and default-plugin requirements are in
 [PLUGIN-FIRST-PLAN.md](PLUGIN-FIRST-PLAN.md). This audit does not mark any missing capability done.
 
+The framework's end state is a minimal trusted host plus replaceable product plugins. This includes
+the default browser features. The trusted host supplies Chromium lifecycle and isolation, authority
+checks, resource enforcement and Native UI primitives; plugins supply product behavior and compose
+the interface through public contracts. Tab identity and lifecycle, tab presentation and pinning are
+separate building blocks. Consumers must be able to replace their composition without adopting the
+default tab UX. Shared design primitives and motion rules provide consistency without fixing the
+browser's information architecture.
+
+Current private features must remain labeled as extraction work. In particular, the
+[extension-management surface map](EXTENSIONS.md#framework-api-availability) identifies controller
+operations that are not yet available through the SDK or MCP. Upstream Chromium support alone is
+not evidence of a supported Hitchhiker API.
+
 ## DevTools and security reference acceptance
 
 DevTools must ship enabled through a default plugin. Its public building blocks must let another
