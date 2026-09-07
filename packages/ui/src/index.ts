@@ -11,6 +11,16 @@ export interface Style {
   /** Selects Native typography size tokens rather than arbitrary font rasterization sizes. */
   readonly fontSize?: number;
 }
+export interface ButtonStyle extends Style {
+  readonly icon?: IconName;
+  readonly iconOnly?: boolean;
+  /** Spoken label when the visual button text is abbreviated. */
+  readonly accessibilityLabel?: string;
+  readonly variant?: "ghost" | "secondary";
+}
+export interface ListItemStyle extends Style {
+  readonly icon?: IconName;
+}
 export const lucideNames = [
   "arrow-left",
   "arrow-right",
@@ -51,6 +61,16 @@ export type NativeNode = NodeBase &
     | { readonly kind: "text"; readonly label: string }
     | {
         readonly kind: "button";
+        /** Always present for native accessibility, even when the visual label is hidden. */
+        readonly label: string;
+        readonly action: string;
+        readonly icon?: IconName;
+        readonly iconOnly?: boolean;
+        readonly accessibilityLabel?: string;
+        readonly variant?: "ghost" | "secondary";
+      }
+    | {
+        readonly kind: "list-item";
         readonly label: string;
         readonly action: string;
         readonly icon?: IconName;
@@ -64,6 +84,7 @@ export type NativeNode = NodeBase &
       }
     | { readonly kind: "icon"; readonly icon: IconName }
     | { readonly kind: "spacer" }
+    | { readonly kind: "drag-region" }
     | { readonly kind: "viewport"; readonly viewportId: string }
   );
 /** Bindings are separate from layout so interfaces can reorganize without recreating pages. */
@@ -95,8 +116,29 @@ export const button = (
   key: string,
   label: string,
   action: string,
-  style: Style & { readonly icon?: IconName } = {},
-): NativeNode => ({ key, kind: "button", label, action, ...style });
+  style: ButtonStyle = {},
+): NativeNode => {
+  if (label.trim().length === 0) throw new Error("Button labels must be nonempty.");
+  return { key, kind: "button", label, action, ...style };
+};
+/** A compact icon control whose text label remains available to accessibility APIs. */
+export const iconButton = (
+  key: string,
+  label: string,
+  action: string,
+  name: LucideName,
+  style: ButtonStyle = {},
+): NativeNode =>
+  button(key, label, action, { variant: "ghost", ...style, icon: lucide(name), iconOnly: true });
+export const listItem = (
+  key: string,
+  label: string,
+  action: string,
+  style: ListItemStyle = {},
+): NativeNode => {
+  if (label.trim().length === 0) throw new Error("List item labels must be nonempty.");
+  return { key, kind: "list-item", label, action, ...style };
+};
 export const input = (
   key: string,
   label: string,
@@ -110,6 +152,18 @@ export const icon = (key: string, name: LucideName, style: Style = {}): NativeNo
   ...style,
 });
 export const spacer = (key: string, flex = 1): NativeNode => ({ key, kind: "spacer", flex });
+/** An empty region that the host may expose as a native window drag target. */
+export const dragRegion = (key: string, style: Style = {}): NativeNode => ({
+  key,
+  kind: "drag-region",
+  flex: 1,
+  ...style,
+});
+/** Native window chrome dimensions shared by replaceable interface surfaces. */
+export const windowChrome = Object.freeze({ height: 36, controlsWidth: 80 });
+/** Reserves the native system-window-controls area without drawing replacement controls. */
+export const windowControls = (key: string): NativeNode =>
+  column(key, [], { width: windowChrome.controlsWidth, height: windowChrome.height });
 export const viewport = (key: string, viewportId: string, style: Style = {}): NativeNode => ({
   key,
   kind: "viewport",
@@ -120,10 +174,10 @@ export const viewport = (key: string, viewportId: string, style: Style = {}): Na
 export const design = Object.freeze({
   light: Object.freeze({
     canvas: "#FFFFFF",
-    sidebar: "#F7F7F8",
+    sidebar: "#EEEEEF",
     foreground: "#171717",
     muted: "#6B6B6B",
-    selected: "#E9E9EB",
+    selected: "#FFFFFF",
   }),
   dark: Object.freeze({
     canvas: "#212121",

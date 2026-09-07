@@ -1,5 +1,15 @@
 import { definePlugin, type PluginApi } from "@hitchhiker/plugin-sdk";
-import { button, column, row, text, viewport, lucide } from "@hitchhiker/ui";
+import {
+  button,
+  column,
+  dragRegion,
+  iconButton,
+  row,
+  text,
+  viewport,
+  windowChrome,
+  windowControls,
+} from "@hitchhiker/ui";
 
 let api: PluginApi;
 let selected: string[] = [];
@@ -14,11 +24,16 @@ const repaint = async () => {
         row(
           "tools",
           [
-            text("title", "Your browser, your canvas", { fontSize: 18, flex: 1 }),
-            button("new", "New page", "new", { icon: lucide("plus") }),
-            button("default", "Default interface", "release"),
+            windowControls("window-controls"),
+            text("title", "Your browser, your canvas", { fontSize: 18 }),
+            dragRegion("window-drag-region", { height: windowChrome.height }),
+            iconButton("new", "New page", "new", "plus", {
+              width: 28,
+              height: windowChrome.height,
+            }),
+            button("default", "Default interface", "release", { height: windowChrome.height }),
           ],
-          { padding: 16, gap: 12 },
+          { height: windowChrome.height, gap: 4 },
         ),
         row(
           "pages",

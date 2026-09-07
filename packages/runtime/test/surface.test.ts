@@ -103,12 +103,116 @@ test("rejects malformed JavaScript component data before issuing engine commands
             bindings: [],
           },
           { root: { key: "bad-icon", kind: "icon", icon: "app:lucide-invented" }, bindings: [] },
+          {
+            root: {
+              key: "bad-row",
+              kind: "list-item",
+              label: "Tab",
+              action: "select",
+              children: [],
+            },
+            bindings: [],
+          },
+          {
+            root: {
+              key: "bad-variant",
+              kind: "button",
+              label: "Tab",
+              action: "select",
+              variant: "invented",
+            },
+            bindings: [],
+          },
+          {
+            root: {
+              key: "bad-label",
+              kind: "button",
+              label: "G",
+              action: "select",
+              accessibilityLabel: " ",
+            },
+            bindings: [],
+          },
         ];
         for (const candidate of malformed) {
           const rejected = yield* surface.commit(candidate as Surface).pipe(Effect.flip);
           assert.equal(rejected.code, "surface");
         }
         assert.deepEqual(mock.requests, []);
+      }),
+    ),
+  );
+});
+
+test("accepts an empty drag-region leaf as a portable surface boundary", async () => {
+  await Effect.runPromise(
+    withSurface((surface, mock) =>
+      Effect.gen(function* () {
+        const root = row("root", [{ key: "window-drag", kind: "drag-region", flex: 1 }]);
+        assert.equal(yield* surface.commit({ root, bindings: [] }), 1);
+        assert.deepEqual(mock.requests, [{ method: "ui.commit", params: { revision: 1, root } }]);
+      }),
+    ),
+  );
+});
+
+test("rejects invalid icon-only controls and drag-region children before host commands", async () => {
+  await Effect.runPromise(
+    withSurface((surface, mock) =>
+      Effect.gen(function* () {
+        const invalid: readonly unknown[] = [
+          {
+            root: {
+              key: "nested-drag",
+              kind: "drag-region",
+              children: [],
+            },
+            bindings: [],
+          },
+          {
+            root: {
+              key: "icon-without-icon",
+              kind: "button",
+              label: "Toggle tabs",
+              action: "interface.tabs.toggle",
+              iconOnly: true,
+            },
+            bindings: [],
+          },
+          {
+            root: {
+              key: "icon-without-label",
+              kind: "button",
+              label: "  ",
+              action: "interface.tabs.toggle",
+              icon: "app:lucide-panel-left",
+              iconOnly: true,
+            },
+            bindings: [],
+          },
+        ];
+        for (const candidate of invalid) {
+          const rejected = yield* surface.commit(candidate).pipe(Effect.flip);
+          assert.equal(rejected.code, "surface");
+        }
+        assert.deepEqual(mock.requests, []);
+      }),
+    ),
+  );
+});
+
+test("accepts ordinary labeled buttons without icon-only metadata", async () => {
+  await Effect.runPromise(
+    withSurface((surface, mock) =>
+      Effect.gen(function* () {
+        const root = {
+          key: "root",
+          kind: "button" as const,
+          label: "Open settings",
+          action: "interface.settings",
+        };
+        assert.equal(yield* surface.commit({ root, bindings: [] }), 1);
+        assert.equal(mock.requests[0]?.method, "ui.commit");
       }),
     ),
   );
@@ -316,6 +420,37 @@ test("unchanged bindings keep placements during text-only redraws", async () => 
             params: { viewports: [{ pageId: "page-one", x: 0, y: 0, width: 20, height: 20 }] },
           },
         ]);
+      }),
+    ),
+  );
+});
+
+test("compact tab rows and labeled pinned tiles cross the surface boundary", async () => {
+  await Effect.runPromise(
+    withSurface((surface, mock) =>
+      Effect.gen(function* () {
+        yield* surface.commit({
+          root: row("tabs", [
+            {
+              kind: "button",
+              key: "pinned",
+              label: "GH",
+              accessibilityLabel: "GitHub pull requests",
+              action: "select:pinned",
+              variant: "secondary",
+            },
+            {
+              kind: "list-item",
+              key: "tab",
+              label: "A long page title",
+              action: "select:tab",
+              icon: "app:lucide-globe",
+            },
+          ]),
+          bindings: [],
+        });
+        assert.equal(mock.requests.length, 1);
+        assert.equal(mock.requests[0]?.method, "ui.commit");
       }),
     ),
   );

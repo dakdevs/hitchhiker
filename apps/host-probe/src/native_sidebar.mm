@@ -6,6 +6,7 @@
 #include <limits>
 #include <vector>
 #include "src/native_sidebar.h"
+#include "src/raster_bitmap.h"
 
 extern "C" {
 struct NativePixels { uintptr_t width, height, byte_len; };
@@ -35,6 +36,8 @@ struct NativeGpuFrameState {
   uintptr_t widget_node_count, widget_semantics_count;
 };
 struct NativeInput { int active; uint64_t id; float x, y, width, height; };
+struct NativeDragRegion { float x, y, width, height; int draggable; };
+size_t hitchhiker_drag_regions(void*, NativeDragRegion*, size_t);
 struct NativeGeometry { uint64_t id; int caret; float x, y, width, height; };
 struct NativeSemantics { uint64_t id, parent; int role; uint32_t flags, actions; float x,y,width,height,value; int has_value; const char* label; uintptr_t label_len; const char* text; uintptr_t text_len; const char* placeholder; uintptr_t placeholder_len; intptr_t selection_start, selection_end, composition_start, composition_end; };
 void* native_sdk_app_create(); void native_sdk_app_destroy(void*); void native_sdk_app_start(void*); void native_sdk_app_stop(void*); void native_sdk_app_frame(void*);
@@ -62,6 +65,8 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
   NativeCommandSink commands_;
   NativeEventSink events_;
   std::function<void()> recovery_;
+  CefRefPtr<CefWindow> root_window_;
+  std::vector<CefDraggableRegion> drag_regions_;
   NSTimer* timer_;
   id monitor_;
   BOOL captured_;
@@ -89,6 +94,12 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
 - (void)stop;
 - (void)receiveCommand:(const char*)command;
 - (BOOL)commit:(const char*)json length:(size_t)length revision:(uint64_t)revision;
+- (void)attachRoot:(CefRefPtr<CefWindow>)window;
+- (BOOL)isStandardControl:(NSPoint)point;
+- (BOOL)isDragPoint:(NSPoint)point;
+- (void)syncDragRegions;
+- (BOOL)refreshBitmap;
+- (CefRefPtr<CefDictionaryValue>)windowChrome;
 @end
 
 @implementation HHNativeSidebar
@@ -111,6 +122,11 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
     }
     if(e.window!=s.window) return e;
     NSPoint p=[s convertPoint:e.locationInWindow fromView:nil];
+    if(e.type==NSEventTypeLeftMouseDown && [s isStandardControl:p]) return e;
+    if(e.type==NSEventTypeLeftMouseDown && [s isDragPoint:p]) {
+      [s.window performWindowDragWithEvent:e];
+      return nil;
+    }
     if(e.type==NSEventTypeLeftMouseDown) { if(!NSPointInRect(p,s.bounds)) return e; s->captured_=YES; [s mouseDown:e]; return nil; }
     if(!s->captured_) return e;
     if(e.type==NSEventTypeLeftMouseUp) { s->captured_=NO; [s mouseUp:e]; }
@@ -120,6 +136,9 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
   timer_=[NSTimer scheduledTimerWithTimeInterval:1.0/30.0 repeats:YES block:^(NSTimer*) { [weak tick]; }]; [self tick]; return self;
 }
 - (void)stop {
+  if (root_window_ && !root_window_->IsClosed()) root_window_->SetDraggableRegions({});
+  root_window_ = nullptr;
+  drag_regions_.clear();
   if (monitor_) {
     [NSEvent removeMonitor:monitor_];
     monitor_ = nil;
@@ -194,23 +213,16 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
   raster_scale_ = scale;
   raster_ready_ = NO;
 
-  unsigned char* planes[5] = {raster_, nullptr, nullptr, nullptr, nullptr};
-  bitmap_ = [[NSBitmapImageRep alloc]
-      initWithBitmapDataPlanes:planes
-                    pixelsWide:raster_width_
-                    pixelsHigh:raster_height_
-                 bitsPerSample:8
-               samplesPerPixel:4
-                      hasAlpha:YES
-                      isPlanar:NO
-                colorSpaceName:NSDeviceRGBColorSpace
-                   bytesPerRow:raster_width_ * 4
-                  bitsPerPixel:32];
+  if (![self refreshBitmap]) return NO;
+  *fresh = YES;
+  return YES;
+}
+
+- (BOOL)refreshBitmap {
+  bitmap_ = CreateRasterBitmap(raster_, raster_width_, raster_height_);
   if (!bitmap_) {
-    [self clearRasterCache];
     return NO;
   }
-  *fresh = YES;
   return YES;
 }
 
@@ -269,6 +281,12 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
     return;
   }
 
+  // AppKit caches drawInRect's image even when external bitmap bytes change.
+  // Rewrap only changed frames; keep the pixel allocation and all idle frames.
+  if (!fresh && ![self refreshBitmap]) {
+    [self clearRasterCache];
+    return;
+  }
   ++raster_updates_;
   raster_updated_bytes_ += damage_width * damage_height * 4;
   NSRect damage = NSMakeRect(damage_x / scale, damage_y / scale,
@@ -289,6 +307,7 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
     if (commands_) commands_(static_cast<NativeCommand>(command));
   }
   if (committed_) hitchhiker_sync_viewports(app_);
+  [self syncDragRegions];
   [self drainEvents];
   [self syncText];
   NativeGpuFrameState state{};
@@ -331,6 +350,100 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
   [self clearRasterCache];
   [self tick];
 }
+- (void)attachRoot:(CefRefPtr<CefWindow>)window { root_window_ = window; }
+- (BOOL)isStandardControl:(NSPoint)point {
+  for (NSWindowButton kind : {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton}) {
+    NSButton* button = [self.window standardWindowButton:kind];
+    if (button && !button.isHiddenOrHasHiddenAncestor &&
+        NSPointInRect(point, [self convertRect:button.bounds fromView:button])) return YES;
+  }
+  return NO;
+}
+- (BOOL)isDragPoint:(NSPoint)point {
+  BOOL draggable = NO;
+  for (const auto& region : drag_regions_) {
+    const auto& r = region.bounds;
+    if (NSPointInRect(point, NSMakeRect(r.x, r.y, r.width, r.height))) draggable = region.draggable;
+  }
+  return draggable;
+}
+- (NSView*)hitTest:(NSPoint)point {
+  const NSPoint local = [self convertPoint:point fromView:self.superview];
+  if ([self isStandardControl:local] || [self isDragPoint:local]) return nil;
+  return [super hitTest:point];
+}
+- (void)syncDragRegions {
+  if (!app_ || !root_window_ || root_window_->IsClosed()) return;
+  NativeDragRegion measured[250];
+  const size_t count = hitchhiker_drag_regions(app_, measured, 250);
+  std::vector<CefDraggableRegion> next;
+  for (size_t i = 0; i < std::min(count, size_t{250}); ++i) {
+    const auto& r = measured[i];
+    if (!std::isfinite(r.x) || !std::isfinite(r.y) || !std::isfinite(r.width) ||
+        !std::isfinite(r.height) || r.width <= 0 || r.height <= 0) continue;
+    NSRect clipped = NSIntersectionRect(NSMakeRect(r.x,r.y,r.width,r.height), self.bounds);
+    if (NSIsEmptyRect(clipped)) continue;
+    const int x = std::ceil(NSMinX(clipped)), y = std::ceil(NSMinY(clipped));
+    const int width = std::floor(NSMaxX(clipped)) - x, height = std::floor(NSMaxY(clipped)) - y;
+    if (width <= 0 || height <= 0) continue;
+    CefDraggableRegion region;
+    region.bounds = CefRect(x,y,width,height);
+    region.draggable = r.draggable != 0;
+    next.push_back(region);
+  }
+  // Native system controls always win, including when a custom interface
+  // declares a drag leaf across their reserved area.
+  for (NSWindowButton kind : {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton}) {
+    NSButton* button = [self.window standardWindowButton:kind];
+    if (!button || button.isHiddenOrHasHiddenAncestor) continue;
+    const NSRect clipped = NSIntersectionRect([self convertRect:button.bounds fromView:button], self.bounds);
+    if (NSIsEmptyRect(clipped)) continue;
+    const int x = std::floor(NSMinX(clipped)), y = std::floor(NSMinY(clipped));
+    CefDraggableRegion region;
+    region.bounds = CefRect(x, y, std::ceil(NSMaxX(clipped)) - x, std::ceil(NSMaxY(clipped)) - y);
+    region.draggable = false;
+    next.push_back(region);
+  }
+  const bool same = next.size() == drag_regions_.size() &&
+      std::equal(next.begin(), next.end(), drag_regions_.begin(), [](const auto& a, const auto& b) {
+        return a.draggable == b.draggable && a.bounds == b.bounds;
+      });
+  if (same) return;
+  drag_regions_ = std::move(next);
+  root_window_->SetDraggableRegions(drag_regions_);
+}
+- (CefRefPtr<CefDictionaryValue>)windowChrome {
+  auto value = CefDictionaryValue::Create();
+  value->SetDouble("width", self.bounds.size.width);
+  value->SetDouble("height", self.bounds.size.height);
+  value->SetDouble("windowWidth", self.window.frame.size.width);
+  value->SetDouble("windowHeight", self.window.frame.size.height);
+  value->SetBool("fullscreen", (self.window.styleMask & NSWindowStyleMaskFullScreen) != 0);
+  value->SetBool("titleHidden", self.window.titleVisibility == NSWindowTitleHidden);
+  auto controls = CefListValue::Create();
+  for (NSWindowButton kind : {NSWindowCloseButton, NSWindowMiniaturizeButton, NSWindowZoomButton}) {
+    NSButton* button = [self.window standardWindowButton:kind];
+    auto entry = CefDictionaryValue::Create();
+    const NSRect r = button ? [self convertRect:button.bounds fromView:button] : NSZeroRect;
+    entry->SetString("kind", kind == NSWindowCloseButton ? "close" : kind == NSWindowMiniaturizeButton ? "minimize" : "zoom");
+    entry->SetBool("visible", button && !button.isHiddenOrHasHiddenAncestor);
+    entry->SetBool("enabled", button.enabled);
+    entry->SetDouble("x", r.origin.x); entry->SetDouble("y", r.origin.y);
+    entry->SetDouble("width", r.size.width); entry->SetDouble("height", r.size.height);
+    controls->SetDictionary(controls->GetSize(), entry);
+  }
+  value->SetList("controls", controls);
+  auto regions = CefListValue::Create();
+  for (const auto& region : drag_regions_) {
+    auto entry = CefDictionaryValue::Create();
+    entry->SetBool("draggable", region.draggable);
+    entry->SetInt("x", region.bounds.x); entry->SetInt("y", region.bounds.y);
+    entry->SetInt("width", region.bounds.width); entry->SetInt("height", region.bounds.height);
+    regions->SetDictionary(regions->GetSize(), entry);
+  }
+  value->SetList("regions", regions);
+  return value;
+}
 - (void)mouseDown:(NSEvent*)e { [self.window makeFirstResponder:self]; NSPoint p=[self convertPoint:e.locationInWindow fromView:nil]; native_sdk_app_touch(app_,1,0,p.x,p.y,1); [self tick]; }
 - (void)mouseUp:(NSEvent*)e { NSPoint p=[self convertPoint:e.locationInWindow fromView:nil]; native_sdk_app_touch(app_,1,1,p.x,p.y,0); [self tick]; }
 - (void)scrollWheel:(NSEvent*)e { NSPoint p=[self convertPoint:e.locationInWindow fromView:nil]; native_sdk_app_scroll(app_,1,p.x,p.y,e.scrollingDeltaX,e.scrollingDeltaY); [self tick]; }
@@ -349,9 +462,10 @@ uint32_t Modifiers(NSEvent* e) { auto f=e.modifierFlags; return ((f&NSEventModif
 - (void)doCommandBySelector:(SEL)selector { NSString* n=NSStringFromSelector(selector); if([n isEqualToString:@"deleteBackward:"]) [self emitKey:@"backspace" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveLeft:"]) [self emitKey:@"arrowleft" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveRight:"]) [self emitKey:@"arrowright" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveUp:"]) [self emitKey:@"arrowup" event:NSApp.currentEvent]; else if([n isEqualToString:@"moveDown:"]) [self emitKey:@"arrowdown" event:NSApp.currentEvent]; else if([n isEqualToString:@"insertNewline:"]) [self emitKey:@"enter" event:NSApp.currentEvent]; else [super doCommandBySelector:selector]; [self tick]; }
 @end
 
-void* InstallNativeSidebar(CefRefPtr<CefWindow> window, NativeCommandSink sink, NativeEventSink events, std::function<void()> recovery) { if(!window||!sink) return nullptr; NSView* host=(__bridge NSView*)window->GetWindowHandle(); if(!host||!host.window.contentView) return nullptr; HHNativeSidebar* view=[[HHNativeSidebar alloc] initWithSink:std::move(sink) events:std::move(events) recovery:std::move(recovery)]; if(!view) return nullptr; [host.window.contentView addSubview:view positioned:NSWindowAbove relativeTo:nil]; fprintf(stderr,"HITCHHIKER_NATIVE_MOUNT\n"); return (__bridge_retained void*)view; }
+void* InstallNativeSidebar(CefRefPtr<CefWindow> window, NativeCommandSink sink, NativeEventSink events, std::function<void()> recovery) { if(!window||!sink) return nullptr; NSView* host=(__bridge NSView*)window->GetWindowHandle(); if(!host||!host.window.contentView) return nullptr; HHNativeSidebar* view=[[HHNativeSidebar alloc] initWithSink:std::move(sink) events:std::move(events) recovery:std::move(recovery)]; if(!view) return nullptr; [view attachRoot:window]; [host.window.contentView addSubview:view positioned:NSWindowAbove relativeTo:nil]; fprintf(stderr,"HITCHHIKER_NATIVE_MOUNT\n"); return (__bridge_retained void*)view; }
 void ResizeNativeSurface(void* ptr,int width,int height) { if(ptr) [(__bridge HHNativeSidebar*)ptr setFrame:NSMakeRect(0,0,std::max(1,width),std::max(1,height))]; }
 void ResizeNativeSidebar(void* ptr,int height) { ResizeNativeSurface(ptr,260,height); }
 bool CommitNativeTree(void* ptr,const char* json,size_t length,uint64_t revision) { return ptr&&[(__bridge HHNativeSidebar*)ptr commit:json length:length revision:revision]; }
 void DestroyNativeSidebar(void* ptr) { if(!ptr) return; HHNativeSidebar* view=(__bridge_transfer HHNativeSidebar*)ptr; [view stop]; [view removeFromSuperview]; }
 void NotifyNativeState(void* ptr,const char* command) { if(ptr&&command) [(__bridge HHNativeSidebar*)ptr receiveCommand:command]; }
+CefRefPtr<CefDictionaryValue> ReadNativeWindowChrome(void* ptr) { return ptr ? [(__bridge HHNativeSidebar*)ptr windowChrome] : CefDictionaryValue::Create(); }

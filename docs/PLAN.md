@@ -524,3 +524,22 @@ traffic lights followed by sidebar, back and forward icons, with content reachin
 separate titlebar strip. Preserve standard window controls, dragging, resizing and fullscreen, and
 keep the header/layout replaceable through public framework building blocks. This is the next native
 interface change; it must not alter Chromium's page renderer or extension runtime.
+
+The compact-header source passes all 192 native-enabled tests without skips, root portable checks,
+and the new AppKit raster fixture. Real desktop checks confirmed sidebar collapse/expansion,
+minimize and fullscreen entry. Physical dragging, fullscreen exit and edge resizing remain
+unverified. See [COMPACT-WINDOW-PLAN.md](COMPACT-WINDOW-PLAN.md) for the discovered AppKit image-cache
+fix, public window controls and remaining checks.
+
+The user supplied a Dia sidebar reference on September 6: compact pinned tiles above a vertical
+list of leading-icon tab rows, a rounded selected-row highlight, and a quiet New Tab action.
+Apply that presentation to the default interface while retaining the earlier compact-header
+arrangement, public framework composition and page identity. Avoid persistent text Pin/Close
+buttons beside every row. Keep pin/close actions accessible through concise controls.
+
+The default sidebar now has six-column pinned tiles, native list-item rows, a full selected-row
+highlight and New Tab beneath, while retaining the compact macOS header. Desktop verification
+with eleven local pages confirmed the layout. Site initials are the current pinned-tile fallback;
+favicon acquisition remains unfinished. See [SIDEBAR-TABS-PLAN.md](SIDEBAR-TABS-PLAN.md) for the
+restore starvation and close-cancellation fixes discovered during this verification, plus final
+portable/native/bundle evidence.

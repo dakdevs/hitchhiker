@@ -5,13 +5,17 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   EngineConnection,
+  EngineError,
   NativeSurface,
   type EngineEvent,
   type SurfaceEvent,
 } from "@hitchhiker/runtime";
+import { defaultConfiguration } from "@hitchhiker/core";
+import { createDefaultInterface } from "@hitchhiker/default-interface";
 import { Deferred, Effect, Layer, PubSub, Schedule, Schema, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import { makeBrowserController, normalizeAddressDraft } from "../src/controller.ts";
+import { saveBrowserPersistence } from "../src/persistence.ts";
 
 test("normalizes addresses and keeps plain search text out of engine navigation", () => {
   assert.equal(normalizeAddressDraft("example.com"), "https://example.com/");
@@ -19,6 +23,479 @@ test("normalizes addresses and keeps plain search text out of engine navigation"
   assert.equal(normalizeAddressDraft("two words"), "https://duckduckgo.com/?q=two%20words");
   assert.equal(normalizeAddressDraft(""), undefined);
   assert.equal(normalizeAddressDraft("file:///private"), undefined);
+});
+
+test("restores a complete session before its first persistence and render", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-restore-staging-"));
+  try {
+    await Effect.runPromise(
+      saveBrowserPersistence(directory, {
+        configuration: defaultConfiguration,
+        interfaceConfiguration: { tabPlacement: "sidebar" },
+        interfaceState: {
+          ...createDefaultInterface("default"),
+          selectedPageId: "first",
+          pageOrder: ["first", "second", "third"],
+          pinnedPageIds: [],
+        },
+        pages: [
+          { id: "first", url: "https://first.test/", title: "First" },
+          { id: "second", url: "https://second.test/", title: "Second" },
+          { id: "third", url: "https://third.test/", title: "Third" },
+        ],
+      }),
+    );
+    const initialPersistence = await readFile(join(directory, "browser-state.json"));
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const events = yield* PubSub.unbounded<EngineEvent>();
+          const commits: unknown[] = [];
+          const opened: string[] = [];
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({ event: "host.ready", params: { pageBrowserGeneration: true } }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(events),
+            request: (method, params = {}) =>
+              Effect.gen(function* () {
+                if (method !== "pages.open" || typeof params.id !== "string") return {};
+                opened.push(params.id);
+                if (params.id !== "third") {
+                  yield* PubSub.publish(events, {
+                    event: "pages.created",
+                    params: { pageId: params.id, generation: 1 },
+                  });
+                  yield* PubSub.publish(events, {
+                    event: "pages.documentCommitted",
+                    params: { pageId: params.id, generation: 1 },
+                  });
+                  if (params.id === "first")
+                    yield* PubSub.publish(events, {
+                      event: "pages.titleChanged",
+                      params: { pageId: params.id, generation: 1, title: "Updated first" },
+                    });
+                  yield* PubSub.publish(events, {
+                    event: "pages.navigationChanged",
+                    params: {
+                      pageId: params.id,
+                      generation: 1,
+                      url: params.id === "first" ? "https://first.test/" : "https://second.test/",
+                      loading: false,
+                      canGoBack: false,
+                      canGoForward: false,
+                    },
+                  });
+                }
+                return {};
+              }),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const surface = NativeSurface.of({
+            commit: (next) => Effect.sync(() => commits.push(next)).pipe(Effect.as(commits.length)),
+            events: Stream.empty,
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(NativeSurface, surface),
+              ),
+            ),
+          );
+          yield* controller.start;
+          yield* Effect.sleep(20);
+          assert.deepEqual(opened, ["first", "second", "third"]);
+          assert.equal(commits.length, 0, "partial restored pages must not render");
+          assert.deepEqual(
+            yield* Effect.promise(() => readFile(join(directory, "browser-state.json"))),
+            initialPersistence,
+            "early lifecycle changes must not write a partial restore",
+          );
+          const beforeFinalPageIds = JSON.parse(
+            yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+          ).pages.map((page: { id: string }) => page.id);
+          assert.deepEqual(beforeFinalPageIds, ["first", "second", "third"]);
+
+          yield* PubSub.publish(events, {
+            event: "pages.created",
+            params: { pageId: "third", generation: 1 },
+          });
+          yield* Effect.sleep(20);
+          assert.equal(commits.length, 1, "the completed restore renders once");
+          assert.deepEqual(
+            (yield* controller.snapshot).pages.map((page) => page.id),
+            ["first", "second", "third"],
+          );
+          const rendered = JSON.stringify(commits[0]);
+          assert.match(rendered, /"value":"https:\/\/first\.test\/"/);
+          assert.doesNotMatch(rendered, /"value":"https:\/\/third\.test\/"/);
+          assert.equal(
+            JSON.parse(
+              yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+            ).pages.find((page: { id: string }) => page.id === "first")?.title,
+            "Updated first",
+          );
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("restore drains a bounded lifecycle queue while pages.open is still resolving", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-restore-liveness-"));
+  try {
+    await Effect.runPromise(
+      saveBrowserPersistence(directory, {
+        configuration: defaultConfiguration,
+        interfaceConfiguration: { tabPlacement: "sidebar" },
+        interfaceState: {
+          ...createDefaultInterface("default"),
+          selectedPageId: "first",
+          pageOrder: ["first"],
+          pinnedPageIds: [],
+        },
+        pages: [{ id: "first", url: "https://first.test/", title: "First" }],
+      }),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const events = yield* PubSub.bounded<EngineEvent>({ capacity: 1 });
+          const commits: unknown[] = [];
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({ event: "host.ready", params: { pageBrowserGeneration: true } }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(events),
+            request: (method, params = {}) =>
+              Effect.gen(function* () {
+                if (method !== "pages.open" || typeof params.id !== "string") return {};
+                yield* PubSub.publish(events, {
+                  event: "pages.created",
+                  params: { pageId: params.id, generation: 1 },
+                });
+                yield* PubSub.publish(events, {
+                  event: "pages.documentCommitted",
+                  params: { pageId: params.id, generation: 1 },
+                });
+                yield* PubSub.publish(events, {
+                  event: "pages.navigationChanged",
+                  params: {
+                    pageId: params.id,
+                    generation: 1,
+                    url: "https://first.test/",
+                    loading: false,
+                    canGoBack: false,
+                    canGoForward: false,
+                  },
+                });
+                return {};
+              }),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const surface = NativeSurface.of({
+            commit: (next) => Effect.sync(() => commits.push(next)).pipe(Effect.as(commits.length)),
+            events: Stream.empty,
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(NativeSurface, surface),
+              ),
+            ),
+          );
+          yield* Effect.yieldNow;
+          yield* controller.start.pipe(Effect.timeout(500));
+          yield* Effect.sleep(20);
+          assert.deepEqual(
+            (yield* controller.snapshot).pages.map((page) => page.id),
+            ["first"],
+          );
+          assert.ok(commits.length > 0);
+          assert.deepEqual(
+            JSON.parse(
+              yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+            ).pages.map((page: { id: string }) => page.id),
+            ["first"],
+          );
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a canceled close retries only the interrupted restored page", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-restore-close-cancel-"));
+  try {
+    await Effect.runPromise(
+      saveBrowserPersistence(directory, {
+        configuration: defaultConfiguration,
+        interfaceConfiguration: { tabPlacement: "sidebar" },
+        interfaceState: {
+          ...createDefaultInterface("default"),
+          selectedPageId: "first",
+          pageOrder: ["first", "second", "third"],
+          pinnedPageIds: [],
+        },
+        pages: [
+          { id: "first", url: "https://first.test/", title: "First" },
+          { id: "second", url: "https://second.test/", title: "Second" },
+          { id: "third", url: "https://third.test/", title: "Third" },
+        ],
+      }),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const testScope = yield* Effect.scope;
+          const events = yield* PubSub.unbounded<EngineEvent>();
+          const opened: string[] = [];
+          let secondAttempts = 0;
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({ event: "host.ready", params: { pageBrowserGeneration: true } }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(events),
+            request: (method, params = {}) =>
+              Effect.gen(function* () {
+                if (method !== "pages.open" || typeof params.id !== "string") return {};
+                opened.push(params.id);
+                if (params.id === "second" && secondAttempts++ === 0) {
+                  yield* PubSub.publish(events, { event: "window.closing", params: {} });
+                  yield* Effect.forkIn(
+                    Effect.sleep(10).pipe(
+                      Effect.andThen(
+                        PubSub.publish(events, { event: "window.closeCancelled", params: {} }),
+                      ),
+                    ),
+                    testScope,
+                  );
+                  return yield* new EngineError({ code: "-32003", message: "Window is closing" });
+                }
+                yield* PubSub.publish(events, {
+                  event: "pages.created",
+                  params: { pageId: params.id, generation: 1 },
+                });
+                return {};
+              }),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(
+                  NativeSurface,
+                  NativeSurface.of({ events: Stream.empty, commit: () => Effect.succeed(1) }),
+                ),
+              ),
+            ),
+          );
+          yield* controller.start.pipe(Effect.timeout(1_000));
+          yield* Effect.sleep(20);
+          assert.deepEqual(opened, ["first", "second", "second", "third"]);
+          assert.deepEqual(
+            (yield* controller.snapshot).pages.map((page) => page.id),
+            ["first", "second", "third"],
+          );
+          assert.deepEqual(
+            JSON.parse(
+              yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+            ).pages.map((page: { id: string }) => page.id),
+            ["first", "second", "third"],
+          );
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a non-close pages.open error remains fatal during restore", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-restore-open-error-"));
+  try {
+    await Effect.runPromise(
+      saveBrowserPersistence(directory, {
+        configuration: defaultConfiguration,
+        interfaceConfiguration: { tabPlacement: "sidebar" },
+        interfaceState: createDefaultInterface("default"),
+        pages: [{ id: "first", url: "https://first.test/", title: "First" }],
+      }),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          let opens = 0;
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({ event: "host.ready", params: { pageBrowserGeneration: true } }),
+            exit: Effect.never,
+            events: Stream.empty,
+            request: () =>
+              Effect.sync(() => {
+                opens += 1;
+              }).pipe(Effect.andThen(new EngineError({ code: "transport", message: "Timed out" }))),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(
+                  NativeSurface,
+                  NativeSurface.of({ events: Stream.empty, commit: () => Effect.succeed(1) }),
+                ),
+              ),
+            ),
+          );
+          const error = yield* controller.start.pipe(Effect.flip);
+          assert.equal(error.code, "transport");
+          assert.equal(opens, 1);
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a close rejection followed by clean host exit preserves staged restore metadata", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-restore-clean-exit-"));
+  try {
+    await Effect.runPromise(
+      saveBrowserPersistence(directory, {
+        configuration: defaultConfiguration,
+        interfaceConfiguration: { tabPlacement: "sidebar" },
+        interfaceState: {
+          ...createDefaultInterface("default"),
+          pageOrder: ["first", "second"],
+        },
+        pages: [
+          { id: "first", url: "https://first.test/", title: "First" },
+          { id: "second", url: "https://second.test/", title: "Second" },
+        ],
+      }),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          let opens = 0;
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({ event: "host.ready", params: { pageBrowserGeneration: true } }),
+            exit: Effect.succeed(0),
+            events: Stream.empty,
+            request: () =>
+              Effect.sync(() => {
+                opens += 1;
+              }).pipe(
+                Effect.andThen(new EngineError({ code: "-32003", message: "Window is closing" })),
+              ),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(
+                  NativeSurface,
+                  NativeSurface.of({ events: Stream.empty, commit: () => Effect.succeed(1) }),
+                ),
+              ),
+            ),
+          );
+          yield* controller.start.pipe(Effect.timeout(500));
+          assert.equal(opens, 1);
+          assert.deepEqual(
+            JSON.parse(
+              yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+            ).pages.map((page: { id: string }) => page.id),
+            ["first", "second"],
+          );
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("shutdown during restore retains every unresolved opening page", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hitchhiker-restore-shutdown-"));
+  try {
+    await Effect.runPromise(
+      saveBrowserPersistence(directory, {
+        configuration: defaultConfiguration,
+        interfaceConfiguration: { tabPlacement: "sidebar" },
+        interfaceState: {
+          ...createDefaultInterface("default"),
+          selectedPageId: "first",
+          pageOrder: ["first", "second"],
+          pinnedPageIds: [],
+        },
+        pages: [
+          { id: "first", url: "https://first.test/", title: "First" },
+          { id: "second", url: "https://second.test/", title: "Second" },
+        ],
+      }),
+    );
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const events = yield* PubSub.unbounded<EngineEvent>();
+          const engine = EngineConnection.of({
+            pid: 1,
+            ready: Effect.succeed({ event: "host.ready", params: { pageBrowserGeneration: true } }),
+            exit: Effect.never,
+            events: Stream.fromPubSub(events),
+            request: () => Effect.succeed({}),
+            loadUnpacked: () => Effect.die("unused"),
+            uninstall: () => Effect.die("unused"),
+            claimRawCdp: Effect.die("unused"),
+          });
+          const controller = yield* makeBrowserController(directory).pipe(
+            Effect.provide(
+              Layer.merge(
+                Layer.succeed(EngineConnection, engine),
+                Layer.succeed(
+                  NativeSurface,
+                  NativeSurface.of({ events: Stream.empty, commit: () => Effect.succeed(1) }),
+                ),
+              ),
+            ),
+          );
+          yield* controller.start;
+          yield* PubSub.publish(events, { event: "window.closing", params: {} });
+          yield* Effect.sleep(20);
+          assert.deepEqual(
+            JSON.parse(
+              yield* Effect.promise(() => readFile(join(directory, "browser-state.json"), "utf8")),
+            ).pages.map((page: { id: string }) => page.id),
+            ["first", "second"],
+          );
+        }),
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("window shutdown preserves the session, while cancellation persists actual surviving pages", async () => {

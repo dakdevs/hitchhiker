@@ -29,6 +29,16 @@ const Node: Schema.Codec<NativeNode> = Schema.Union([
     label: Schema.String,
     action: Schema.String,
     icon: Schema.optional(Icon),
+    iconOnly: Schema.optional(Schema.Boolean),
+    accessibilityLabel: Schema.optional(Schema.String),
+    variant: Schema.optional(Schema.Literals(["ghost", "secondary"])),
+  }),
+  Schema.Struct({
+    ...Style,
+    kind: Schema.Literal("list-item"),
+    label: Schema.String,
+    action: Schema.String,
+    icon: Schema.optional(Icon),
   }),
   Schema.Struct({
     ...Style,
@@ -40,6 +50,7 @@ const Node: Schema.Codec<NativeNode> = Schema.Union([
   }),
   Schema.Struct({ ...Style, kind: Schema.Literal("icon"), icon: Icon }),
   Schema.Struct({ ...Style, kind: Schema.Literal("spacer") }),
+  Schema.Struct({ ...Style, kind: Schema.Literal("drag-region") }),
   Schema.Struct({ ...Style, kind: Schema.Literal("viewport"), viewportId: Schema.String }),
 ]);
 const SurfaceEnvelope = Schema.Struct({
@@ -197,6 +208,14 @@ export class NativeSurface extends Context.Service<
         let count = 0;
         const collect = (node: NativeNode, depth: number): boolean => {
           if (++count > 250 || depth > 12) return false;
+          if (
+            node.kind === "button" &&
+            node.accessibilityLabel !== undefined &&
+            !node.accessibilityLabel.trim()
+          )
+            return false;
+          if (node.kind === "button" && node.iconOnly && (!node.icon || !node.label.trim()))
+            return false;
           if (node.kind === "viewport") {
             if (viewportIds.has(node.viewportId)) return false;
             viewportIds.add(node.viewportId);

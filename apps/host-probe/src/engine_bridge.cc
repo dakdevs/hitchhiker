@@ -279,6 +279,10 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
     CEF_REQUIRE_UI_THREAD();
     close_request_handler_ = std::move(handler);
   }
+  void SetWindowChromeHandler(EngineBridge::WindowChromeHandler handler) {
+    CEF_REQUIRE_UI_THREAD();
+    window_chrome_handler_ = std::move(handler);
+  }
 
   void ProcessInput(std::string input) {
     CEF_REQUIRE_UI_THREAD();
@@ -614,6 +618,9 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
       return;
     }
     if (method == "pages.open") {
+      if (manager_ && manager_->closing_all()) {
+        ReplyError(request_id, -32003, "window is closing"); return;
+      }
       std::string id, url;
       if (!GetString(params, "id", &id) || !IsPageId(id) || !GetString(params, "url", &url) || !IsAllowedUrl(url)) {
         ReplyError(request_id, -32602, "invalid page id or URL"); return;
@@ -657,6 +664,11 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
       // a durable snapshot boundary before an otherwise-fast host exit.
       RequestClose();
       ReplyResult(request_id, NewValue(CefDictionaryValue::Create()));
+      return;
+    }
+    if (method == "window.chrome") {
+      if (window_chrome_handler_) ReplyResult(request_id, NewValue(window_chrome_handler_()));
+      else ReplyError(request_id, -32601, "window chrome is unavailable");
       return;
     }
     if (method == "ui.commit") {
@@ -772,6 +784,7 @@ class EngineBridge::Core : public std::enable_shared_from_this<EngineBridge::Cor
   std::map<std::string, uint32_t> observer_generations_;
   std::map<int, PendingCdp> pending_cdp_;
   EngineBridge::UiCommitHandler ui_commit_handler_;
+  EngineBridge::WindowChromeHandler window_chrome_handler_;
   EngineBridge::CloseRequestHandler close_request_handler_;
   std::atomic<bool> stopped_{false};
   bool started_ = false;
@@ -814,4 +827,7 @@ void EngineBridge::SetUiCommitHandler(UiCommitHandler handler) {
 
 void EngineBridge::SetCloseRequestHandler(CloseRequestHandler handler) {
   core_->SetCloseRequestHandler(std::move(handler));
+}
+void EngineBridge::SetWindowChromeHandler(WindowChromeHandler handler) {
+  core_->SetWindowChromeHandler(std::move(handler));
 }

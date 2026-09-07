@@ -57,6 +57,9 @@ pub export fn hitchhiker_next_event(buffer: ?[*]u8, capacity: usize) usize {
 pub export fn hitchhiker_sync_viewports(app: ?*anyopaque) usize {
     return runtime_surface.syncViewports(app);
 }
+pub export fn hitchhiker_drag_regions(app: ?*anyopaque, buffer: ?[*]runtime_surface.DragRegion, capacity: usize) usize {
+    return runtime_surface.dragRegions(app, buffer, capacity);
+}
 
 pub export fn hitchhiker_after_frame() void {
     runtime_surface.afterFrame();

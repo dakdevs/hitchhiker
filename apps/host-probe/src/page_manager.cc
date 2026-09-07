@@ -213,6 +213,10 @@ class PageWindowDelegate : public CefWindowDelegate {
   bool WithStandardWindowButtons(CefRefPtr<CefWindow> window) override {
     return false;
   }
+  bool GetTitlebarHeight(CefRefPtr<CefWindow>, float* height) override {
+    *height = 0;
+    return true;
+  }
   cef_state_t AcceptsFirstMouse(CefRefPtr<CefWindow> window) override {
     // Split view pages should receive the click that activates their child
     // window instead of requiring a second click.

@@ -69,11 +69,13 @@ const Kind = enum {
     stack,
     text,
     button,
+    @"list-item",
     input,
     scroll,
     spacer,
     icon,
     viewport,
+    @"drag-region",
 };
 
 /// Protocol strings are intentionally wrapped instead of using `[]const u8`
@@ -185,6 +187,9 @@ const WireNode = struct {
     action: ?WireString = null,
     placeholder: ?WireString = null,
     icon: ?WireString = null,
+    iconOnly: bool = false,
+    accessibilityLabel: ?WireString = null,
+    variant: ?enum { ghost, secondary } = null,
     viewportId: ?WireString = null,
     children: []const WireNode = &.{},
     width: ?WireNumber = null,
@@ -347,6 +352,11 @@ fn validateNode(node: *const WireNode, depth: usize, count: *usize, seen: *[max_
     try validateDisplayString(node.label);
     try validateDisplayString(node.value);
     try validateDisplayString(node.placeholder);
+    try validateDisplayString(node.accessibilityLabel);
+    if (node.accessibilityLabel) |label| {
+        if (node.kind != .button or std.mem.trim(u8, label.value, " \t\r\n").len == 0) return error.InvalidString;
+    }
+    if (node.variant != null and node.kind != .button) return error.InvalidString;
     if (node.action) |action| {
         if (action.value.len > 256 or !std.unicode.utf8ValidateSlice(action.value)) return error.InvalidString;
     }
@@ -354,6 +364,8 @@ fn validateNode(node: *const WireNode, depth: usize, count: *usize, seen: *[max_
         if (!isLucideProtocolIcon(icon.value)) return error.InvalidIcon;
     }
     if (node.kind == .icon and node.icon == null) return error.InvalidIcon;
+    if (node.iconOnly and (node.kind != .button or node.icon == null or
+        node.label == null or node.label.?.value.len == 0)) return error.InvalidIcon;
     if (node.kind == .viewport) {
         const viewport_id = (node.viewportId orelse return error.InvalidViewport).value;
         if (viewport_id.len == 0 or viewport_id.len > 128 or !std.unicode.utf8ValidateSlice(viewport_id)) return error.InvalidViewport;
@@ -439,12 +451,22 @@ fn buildNode(ui: *Ui, node: *const WireNode, slot: *usize) Ui.Node {
         .stack => ui.stack(options, children),
         .scroll => ui.scroll(options, children),
         .text => ui.text(options, stringValue(node.label) orelse stringValue(node.value) orelse ""),
-        .button => blk: {
+        .button, .@"list-item" => blk: {
             if (node.action != null) options.on_press = .{ .runtime_press = .{
                 .revision = active_revision,
                 .slot = @intCast(node_slot),
             } };
-            break :blk ui.button(options, stringValue(node.label) orelse "");
+            if (node.iconOnly) {
+                options.semantics = .{ .label = stringValue(node.accessibilityLabel) orelse node.label.?.value };
+                options.variant = .ghost;
+            }
+            if (node.accessibilityLabel) |label| options.semantics.label = label.value;
+            if (node.variant) |variant| options.variant = switch (variant) {
+                .ghost => .ghost,
+                .secondary => .secondary,
+            };
+            if (node.kind == .@"list-item") break :blk ui.listItem(options, stringValue(node.label) orelse "");
+            break :blk ui.button(options, if (node.iconOnly) "" else stringValue(node.label) orelse "");
         },
         .input => blk: {
             options.text = stringValue(node.value) orelse "";
@@ -461,6 +483,7 @@ fn buildNode(ui: *Ui, node: *const WireNode, slot: *usize) Ui.Node {
         // browser host positions the corresponding CEF page from the
         // emitted semantics bounds; plugin data never supplies CEF rects.
         .viewport => ui.stack(options, .{}),
+        .@"drag-region" => ui.stack(options, .{}),
     };
 }
 
@@ -483,8 +506,8 @@ fn optionsFor(node: *const WireNode) Ui.ElementOptions {
         .icon = stringValue(node.icon) orelse "",
         .size = sizeFor(node.kind, numberValue(node.fontSize)),
         .style = style,
-        .semantics = if (node.kind == .viewport)
-            .{ .role = .group, .label = node.viewportId.?.value }
+        .semantics = if (node.kind == .viewport or node.kind == .@"drag-region")
+            .{ .role = .group, .label = if (node.kind == .viewport) node.viewportId.?.value else "Window drag region" }
         else if (node.label != null and node.kind == .input)
             .{ .label = node.label.?.value }
         else
@@ -619,6 +642,45 @@ pub fn syncViewports(app: ?*anyopaque) usize {
         queued += 1;
     }
     return queued;
+}
+
+pub const DragRegion = extern struct {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    draggable: c_int,
+};
+
+/// Native geometry only. Interactive nodes are appended last to subtract them
+/// even when a custom interface overlaps an empty drag leaf with a control.
+pub fn dragRegions(app: ?*anyopaque, buffer: ?[*]DragRegion, capacity: usize) usize {
+    if (app == null or active_tree == null or buffer == null or capacity < max_nodes) return 0;
+    var count: usize = 0;
+    for ([_]bool{ true, false }) |draggable| {
+        for (active_nodes[0..active_node_count]) |maybe_node| {
+            const node = maybe_node orelse continue;
+            const is_drag = node.kind == .@"drag-region";
+            if (draggable != is_drag) continue;
+            const kind: native_sdk.canvas.WidgetKind = switch (node.kind) {
+                .@"drag-region", .viewport => .stack,
+                .button => .button,
+                .@"list-item" => .list_item,
+                .input => .text_field,
+                else => continue,
+            };
+            var semantics = native_sdk.embed.MobileWidgetSemantics{};
+            const id = native_sdk.canvas.globalWidgetId(kind, native_sdk.canvas.uiKey(node.key.value));
+            if (native_sdk_app_widget_semantics_by_id(app, id, &semantics) != 1) continue;
+            buffer.?[count] = .{
+                .x = semantics.x, .y = semantics.y,
+                .width = semantics.width, .height = semantics.height,
+                .draggable = if (draggable) 1 else 0,
+            };
+            count += 1;
+        }
+    }
+    return count;
 }
 
 fn sameViewport(a: ViewportRect, b: ViewportRect) bool {

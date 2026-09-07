@@ -3,12 +3,16 @@ import {
   button,
   column,
   design,
+  dragRegion,
+  iconButton,
   input,
+  listItem,
   row,
   scroll,
-  spacer,
   text,
   viewport,
+  windowChrome,
+  windowControls,
   type NativeNode,
   type Surface,
 } from "@hitchhiker/ui";
@@ -27,6 +31,7 @@ export type DefaultSurfaceAction =
   | "browser.new-page"
   | "interface.settings"
   | "interface.plugins"
+  | "interface.tabs.toggle"
   | "pages.slice.previous"
   | "pages.slice.next"
   | `page.select:${string}`
@@ -43,6 +48,7 @@ export const defaultSurfaceActions = Object.freeze({
   newPage: "browser.new-page" as const,
   settings: "interface.settings" as const,
   plugins: "interface.plugins" as const,
+  toggleTabs: "interface.tabs.toggle" as const,
   previousSlice: "pages.slice.previous" as const,
   nextSlice: "pages.slice.next" as const,
   selectPage: (pageId: string): DefaultSurfaceAction => `page.select:${pageId}`,
@@ -55,6 +61,8 @@ export interface DefaultSurfaceRenderOptions {
   /** Draft input is controlled by the host broker and submits the public navigate action. */
   readonly addressDraft?: string;
   readonly dark?: boolean;
+  /** Whether page tabs are currently rendered; the host owns this transient presentation state. */
+  readonly tabsVisible?: boolean;
   /** Zero-based page offset; each surface renders no more than thirty page controls. */
   readonly pageOffset?: number;
 }
@@ -94,7 +102,38 @@ const safeOffset = (
   return Math.floor(Math.max(0, selectedIndex) / pageSliceSize) * pageSliceSize;
 };
 
-const tabControls = (
+const pageLabel = (page: BrowserPage): string =>
+  Array.from(page.title || page.url)
+    .slice(0, 100)
+    .join("");
+
+const pageIcon = (page: BrowserPage) =>
+  page.lifecycle === "sleeping" ? "app:lucide-moon" : "app:lucide-globe";
+
+const siteInitials = (url: string): string => {
+  try {
+    const hostname = new URL(url).hostname.replace(/^www\./i, "");
+    const characters = Array.from(hostname.replace(/[^\p{L}\p{N}]/gu, ""));
+    return characters[0]?.toLocaleUpperCase() || "?";
+  } catch {
+    return "?";
+  }
+};
+
+const pageSlice = (
+  pages: readonly BrowserPage[],
+  selectedPageId: string | undefined,
+  options: DefaultSurfaceRenderOptions,
+) => {
+  const offset = safeOffset(
+    options.pageOffset,
+    pages.length,
+    pages.findIndex((page) => page.id === selectedPageId),
+  );
+  return { offset, visible: pages.slice(offset, offset + pageSliceSize) };
+};
+
+const topTabControls = (
   pages: readonly BrowserPage[],
   pinnedPageIds: readonly string[],
   selectedPageId: string | undefined,
@@ -102,12 +141,7 @@ const tabControls = (
   colors: Palette,
   placement: DefaultInterfaceConfiguration["tabPlacement"],
 ): readonly NativeNode[] => {
-  const offset = safeOffset(
-    options.pageOffset,
-    pages.length,
-    pages.findIndex((page) => page.id === selectedPageId),
-  );
-  const visible = pages.slice(offset, offset + pageSliceSize);
+  const { offset, visible } = pageSlice(pages, selectedPageId, options);
   const pinned = new Set(pinnedPageIds);
   const controls: NativeNode[] = [];
   if (offset > 0)
@@ -127,16 +161,14 @@ const tabControls = (
         [
           button(
             `page-select-${page.id}`,
-            Array.from(page.title || page.url)
-              .slice(0, 100)
-              .join(""),
+            pageLabel(page),
             defaultSurfaceActions.selectPage(page.id),
             {
               flex: 1,
               fg: selected ? colors.foreground : colors.muted,
               bg: selected ? colors.selected : undefined,
               radius: design.radius.control,
-              icon: page.lifecycle === "sleeping" ? "app:lucide-moon" : "app:lucide-globe",
+              icon: pageIcon(page),
             },
           ),
           button(
@@ -176,48 +208,257 @@ const tabControls = (
   return controls;
 };
 
-const toolbar = (address: string, colors: Palette): NativeNode =>
+const sidebarTabControls = (
+  pages: readonly BrowserPage[],
+  pinnedPageIds: readonly string[],
+  selectedPageId: string | undefined,
+  options: DefaultSurfaceRenderOptions,
+  colors: Palette,
+): readonly NativeNode[] => {
+  const { offset, visible } = pageSlice(pages, selectedPageId, options);
+  const pinned = new Set(pinnedPageIds);
+  const pinnedPages = visible.filter((page) => pinned.has(page.id));
+  const regularPages = visible.filter((page) => !pinned.has(page.id));
+  const controls: NativeNode[] = [];
+  if (offset > 0)
+    controls.push(
+      iconButton(
+        "pages-slice-previous",
+        "Previous pages",
+        defaultSurfaceActions.previousSlice,
+        "chevron-down",
+        { ...compactControlStyle(colors), width: 32 },
+      ),
+    );
+  if (pinnedPages.length > 0) {
+    const rows: NativeNode[] = [];
+    for (let index = 0; index < pinnedPages.length; index += 6) {
+      rows.push(
+        row(
+          `pinned-page-row-${index / 6}`,
+          pinnedPages.slice(index, index + 6).map((page) => {
+            const selected = page.id === selectedPageId;
+            return button(
+              `page-select-${page.id}`,
+              siteInitials(page.url),
+              defaultSurfaceActions.selectPage(page.id),
+              {
+                width: 40,
+                height: 38,
+                padding: 4,
+                bg: selected ? colors.selected : undefined,
+                fg: selected ? colors.foreground : colors.muted,
+                radius: design.radius.panel,
+                accessibilityLabel: pageLabel(page),
+                variant: "secondary",
+              },
+            );
+          }),
+          { gap: design.spacing.compact },
+        ),
+      );
+    }
+    controls.push(column("pinned-pages", rows, { gap: design.spacing.compact }));
+    const selectedPinned = pinnedPages.find((page) => page.id === selectedPageId);
+    if (selectedPinned)
+      controls.push(
+        row(
+          `pinned-page-detail-${selectedPinned.id}`,
+          [
+            listItem(
+              `page-select-${selectedPinned.id}-detail`,
+              pageLabel(selectedPinned),
+              defaultSurfaceActions.selectPage(selectedPinned.id),
+              {
+                flex: 1,
+                height: 32,
+                icon: pageIcon(selectedPinned),
+                bg: colors.selected,
+                fg: colors.foreground,
+                radius: design.radius.control,
+              },
+            ),
+            iconButton(
+              `page-pin-${selectedPinned.id}`,
+              "Unpin",
+              defaultSurfaceActions.unpinPage(selectedPinned.id),
+              "pin",
+              compactControlStyle(colors),
+            ),
+            iconButton(
+              `page-close-${selectedPinned.id}`,
+              "Close",
+              defaultSurfaceActions.closePage(selectedPinned.id),
+              "x",
+              compactControlStyle(colors),
+            ),
+          ],
+          {
+            height: 32,
+            gap: design.spacing.compact,
+            bg: colors.selected,
+            radius: design.radius.control,
+          },
+        ),
+      );
+  }
+  for (const page of regularPages) {
+    const selected = page.id === selectedPageId;
+    controls.push(
+      row(
+        `page-${page.id}`,
+        [
+          listItem(
+            `page-select-${page.id}`,
+            pageLabel(page),
+            defaultSurfaceActions.selectPage(page.id),
+            {
+              flex: 1,
+              height: 32,
+              icon: pageIcon(page),
+              bg: selected ? colors.selected : undefined,
+              fg: selected ? colors.foreground : colors.muted,
+              radius: design.radius.control,
+            },
+          ),
+          ...(selected
+            ? [
+                iconButton(
+                  `page-pin-${page.id}`,
+                  "Pin",
+                  defaultSurfaceActions.pinPage(page.id),
+                  "pin",
+                  compactControlStyle(colors),
+                ),
+                iconButton(
+                  `page-close-${page.id}`,
+                  "Close",
+                  defaultSurfaceActions.closePage(page.id),
+                  "x",
+                  compactControlStyle(colors),
+                ),
+              ]
+            : []),
+        ],
+        {
+          height: 32,
+          gap: design.spacing.compact,
+          bg: selected ? colors.selected : undefined,
+          radius: design.radius.control,
+        },
+      ),
+    );
+  }
+  if (offset + pageSliceSize < pages.length)
+    controls.push(
+      iconButton(
+        "pages-slice-next",
+        "Next pages",
+        defaultSurfaceActions.nextSlice,
+        "chevron-down",
+        { ...compactControlStyle(colors), width: 32 },
+      ),
+    );
+  controls.push(
+    listItem("sidebar-new-page", "New Tab", defaultSurfaceActions.newPage, {
+      height: 32,
+      icon: "app:lucide-plus",
+      fg: colors.muted,
+      radius: design.radius.control,
+    }),
+  );
+  return controls;
+};
+
+const compactControlStyle = (colors: Palette, height = 28) => ({
+  width: 28,
+  height,
+  fg: colors.muted,
+  radius: design.radius.control,
+});
+
+const compactHeaderControls = (
+  colors: Palette,
+  includeFlexibleDragRegion: boolean,
+): readonly NativeNode[] => [
+  windowControls("window-controls"),
+  iconButton(
+    "sidebar-toggle",
+    "Toggle tabs",
+    defaultSurfaceActions.toggleTabs,
+    "panel-left",
+    compactControlStyle(colors, windowChrome.height),
+  ),
+  iconButton(
+    "back",
+    "Back",
+    defaultSurfaceActions.back,
+    "arrow-left",
+    compactControlStyle(colors, windowChrome.height),
+  ),
+  iconButton(
+    "forward",
+    "Forward",
+    defaultSurfaceActions.forward,
+    "arrow-right",
+    compactControlStyle(colors, windowChrome.height),
+  ),
+  dragRegion("window-drag-region", {
+    height: windowChrome.height,
+    ...(includeFlexibleDragRegion ? {} : { width: 44, flex: 0 }),
+  }),
+];
+
+const toolbar = (address: string, colors: Palette, fillWidth = false): NativeNode =>
   row(
     "toolbar",
     [
-      button("back", "Back", defaultSurfaceActions.back, {
-        icon: "app:lucide-arrow-left",
-        fg: colors.muted,
-      }),
-      button("forward", "Forward", defaultSurfaceActions.forward, {
-        icon: "app:lucide-arrow-right",
-        fg: colors.muted,
-      }),
-      button("reload", "Reload", defaultSurfaceActions.reload, {
-        icon: "app:lucide-rotate-cw",
-        fg: colors.muted,
-      }),
+      iconButton(
+        "reload",
+        "Reload",
+        defaultSurfaceActions.reload,
+        "rotate-cw",
+        compactControlStyle(colors),
+      ),
       input("address", "Address", address, {
         flex: 1,
+        height: 28,
         action: defaultSurfaceActions.navigate,
         placeholder: "Search or enter an address",
         bg: colors.sidebar,
         fg: colors.foreground,
         radius: design.radius.control,
       }),
-      button("navigate", "Navigate", defaultSurfaceActions.navigate, {
-        icon: "app:lucide-search",
+      iconButton("navigate", "Navigate", defaultSurfaceActions.navigate, "search", {
+        ...compactControlStyle(colors),
         fg: colors.foreground,
       }),
-      button("new-page", "New page", defaultSurfaceActions.newPage, {
-        icon: "app:lucide-plus",
+      iconButton("new-page", "New page", defaultSurfaceActions.newPage, "plus", {
+        ...compactControlStyle(colors),
         fg: colors.foreground,
       }),
-      button("plugins", "Plugins", defaultSurfaceActions.plugins, {
-        icon: "app:lucide-puzzle",
-        fg: colors.muted,
-      }),
-      button("settings", "Settings", defaultSurfaceActions.settings, {
-        icon: "app:lucide-settings",
-        fg: colors.muted,
-      }),
+      iconButton(
+        "plugins",
+        "Plugins",
+        defaultSurfaceActions.plugins,
+        "puzzle",
+        compactControlStyle(colors),
+      ),
+      iconButton(
+        "settings",
+        "Settings",
+        defaultSurfaceActions.settings,
+        "settings",
+        compactControlStyle(colors),
+      ),
     ],
-    { padding: design.spacing.control, gap: design.spacing.compact, bg: colors.canvas },
+    {
+      ...(fillWidth ? { flex: 1 } : {}),
+      height: windowChrome.height,
+      padding: design.spacing.compact,
+      gap: design.spacing.compact,
+      bg: colors.canvas,
+    },
   );
 
 /** Renders the complete Native shell for one interface instance without changing browser state. */
@@ -228,19 +469,24 @@ export const renderDefaultSurface = (
   options: DefaultSurfaceRenderOptions = {},
 ): Surface => {
   const colors = options.dark ? design.dark : design.light;
+  const tabsVisible = options.tabsVisible ?? true;
   const pages = orderedPages(browser, state);
   const selectedPage = pages.find((page) => page.id === state.selectedPageId);
-  const tabs = tabControls(
-    pages,
-    state.pinnedPageIds,
-    selectedPage?.id,
-    options,
-    colors,
-    configuration.tabPlacement,
-  );
+  const tabs = tabsVisible
+    ? configuration.tabPlacement === "sidebar"
+      ? sidebarTabControls(pages, state.pinnedPageIds, selectedPage?.id, options, colors)
+      : topTabControls(
+          pages,
+          state.pinnedPageIds,
+          selectedPage?.id,
+          options,
+          colors,
+          configuration.tabPlacement,
+        )
+    : [];
   const pageList =
     configuration.tabPlacement === "sidebar"
-      ? scroll("pages", tabs, {
+      ? scroll("pages", [column("sidebar-page-list", tabs, { gap: design.spacing.compact })], {
           flex: 1,
           gap: design.spacing.compact,
           padding: design.spacing.control,
@@ -274,30 +520,46 @@ export const renderDefaultSurface = (
       );
   const controls = toolbar(options.addressDraft ?? selectedPage?.url ?? "", colors);
   const root =
-    configuration.tabPlacement === "sidebar"
+    configuration.tabPlacement === "sidebar" && tabsVisible
       ? row(
           "default-surface",
           [
             column(
               "sidebar",
               [
-                row(
-                  "sidebar-header",
-                  [
-                    text("brand", "Hitchhiker", { fg: colors.foreground, fontSize: 16 }),
-                    spacer("brand-space"),
-                  ],
-                  { padding: design.spacing.panel, bg: colors.sidebar },
-                ),
+                row("sidebar-header", compactHeaderControls(colors, true), {
+                  height: windowChrome.height,
+                  gap: design.spacing.compact,
+                  bg: colors.sidebar,
+                }),
                 pageList,
               ],
-              { width: 248, bg: colors.sidebar },
+              { width: 280, bg: colors.sidebar },
             ),
             column("main", [controls, content], { flex: 1, bg: colors.canvas }),
           ],
           { bg: colors.canvas },
         )
-      : column("default-surface", [pageList, controls, content], { flex: 1, bg: colors.canvas });
+      : column(
+          "default-surface",
+          [
+            row(
+              "window-header",
+              [
+                ...compactHeaderControls(colors, false),
+                toolbar(options.addressDraft ?? selectedPage?.url ?? "", colors, true),
+              ],
+              {
+                height: windowChrome.height,
+                gap: design.spacing.compact,
+                bg: colors.canvas,
+              },
+            ),
+            ...(tabsVisible && configuration.tabPlacement === "top" ? [pageList] : []),
+            content,
+          ],
+          { flex: 1, bg: colors.canvas },
+        );
   return Object.freeze({
     root,
     bindings: selectedPage

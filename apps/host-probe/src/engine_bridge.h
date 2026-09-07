@@ -27,6 +27,7 @@ class EngineBridge : public CefBaseRefCounted {
   // windows, popups, and beforeunload cancellation. The bridge must not call
   // CefWindow::Close directly for a control-plane shutdown request.
   using CloseRequestHandler = std::function<void()>;
+  using WindowChromeHandler = std::function<CefRefPtr<CefDictionaryValue>()>;
 
   static CefRefPtr<EngineBridge> Create(CefRefPtr<PageManager> manager,
                                         CefRefPtr<CefWindow> root_window);
@@ -43,6 +44,7 @@ class EngineBridge : public CefBaseRefCounted {
                  CefRefPtr<CefDictionaryValue> params);
   void SetUiCommitHandler(UiCommitHandler handler);
   void SetCloseRequestHandler(CloseRequestHandler handler);
+  void SetWindowChromeHandler(WindowChromeHandler handler);
 
  private:
   class Core;

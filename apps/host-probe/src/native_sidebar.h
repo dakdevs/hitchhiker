@@ -4,6 +4,7 @@
 #include <functional>
 #include <string>
 #include "include/views/cef_window.h"
+#include "include/cef_values.h"
 enum class NativeCommand { kShowOne = 1, kShowTwo = 2, kSplit = 3 };
 using NativeCommandSink = std::function<void(NativeCommand)>;
 using NativeEventSink = std::function<void(const std::string& json)>;
@@ -17,3 +18,4 @@ bool CommitNativeTree(void* sidebar, const char* json, size_t length,
                       uint64_t revision);
 void DestroyNativeSidebar(void* sidebar);
 void NotifyNativeState(void* sidebar, const char* command);
+CefRefPtr<CefDictionaryValue> ReadNativeWindowChrome(void* sidebar);

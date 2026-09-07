@@ -156,8 +156,18 @@ export const nativeUiGuide: readonly GuideSection[] = [
         ["scroll(key, children, style)", "Scrollable native content"],
         ["text(key, label, style)", "Text using native typography tokens"],
         ["button(key, label, action, style)", "Action control; style can include a Lucide icon"],
+        [
+          "listItem(key, label, action, style)",
+          "Compact, left-aligned action row with an optional leading icon",
+        ],
         ["input(key, label, value, style)", "Text input; style can include placeholder and action"],
         ["icon(key, name, style)", "An embedded Lucide icon"],
+        [
+          "iconButton(key, label, action, name, style)",
+          "Icon-only control with a required semantic label",
+        ],
+        ["windowControls(key)", "Reserves 80 × 36 points for macOS traffic lights"],
+        ["dragRegion(key, style)", "Empty, measured space that starts native window dragging"],
         ["spacer(key, flex)", "Flexible empty space; flex defaults to 1"],
         ["viewport(key, viewportId, style)", "A slot for a bound Chromium page"],
       ],
@@ -179,6 +189,24 @@ const control = button("new", "New page", "new-page", {
   bg: design.light.sidebar,
   fg: design.light.foreground,
 });`,
+  },
+  {
+    id: "window-header",
+    title: "Build your own window header",
+    paragraphs: [
+      "Buttons also accept ghost or secondary variants and an accessibilityLabel for abbreviated visible text. The default pinned tiles use site initials as a fallback; real page favicons are not yet supplied by the host.",
+      "The macOS shell draws into the full window. Reserve its real close, minimize, and fullscreen buttons with windowControls at the top-left; do not draw substitute traffic lights. windowChrome exports the 36-point header height and 80-point controls width.",
+      "Place iconButton controls and an empty dragRegion beside that reserve. Give the drag region a height and enough width to grab. Native measures its bounds and excludes buttons, inputs, Chromium viewports, and visible system buttons. A drag region cannot contain children. Your plugin chooses the actions, page organization, and remaining layout.",
+    ],
+    code: `import { dragRegion, iconButton, row, windowChrome, windowControls } from "@hitchhiker/ui";
+
+const header = row("header", [
+  windowControls("system-buttons"),
+  iconButton("organize", "Show pages", "pages.show", "panel-left", {
+    width: 28, height: windowChrome.height,
+  }),
+  dragRegion("move-window", { height: windowChrome.height }),
+], { height: windowChrome.height, gap: 4 });`,
   },
   {
     id: "surface-limits",

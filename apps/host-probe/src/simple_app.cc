@@ -57,6 +57,7 @@ class ShellWindowDelegate : public CefWindowDelegate {
     }
     window->Show();
     if (bridge_) {
+      bridge_->SetWindowChromeHandler([this] { return ReadNativeWindowChrome(sidebar_); });
       bridge_->SetCloseRequestHandler([this] { RequestCloseFromBridge(); });
       bridge_->SetUiCommitHandler([this](CefRefPtr<CefDictionaryValue> params,
                                         std::string* error) {
@@ -211,6 +212,12 @@ class ShellWindowDelegate : public CefWindowDelegate {
   CefSize GetPreferredSize(CefRefPtr<CefView>) override { return CefSize(1100, 720); }
   CefSize GetMinimumSize(CefRefPtr<CefView>) override { return CefSize(760, 480); }
   cef_runtime_style_t GetWindowRuntimeStyle() override { return CEF_RUNTIME_STYLE_CHROME; }
+  bool IsFrameless(CefRefPtr<CefWindow>) override { return true; }
+  bool WithStandardWindowButtons(CefRefPtr<CefWindow>) override { return true; }
+  bool GetTitlebarHeight(CefRefPtr<CefWindow>, float* height) override {
+    *height = 36;
+    return true;
+  }
  private:
   CefRefPtr<SimpleHandler> handler_;
   CefRefPtr<CefWindow> root_;

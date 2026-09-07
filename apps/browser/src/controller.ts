@@ -30,10 +30,14 @@ import {
 import {
   button,
   column,
+  design,
+  dragRegion,
   reduceNativeTextInput,
   row,
   scroll,
   text,
+  windowChrome,
+  windowControls,
   type NativeTextInputEvent,
   type NativeTextInputState,
   type Surface,
@@ -120,6 +124,7 @@ interface ControllerState {
   browser: BrowserState;
   interfaceState: DefaultInterfaceState;
   interfaceConfiguration: DefaultInterfaceConfiguration;
+  tabsVisible?: boolean;
   configuration: BrowserConfiguration;
   input: NativeTextInputState;
   inputDirty: boolean;
@@ -179,14 +184,23 @@ export interface BrowserControllerOptions {
 const now = () => Date.now();
 const pageId = () => `p${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`;
 
-const asPersistence = (state: ControllerState): BrowserPersistence => ({
-  configuration: state.configuration,
-  interfaceConfiguration: state.interfaceConfiguration,
-  interfaceState: state.interfaceState,
-  pages: state.browser.pages
+const asPersistence = (state: ControllerState): BrowserPersistence => {
+  const pages = state.browser.pages
     .filter((page) => page.lifecycle !== "closed")
-    .map((page) => ({ id: page.id, url: page.url, title: page.title })),
-});
+    .map((page) => ({ id: page.id, url: page.url, title: page.title }));
+  const livePageIds = new Set(pages.map((page) => page.id));
+  return {
+    configuration: state.configuration,
+    interfaceConfiguration: state.interfaceConfiguration,
+    interfaceState: state.interfaceState,
+    pages: [
+      ...pages,
+      ...[...state.opening.values()]
+        .filter((page) => !livePageIds.has(page.id))
+        .map((page) => ({ id: page.id, url: page.url, title: page.title })),
+    ],
+  };
+};
 
 const selected = (state: ControllerState) =>
   state.browser.pages.find(
@@ -321,9 +335,32 @@ const render = (
   pluginStatus?: string,
   extensions?: ExtensionControlsState,
 ): Surface => {
-  if (state.screen === "extensions" && extensions) return renderExtensionControls(extensions);
-  if (state.screen === "settings") return renderSettings(state);
-  if (state.screen === "plugins") return renderPlugins(plugins, pluginStatus);
+  const header = (surface: Surface): Surface => ({
+    ...surface,
+    root: column(
+      "trusted-screen",
+      [
+        row(
+          "window-header",
+          [
+            windowControls("window-controls"),
+            dragRegion("window-drag-region", { flex: 1, height: windowChrome.height }),
+          ],
+          {
+            height: windowChrome.height,
+            bg:
+              state.configuration.colorScheme === "dark" ? design.dark.canvas : design.light.canvas,
+          },
+        ),
+        surface.root,
+      ],
+      { flex: 1 },
+    ),
+  });
+  if (state.screen === "extensions" && extensions)
+    return header(renderExtensionControls(extensions));
+  if (state.screen === "settings") return header(renderSettings(state));
+  if (state.screen === "plugins") return header(renderPlugins(plugins, pluginStatus));
   const interfaceState = state.newPage
     ? { ...state.interfaceState, selectedPageId: undefined }
     : state.interfaceState;
@@ -331,6 +368,7 @@ const render = (
     addressDraft: state.input.text,
     dark: state.configuration.colorScheme === "dark",
     pageOffset: state.pageOffset,
+    tabsVisible: state.tabsVisible,
   });
 };
 
@@ -383,6 +421,7 @@ export const makeBrowserController = (
       | ((operation: PluginManagementAction, id: string) => Effect.Effect<void, unknown>)
       | undefined;
     let restoring = false;
+    let closeCancellationGeneration = 0;
     let closingPersistence: BrowserPersistence | undefined;
     let pluginSurface: unknown;
     let pluginBindings: Surface["bindings"] = [];
@@ -511,13 +550,19 @@ export const makeBrowserController = (
     });
     const change = (
       operation: () => Effect.Effect<void, EngineError>,
-      persistChange = false,
+      persistChange: boolean | (() => boolean) = false,
       shouldRender: () => boolean = () => true,
     ) =>
       lock.withPermit(
         Effect.suspend(() =>
           operation().pipe(
-            Effect.andThen(persistChange ? persist() : Effect.void),
+            Effect.andThen(
+              Effect.suspend(() =>
+                (typeof persistChange === "function" ? persistChange() : persistChange)
+                  ? persist()
+                  : Effect.void,
+              ),
+            ),
             Effect.andThen(Effect.suspend(() => (shouldRender() ? commit() : Effect.void))),
           ),
         ),
@@ -559,6 +604,10 @@ export const makeBrowserController = (
         () =>
           Effect.gen(function* () {
             const page = selected(state);
+            if (action === "interface.tabs.toggle") {
+              state = { ...state, tabsVisible: state.tabsVisible === false };
+              return;
+            }
             if (action === "browser.navigate") return yield* navigate();
             if (action === "browser.new-page") {
               state = {
@@ -1048,6 +1097,7 @@ export const makeBrowserController = (
               // Some pages can finish closing before another cancels its prompt.
               // Resume persistence from the actual survivors; late closes are normal.
               closingPersistence = undefined;
+              closeCancellationGeneration += 1;
               yield* persist();
               yield* commit();
             }),
@@ -1160,21 +1210,23 @@ export const makeBrowserController = (
                     const opening = new Map(state.opening);
                     opening.delete(id);
                     if (restoring && opening.size === 0) restoring = false;
+                    const selectedPageId = state.interfaceState.selectedPageId ?? id;
                     state = {
                       ...state,
                       browser: replacePage(opened.value, id, { protections: UnknownProtections }),
                       opening,
                       interfaceState: {
                         ...state.interfaceState,
-                        selectedPageId: state.interfaceState.selectedPageId ?? id,
+                        selectedPageId,
                         pageOrder: Object.freeze(
                           state.interfaceState.pageOrder.includes(id)
                             ? state.interfaceState.pageOrder
                             : [...state.interfaceState.pageOrder, id],
                         ),
                       },
-                      input: { ...InitialInput, text: metadata.url },
-                      inputDirty: false,
+                      ...(selectedPageId === id
+                        ? { input: { ...InitialInput, text: metadata.url }, inputDirty: false }
+                        : {}),
                     };
                   } else if (
                     lifecycle.event === "pages.closed" &&
@@ -1316,8 +1368,8 @@ export const makeBrowserController = (
                       };
                   }
                 }),
-              true,
               () => !restoring,
+              () => !restoring && closingPersistence === undefined,
             ),
           ),
           Effect.mapError(
@@ -1390,21 +1442,54 @@ export const makeBrowserController = (
           (error) => new EngineError({ code: "persistence", message: error.message }),
         ),
       );
+      const restorePages = persisted?.pages ?? [];
       yield* lock.withPermit(
         Effect.sync(() => {
+          restoring = restorePages.length > 0;
           if (persisted)
             state = {
               ...state,
               configuration: persisted.configuration,
               interfaceConfiguration: persisted.interfaceConfiguration,
               interfaceState: persisted.interfaceState,
+              opening: new Map(restorePages.map((page) => [page.id, page])),
+              newPage: false,
+              screen: "browser",
             };
-        }).pipe(Effect.andThen(commit())),
+        }).pipe(Effect.andThen(Effect.suspend(() => (restoring ? Effect.void : commit())))),
       );
-      restoring = persisted !== undefined && persisted.pages.length > 0;
-      if (persisted)
-        for (const page of persisted.pages)
-          yield* lock.withPermit(open(page.url, page.id, page.title));
+      // Metadata is already staged. Lifecycle consumers must be able to acquire
+      // the model lock while the host is replying to restore requests.
+      for (const page of restorePages) {
+        while (true) {
+          const cancellationGeneration = closeCancellationGeneration;
+          const result = yield* engine.request("pages.open", { id: page.id, url: page.url }).pipe(
+            Effect.as("opened" as const),
+            Effect.catch((error) => {
+              if (error.code !== "-32003") return Effect.fail(error);
+              // This specific rejection guarantees no page was created. Wait
+              // for a canceled close before retrying the same staged page.
+              const canceled = Effect.gen(function* () {
+                while (closeCancellationGeneration === cancellationGeneration)
+                  yield* Effect.sleep(25);
+                return "retry" as const;
+              });
+              const exited = engine.exit.pipe(
+                Effect.flatMap((code) =>
+                  code === 0
+                    ? Effect.succeed("closed" as const)
+                    : Effect.fail(
+                        new EngineError({ code: "exit", message: "Host exited during restore" }),
+                      ),
+                ),
+              );
+              return Effect.raceFirst(canceled, exited);
+            }),
+          );
+          if (result === "closed") return;
+          if (result === "opened") break;
+        }
+      }
     });
 
     yield* lock

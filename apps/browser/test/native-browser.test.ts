@@ -105,8 +105,22 @@ test(
               const raw = yield* engine.claimRawCdp;
               yield* raw.send({ id: 1, method: "Browser.getVersion" });
               yield* controller.start;
-              yield* waitFor("both restored pages", () =>
-                controller.snapshot.pipe(Effect.map((state) => state.pages.length === 2)),
+              yield* waitFor("both restored page titles", () =>
+                controller.snapshot.pipe(
+                  Effect.map(
+                    (state) =>
+                      state.pages.find((page) => page.id === "first")?.title === "First fixture" &&
+                      state.pages.find((page) => page.id === "second")?.title === "Second fixture",
+                  ),
+                ),
+              );
+              yield* waitFor("both restored documents", () =>
+                Effect.gen(function* () {
+                  return (
+                    (yield* evaluate("first", "document.title")) === "First fixture" &&
+                    (yield* evaluate("second", "document.title")) === "Second fixture"
+                  );
+                }),
               );
               const restored = yield* controller.snapshot;
               assert.equal(restored.pages.length, 2, JSON.stringify(restored));
