@@ -332,3 +332,14 @@ Worker identity research found that the trusted native client already receives t
 generation and samples physical footprint. Those identifiers currently remain private to the native
 client. A future diagnostic boundary must preserve that trusted provenance rather than accepting
 worker-supplied identity or collecting unrelated processes by executable name.
+
+Full-process restoration now passes for sidebar and top presentation: after closing Chromium and
+the complete runtime scope, a fresh engine/controller/manager restores the same profile, six exact
+workers, selected page, URLs, and pin state. Old JavaScript globals are absent, proving these are
+freshly loaded documents rather than the still-running engine from the manager-only test. Both
+cases pass (`work/default-full-restart-native.log`), and process inspection finds no remaining
+Native host or plugin workers afterward. These remain direct Native harness runs with disposable
+Keychains; packaged application-entrypoint and production Keychain acceptance are separate.
+
+The next resource work follows the [trusted diagnostics design](WORKER-DIAGNOSTICS-PLAN.md), which
+keeps authoritative worker identity and sampling outside plugin-accessible events and APIs.

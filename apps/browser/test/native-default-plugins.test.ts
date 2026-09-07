@@ -70,6 +70,7 @@ for (const placement of ["sidebar", "top"] as const)
             code: await readFile(new URL(`${id}/plugin.js`, artifactsRoot), "utf8"),
           })),
         );
+        const ids: string[] = [];
         await Effect.runPromise(
           Effect.gen(function* () {
             const engine = yield* EngineConnection;
@@ -93,7 +94,6 @@ for (const placement of ["sidebar", "top"] as const)
               directory: join(profile, "hitchhiker-grants"),
             });
             yield* controller.start;
-            const ids: string[] = [];
             const evaluate = (pageId: string, expression: string) =>
               engine
                 .request("cdp.send", {
@@ -397,6 +397,112 @@ for (const placement of ["sidebar", "top"] as const)
             assert.equal(yield* controller.lastError, undefined);
             yield* engine.request("window.close");
             assert.equal(yield* engine.exit.pipe(Effect.timeout(10000)), 0);
+          }).pipe(
+            Effect.provide(
+              Layer.provideMerge(
+                NativeSurface.layer,
+                EngineConnection.layer({
+                  executable: binary!,
+                  profileRoot: profile,
+                  extensionManagement: false,
+                }),
+              ),
+            ),
+            Effect.scoped,
+            Effect.provide(NodeServices.layer),
+          ),
+        );
+        // Acquire a fresh engine layer only after the first process and its scope have exited.
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const engine = yield* EngineConnection;
+            yield* engine.ready;
+            const controller = yield* makeBrowserController(profile, { freezeEnabled: false });
+            yield* controller.start;
+            const grants = yield* createGrantStore({
+              directory: join(profile, "hitchhiker-grants"),
+            });
+            let failedRecovery = false;
+            const onRecoveryFailure = Effect.sync(() => {
+              failedRecovery = true;
+            });
+            const composition = yield* createBrowserComposition({
+              recipe: undefined,
+              controller,
+              onRecoveryFailure,
+            });
+            const launch = yield* createInstalledPluginLauncher({
+              executable: pluginHost!,
+              grants,
+              controller,
+              composition,
+              onRecoveryFailure,
+            });
+            const manager = yield* createPluginManager({
+              profileRoot: profile,
+              grants,
+              launch,
+              composition,
+              onRecoveryFailure,
+            });
+            yield* manager.restore();
+            yield* controller.snapshot.pipe(
+              Effect.filterOrFail(
+                (state) => state.viewports.length === 1 && state.viewports[0]?.pageId === ids[1],
+                () => new Error("Fresh Chromium process did not restore the selected viewport"),
+              ),
+              Effect.retry({ times: 160, schedule: Schedule.spaced(25) }),
+            );
+            const expected = [
+              "default-tab-model",
+              "default-tab-pins",
+              "default-browser-layout",
+              presenter,
+              "default-devtools",
+              "default-extension-management",
+            ].sort();
+            assert.deepEqual(
+              (yield* manager.list())
+                .filter((item) => item.running)
+                .map((item) => item.id)
+                .sort(),
+              expected,
+            );
+            for (const [position, pageId] of ids.entries()) {
+              const name = position === 0 ? "first" : "second";
+              yield* engine
+                .request("cdp.send", {
+                  pageId,
+                  method: "Runtime.evaluate",
+                  params: {
+                    expression:
+                      "document.readyState === 'complete' ? [document.title, typeof globalThis.marker] : null",
+                    returnByValue: true,
+                  },
+                })
+                .pipe(
+                  Effect.flatMap(Schema.decodeUnknownEffect(Value)),
+                  Effect.filterOrFail(
+                    (result) =>
+                      JSON.stringify(result.result.value) ===
+                      JSON.stringify([`Tab /${name}`, "undefined"]),
+                    () => new Error("Restart must load persisted URLs in fresh documents"),
+                  ),
+                  Effect.retry({ times: 160, schedule: Schedule.spaced(25) }),
+                );
+            }
+            const storage = yield* createPluginStorage({ profileRoot: profile });
+            const pins = yield* (yield* storage.forOwner("default-tab-pins")).read();
+            assert.deepEqual(
+              Schema.decodeUnknownSync(
+                Schema.Struct({ pinnedPageIds: Schema.Array(Schema.String) }),
+              )(pins.value).pinnedPageIds,
+              [ids[1]],
+            );
+            assert.equal(failedRecovery, false);
+            assert.equal(yield* controller.lastError, undefined);
+            yield* engine.request("window.close");
+            assert.equal(yield* engine.exit.pipe(Effect.timeout(10_000)), 0);
           }).pipe(
             Effect.provide(
               Layer.provideMerge(
