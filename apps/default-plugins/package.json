@@ -13,7 +13,7 @@
     "@hitchhiker/default-interface": "workspace:0.1.0",
     "@hitchhiker/plugin-sdk": "workspace:0.1.0",
     "@hitchhiker/ui": "workspace:0.1.0",
-    "effect": "4.0.0-beta.107"
+    "effect": "4.0.0-rc.113"
   },
   "devDependencies": {
     "@exodus/schemasafe": "1.3.0",

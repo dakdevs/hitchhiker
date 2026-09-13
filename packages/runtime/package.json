@@ -18,7 +18,7 @@
     "@effect/platform-node": "4.0.0-beta.107",
     "@hitchhiker/core": "workspace:0.1.0",
     "@hitchhiker/ui": "workspace:0.1.0",
-    "effect": "4.0.0-beta.107",
+    "effect": "4.0.0-rc.113",
     "ws": "8.21.3"
   },
   "devDependencies": {
